@@ -26,6 +26,7 @@ export function AutomationView({ onToast }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [allowText, setAllowText] = useState("");
   const [wecomOnline, setWecomOnline] = useState(false);
+  const [wecomError, setWecomError] = useState("");
   const [hookKey, setHookKey] = useState("");
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [triggers, setTriggers] = useState<TriggerView[]>([]);
@@ -36,10 +37,11 @@ export function AutomationView({ onToast }: Props) {
 
   const load = async () => {
     if (tab === "settings" || tab === "hooks") {
-      const r = await api<{ settings: Settings; policies: Policy[]; wecom_online: boolean; hook_key: string }>("/api/super/settings");
+      const r = await api<{ settings: Settings; policies: Policy[]; wecom_online: boolean; wecom_error?: string; hook_key: string }>("/api/super/settings");
       setSettings(r.settings);
       setAllowText((r.settings.wecom_allow_users ?? []).join(", "));
       setWecomOnline(r.wecom_online);
+      setWecomError(r.wecom_error ?? "");
       setPolicies(r.policies ?? []);
       setHookKey(r.hook_key ?? "");
       if (tab === "hooks") {
@@ -60,6 +62,18 @@ export function AutomationView({ onToast }: Props) {
   useEffect(() => {
     void load();
   }, [tab]);
+
+  // Poll WeCom connection status while enabled & connecting so status flips without manual refresh.
+  useEffect(() => {
+    if (tab !== "settings" || !settings?.wecom_enabled || wecomOnline) return;
+    const id = window.setInterval(() => {
+      void api<{ wecom_online: boolean; wecom_error?: string }>("/api/super/settings").then((r) => {
+        setWecomOnline(r.wecom_online);
+        setWecomError(r.wecom_error ?? "");
+      });
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, [tab, settings?.wecom_enabled, wecomOnline]);
 
   const saveSettings = async () => {
     if (!settings) return;
@@ -156,6 +170,7 @@ export function AutomationView({ onToast }: Props) {
               settings={settings}
               allowText={allowText}
               wecomOnline={wecomOnline}
+              wecomError={wecomError}
               onChange={setSettings}
               onAllowChange={setAllowText}
               onSave={saveSettings}

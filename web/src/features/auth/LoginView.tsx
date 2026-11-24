@@ -26,8 +26,8 @@ export function LoginView({ onSuccess }: { onSuccess: () => void }) {
     <div className="h-full flex items-center justify-center p-4 surface-bg">
       <form onSubmit={(e) => void submit(e)} className="w-full max-w-[360px] card-floating rounded-2xl p-6 space-y-4">
         <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-xl border border-hairline flex items-center justify-center">
-            <CorgiMark className="w-5 h-5" />
+          <div className="w-10 h-10 rounded-xl border border-hairline flex items-center justify-center">
+            <CorgiMark className="w-6 h-6" />
           </div>
           <div>
             <h1 className="text-base font-semibold">Corgi</h1>

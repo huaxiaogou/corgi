@@ -60,13 +60,15 @@ type Client struct {
 	handlers Handlers
 	logger   *slog.Logger
 
-	mu        sync.Mutex
-	conn      *websocket.Conn
-	online    atomic.Bool
-	reqSeq    atomic.Uint64
-	lastErr   string
-	pendingMu sync.Mutex
-	pending   map[string]chan wsResp
+	mu             sync.Mutex
+	conn           *websocket.Conn
+	online         atomic.Bool
+	reqSeq         atomic.Uint64
+	lastErr        string
+	lastSingleUser string
+	wake           chan struct{}
+	pendingMu      sync.Mutex
+	pending        map[string]chan wsResp
 }
 
 // NewClient creates a WeCom Smart Bot WebSocket client.
@@ -77,11 +79,18 @@ func NewClient(cfg Config, handlers Handlers, logger *slog.Logger) *Client {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Client{cfg: cfg, handlers: handlers, logger: logger}
+	return &Client{cfg: cfg, handlers: handlers, logger: logger, wake: make(chan struct{}, 1)}
 }
 
 // Online reports whether the WebSocket session is currently subscribed and healthy.
 func (c *Client) Online() bool { return c.online.Load() }
+
+// LastError returns the most recent connection or authentication error, or empty when healthy/disabled.
+func (c *Client) LastError() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastErr
+}
 
 // IsAllowed checks whether userID is permitted to trigger Corgi or resolve actions.
 func (c *Client) IsAllowed(userID string) bool {
@@ -100,12 +109,22 @@ func (c *Client) UpdateConfig(cfg Config) {
 	if strings.TrimSpace(cfg.GatewayURL) == "" {
 		cfg.GatewayURL = DefaultGatewayURL
 	}
+	cfg.BotID = strings.TrimSpace(cfg.BotID)
+	cfg.Secret = strings.TrimSpace(cfg.Secret)
+	cfg.DefaultTo = strings.TrimSpace(cfg.DefaultTo)
 	c.mu.Lock()
 	c.cfg = cfg
+	c.lastErr = ""
 	conn := c.conn
 	c.mu.Unlock()
 	if conn != nil {
 		_ = conn.Close(websocket.StatusNormalClosure, "reconfigure")
+	}
+	if c.wake != nil {
+		select {
+		case c.wake <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -118,9 +137,15 @@ func (c *Client) Run(ctx context.Context) {
 		c.mu.Unlock()
 		if cfg.BotID == "" || cfg.Secret == "" {
 			c.online.Store(false)
+			c.mu.Lock()
+			c.lastErr = ""
+			c.mu.Unlock()
 			select {
 			case <-ctx.Done():
 				return
+			case <-c.wake:
+				backoff = time.Second
+				continue
 			case <-time.After(3 * time.Second):
 				continue
 			}
@@ -132,6 +157,11 @@ func (c *Client) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if err != nil {
+			c.mu.Lock()
+			c.lastErr = err.Error()
+			c.mu.Unlock()
+		}
 		if time.Since(start) > time.Minute {
 			backoff = time.Second
 		}
@@ -139,6 +169,9 @@ func (c *Client) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-c.wake:
+			backoff = time.Second
+			continue
 		case <-time.After(backoff):
 		}
 		if backoff < 30*time.Second {
@@ -150,7 +183,7 @@ func (c *Client) Run(ctx context.Context) {
 func (c *Client) runOnce(ctx context.Context, cfg Config) error {
 	dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(dialCtx, cfg.GatewayURL, nil)
+	conn, _, err := websocket.Dial(dialCtx, cfg.GatewayURL, newWSDialOptions())
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", cfg.GatewayURL, err)
 	}
@@ -180,6 +213,9 @@ func (c *Client) runOnce(ctx context.Context, cfg Config) error {
 	if err := c.writeJSON(ctx, conn, subFrame); err != nil {
 		return fmt.Errorf("send aibot_subscribe: %w", err)
 	}
+	c.mu.Lock()
+	c.lastErr = ""
+	c.mu.Unlock()
 	c.online.Store(true)
 	c.logger.Info("wecom smart bot websocket connected", "bot_id", cfg.BotID)
 
@@ -206,12 +242,18 @@ func (c *Client) runOnce(ctx context.Context, cfg Config) error {
 		if err != nil {
 			return err
 		}
-		c.HandleFrame(ctx, data)
+		if err := c.handleFrameWithErr(ctx, data); err != nil {
+			return err
+		}
 	}
 }
 
 // HandleFrame parses an inbound JSON frame from WeCom and enforces strict sender allowlisting.
 func (c *Client) HandleFrame(ctx context.Context, data []byte) {
+	_ = c.handleFrameWithErr(ctx, data)
+}
+
+func (c *Client) handleFrameWithErr(ctx context.Context, data []byte) error {
 	var env struct {
 		Cmd     string          `json:"cmd"`
 		Headers map[string]any  `json:"headers"`
@@ -220,7 +262,7 @@ func (c *Client) HandleFrame(ctx context.Context, data []byte) {
 		Body    json.RawMessage `json:"body"`
 	}
 	if json.Unmarshal(data, &env) != nil {
-		return
+		return nil
 	}
 	reqID, _ := env.Headers["req_id"].(string)
 
@@ -234,7 +276,10 @@ func (c *Client) HandleFrame(ctx context.Context, data []byte) {
 			case ch <- wsResp{ErrCode: env.ErrCode, ErrMsg: env.ErrMsg, Body: env.Body}:
 			default:
 			}
-			return
+			return nil
+		}
+		if env.ErrCode != 0 {
+			return fmt.Errorf("wecom errcode=%d: %s", env.ErrCode, env.ErrMsg)
 		}
 	}
 
@@ -242,12 +287,17 @@ func (c *Client) HandleFrame(ctx context.Context, data []byte) {
 	case "aibot_msg_callback":
 		msg, ok := ParseMsgCallback(env.Body)
 		if !ok {
-			return
+			return nil
 		}
 		msg.ReqID = reqID
 		if !c.IsAllowed(msg.FromUser) {
 			c.logger.Info("dropped wecom message from non-allowlisted user", "user", msg.FromUser, "chat_type", msg.ChatType)
-			return
+			return nil
+		}
+		if msg.ChatType != "group" && msg.FromUser != "" {
+			c.mu.Lock()
+			c.lastSingleUser = msg.FromUser
+			c.mu.Unlock()
 		}
 		if c.handlers.OnMessage != nil {
 			go c.handlers.OnMessage(ctx, msg)
@@ -255,16 +305,17 @@ func (c *Client) HandleFrame(ctx context.Context, data []byte) {
 	case "aibot_event_callback":
 		ev, ok := ParseCardEventCallback(reqID, env.Body)
 		if !ok {
-			return
+			return nil
 		}
 		if !c.IsAllowed(ev.FromUser) {
 			c.logger.Info("dropped wecom card click from non-allowlisted user", "user", ev.FromUser)
-			return
+			return nil
 		}
 		if c.handlers.OnCardClick != nil {
 			go c.handlers.OnCardClick(ctx, ev)
 		}
 	}
+	return nil
 }
 
 // ParseMsgCallback extracts an IncomingMessage (text, image, file, or mixed) from aibot_msg_callback.
@@ -412,13 +463,31 @@ func stripLeadingMention(s string) string {
 	return s
 }
 
+// resolveTarget picks the outbound WeCom chatid: explicit group/chat ID -> configured DefaultTo
+// -> most recent allowlisted single-chat sender -> first allowlisted user.
+func (c *Client) resolveTarget(chatID string) string {
+	if id := strings.TrimSpace(chatID); id != "" {
+		return id
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if id := strings.TrimSpace(c.cfg.DefaultTo); id != "" {
+		return id
+	}
+	if c.lastSingleUser != "" && slices.Contains(c.cfg.AllowUsers, c.lastSingleUser) {
+		return c.lastSingleUser
+	}
+	for _, u := range c.cfg.AllowUsers {
+		if id := strings.TrimSpace(u); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
 // SendMarkdown proactively pushes a markdown message to chatID via aibot_send_msg.
 func (c *Client) SendMarkdown(ctx context.Context, chatID, markdown string) error {
-	if chatID == "" {
-		c.mu.Lock()
-		chatID = c.cfg.DefaultTo
-		c.mu.Unlock()
-	}
+	chatID = c.resolveTarget(chatID)
 	if chatID == "" {
 		return nil
 	}
@@ -476,11 +545,7 @@ func BuildActionCard(a *model.Action) map[string]any {
 
 // SendActionCard proactively pushes an interactive decision card via aibot_send_msg.
 func (c *Client) SendActionCard(ctx context.Context, chatID string, a *model.Action) error {
-	if chatID == "" {
-		c.mu.Lock()
-		chatID = c.cfg.DefaultTo
-		c.mu.Unlock()
-	}
+	chatID = c.resolveTarget(chatID)
 	if chatID == "" {
 		return nil
 	}

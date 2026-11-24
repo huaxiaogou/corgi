@@ -301,10 +301,15 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 	if s.Auth != nil {
 		hookKey = s.Auth.HookKey()
 	}
+	wecomErr := ""
+	if s.WeCom != nil {
+		wecomErr = s.WeCom.LastError()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"settings":     masked,
 		"policies":     s.Engine.Policies(),
 		"wecom_online": s.Bus.WeComOnline(),
+		"wecom_error":  wecomErr,
 		"hook_key":     hookKey,
 	})
 }

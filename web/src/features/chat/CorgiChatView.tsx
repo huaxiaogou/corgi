@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ArrowUp, Paperclip, Pin, RotateCw, Search, X } from "lucide-react";
-import { CorgiMark, StatusDot } from "../../components/CorgiMark";
+import { CorgiButtMark, CorgiMark, StatusDot } from "../../components/CorgiMark";
 import { DecisionCard } from "../../components/DecisionCard";
 import { MarkdownText } from "../../components/MarkdownText";
 import { api, uploadFile } from "../../lib/api";
@@ -297,8 +297,8 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
           )}
           {entries.length === 0 && (
             <div className="py-16 text-center space-y-2 text-muted">
-              <div className="w-10 h-10 rounded-xl border border-hairline flex items-center justify-center mx-auto text-primary">
-                <CorgiMark className="w-5 h-5" />
+              <div className="w-12 h-12 rounded-2xl border border-hairline flex items-center justify-center mx-auto text-primary">
+                <CorgiButtMark className="w-8 h-8" />
               </div>
               <div className="text-sm text-secondary">告诉 Corgi 你要办什么事</div>
               <div className="text-xs">它会拆活派给各台电脑上的 Agent，只在需要你拍板时出声。</div>

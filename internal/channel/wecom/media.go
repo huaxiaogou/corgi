@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 const (
@@ -271,11 +274,7 @@ func (c *Client) UploadMedia(ctx context.Context, mediaType, filename string, da
 
 // SendFile uploads data as a file media and sends it to chatID via aibot_send_msg.
 func (c *Client) SendFile(ctx context.Context, chatID, filename string, data []byte) error {
-	if chatID == "" {
-		c.mu.Lock()
-		chatID = c.cfg.DefaultTo
-		c.mu.Unlock()
-	}
+	chatID = c.resolveTarget(chatID)
 	if chatID == "" {
 		return nil
 	}
@@ -313,4 +312,36 @@ func (c *Client) SendStreamReply(ctx context.Context, reqID, streamID, content s
 		},
 	}
 	return c.send(ctx, frame)
+}
+
+// preserveWSCaseRT restores RFC 6455 mixed-case Sec-WebSocket-* header keys before
+// net/http writes the upgrade request. WeCom's Wwebsvr gateway rejects Go's canonicalized
+// "Sec-Websocket-Key" / "Sec-Websocket-Version" with HTTP 404.
+type preserveWSCaseRT struct{ base http.RoundTripper }
+
+func (p preserveWSCaseRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	r2 := r.Clone(r.Context())
+	for _, k := range []string{
+		"Sec-WebSocket-Key",
+		"Sec-WebSocket-Version",
+		"Sec-WebSocket-Protocol",
+		"Sec-WebSocket-Extensions",
+	} {
+		canon := http.CanonicalHeaderKey(k)
+		if vals, ok := r2.Header[canon]; ok {
+			delete(r2.Header, canon)
+			r2.Header[k] = vals
+		}
+	}
+	return p.base.RoundTrip(r2)
+}
+
+func newWSDialOptions() *websocket.DialOptions {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ForceAttemptHTTP2 = false
+	tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	return &websocket.DialOptions{
+		HTTPClient:      &http.Client{Transport: preserveWSCaseRT{base: tr}},
+		CompressionMode: websocket.CompressionDisabled,
+	}
 }

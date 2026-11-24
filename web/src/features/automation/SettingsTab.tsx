@@ -4,6 +4,7 @@ interface Props {
   settings: Settings;
   allowText: string;
   wecomOnline: boolean;
+  wecomError?: string;
   onChange: (next: Settings) => void;
   onAllowChange: (val: string) => void;
   onSave: () => Promise<void>;
@@ -11,7 +12,7 @@ interface Props {
 
 const AGENT_KINDS = ["claude", "codex", "agy", "codebuddy"] as const;
 
-export function SettingsTab({ settings, allowText, wecomOnline, onChange, onAllowChange, onSave }: Props) {
+export function SettingsTab({ settings, allowText, wecomOnline, wecomError, onChange, onAllowChange, onSave }: Props) {
   return (
     <div className="space-y-5">
       <section className="p-4 rounded-xl border border-hairline space-y-3">
@@ -45,17 +46,22 @@ export function SettingsTab({ settings, allowText, wecomOnline, onChange, onAllo
           />
         </div>
         <input
-          placeholder="允许触发 Corgi 的企微 userid 白名单（逗号分隔，必填才响应）"
+          placeholder="允许谁在企微指挥 Corgi（企微 userid，多人用逗号分隔，必填）"
           value={allowText}
           onChange={(e) => onAllowChange(e.target.value)}
           className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
         />
         <input
-          placeholder="默认主动推送目标 userid（单聊）"
+          placeholder="默认私聊推送给谁（可选，留空自动推给白名单第一位）"
           value={settings.wecom_default_to ?? ""}
           onChange={(e) => onChange({ ...settings, wecom_default_to: e.target.value })}
           className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
         />
+        {settings.wecom_enabled && !wecomOnline && wecomError && (
+          <div className="px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code break-all" style={{ color: "var(--attn)" }}>
+            连接失败：{wecomError}
+          </div>
+        )}
       </section>
 
       <section className="p-4 rounded-xl border border-hairline space-y-3">

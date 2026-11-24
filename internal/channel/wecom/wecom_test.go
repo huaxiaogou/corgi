@@ -214,3 +214,105 @@ func TestDecryptDownloadMediaAndChunkedUpload(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveTargetFallback(t *testing.T) {
+	cl := NewClient(Config{
+		AllowUsers: []string{"alice", "bob"},
+	}, Handlers{}, nil)
+
+	// Explicit group chat ID wins.
+	if got := cl.resolveTarget("group_99"); got != "group_99" {
+		t.Fatalf("explicit chatID: got %q want group_99", got)
+	}
+	// Empty DefaultTo falls back to first allowlisted user.
+	if got := cl.resolveTarget(""); got != "alice" {
+		t.Fatalf("allowlist fallback: got %q want alice", got)
+	}
+	// Recent single-chat sender from allowlist takes precedence over allowlist[0].
+	singleMsg := `{"cmd":"aibot_msg_callback","headers":{"req_id":"r4"},"body":{"msgid":"m4","chattype":"single","from":{"userid":"bob"},"text":{"content":"hi"}}}`
+	cl.HandleFrame(context.Background(), []byte(singleMsg))
+	if got := cl.resolveTarget(""); got != "bob" {
+		t.Fatalf("lastSingleUser fallback: got %q want bob", got)
+	}
+	// Explicit DefaultTo overrides lastSingleUser.
+	cl.UpdateConfig(Config{AllowUsers: []string{"alice", "bob"}, DefaultTo: "alice"})
+	if got := cl.resolveTarget(""); got != "alice" {
+		t.Fatalf("explicit DefaultTo: got %q want alice", got)
+	}
+}
+
+func TestUpdateConfigWakesImmediatelyAndCapturesSubscribeError(t *testing.T) {
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+		_, data, err := conn.Read(r.Context())
+		if err != nil {
+			return
+		}
+		var f struct {
+			Headers map[string]any `json:"headers"`
+		}
+		_ = json.Unmarshal(data, &f)
+		reqID, _ := f.Headers["req_id"].(string)
+		resp, _ := json.Marshal(map[string]any{
+			"headers": map[string]any{"req_id": reqID},
+			"errcode": 40001,
+			"errmsg":  "invalid secret",
+		})
+		_ = conn.Write(r.Context(), websocket.MessageText, resp)
+	}))
+	defer wsSrv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start disabled, then enable via UpdateConfig — should wake immediately (<1s), not wait 3s.
+	cl := NewClient(Config{}, Handlers{}, nil)
+	go cl.Run(ctx)
+	time.Sleep(40 * time.Millisecond)
+
+	start := time.Now()
+	cl.UpdateConfig(Config{
+		GatewayURL: "ws" + strings.TrimPrefix(wsSrv.URL, "http"),
+		BotID:      "bot-1",
+		Secret:     "wrong",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for cl.LastError() == "" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(cl.LastError(), "40001") {
+		t.Fatalf("expected subscribe error 40001 in LastError, got %q", cl.LastError())
+	}
+	if time.Since(start) > 1500*time.Millisecond {
+		t.Fatalf("UpdateConfig took too long to wake Run: %v", time.Since(start))
+	}
+}
+
+func TestPreserveWSCaseRoundTripper(t *testing.T) {
+	var seenKeys []string
+	rt := preserveWSCaseRT{base: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		for k := range r.Header {
+			seenKeys = append(seenKeys, k)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	})}
+	req, _ := http.NewRequest(http.MethodGet, "https://openws.work.weixin.qq.com", nil)
+	req.Header.Set("Sec-WebSocket-Key", "abc")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	if _, err := rt.RoundTrip(req); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	joined := strings.Join(seenKeys, ",")
+	if !strings.Contains(joined, "Sec-WebSocket-Key") || !strings.Contains(joined, "Sec-WebSocket-Version") {
+		t.Fatalf("expected mixed-case Sec-WebSocket-* keys, got %s", joined)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
