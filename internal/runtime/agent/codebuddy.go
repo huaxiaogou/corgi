@@ -1,0 +1,307 @@
+package agent
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/kiperjing/corgi/internal/model"
+	"github.com/kiperjing/corgi/internal/runtime/herdr"
+)
+
+var codebuddyModelsRe = regexp.MustCompile(`Currently supported:\s*\(([^)]+)\)`)
+
+// CodeBuddyAdapter adapts Tencent CodeBuddy Code CLI (codebuddy / cbc) to Corgi's runtime.
+type CodeBuddyAdapter struct{}
+
+func (c *CodeBuddyAdapter) Kind() string        { return "codebuddy" }
+func (c *CodeBuddyAdapter) DisplayName() string { return "CodeBuddy" }
+
+func (c *CodeBuddyAdapter) LaunchArgs(modelName, _ string, bypassPerm bool) []string {
+	var args []string
+	if modelName != "" {
+		args = append(args, "--model", modelName)
+	}
+	if bypassPerm {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	return args
+}
+
+func (c *CodeBuddyAdapter) ResumeArgs(sessionID string) []string {
+	if sessionID == "" {
+		return nil
+	}
+	return []string{"--resume", sessionID}
+}
+
+func (c *CodeBuddyAdapter) PreTrustWorkspace(_, _ string) error { return nil }
+
+func (c *CodeBuddyAdapter) DiscoverModels(ctx context.Context, home string) (*model.ModelCatalog, error) {
+	cat := &model.ModelCatalog{
+		Kind:    "codebuddy",
+		Efforts: []string{},
+		Models:  []model.ModelOpt{},
+	}
+	if bin := herdr.FindBin("codebuddy", home); bin != "" {
+		cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		if out, err := exec.CommandContext(cctx, bin, "--help").CombinedOutput(); err == nil {
+			cat.Models = parseCodeBuddyHelpModels(string(out))
+		}
+	}
+	if len(cat.Models) == 0 {
+		cat.Models = []model.ModelOpt{
+			{ID: "deepseek-v4-pro", Label: "deepseek-v4-pro"},
+			{ID: "glm-5.3", Label: "glm-5.3"},
+			{ID: "kimi-k3.1-pro", Label: "kimi-k3.1-pro"},
+			{ID: "hy4std", Label: "hy4std"},
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(codebuddyHome(home), "settings.json")); err == nil {
+		var cfg struct {
+			Model string `json:"model"`
+		}
+		if json.Unmarshal(b, &cfg) == nil && cfg.Model != "" {
+			cat.Default = cfg.Model
+		}
+	}
+	return cat, nil
+}
+
+func parseCodeBuddyHelpModels(helpText string) []model.ModelOpt {
+	m := codebuddyModelsRe.FindStringSubmatch(helpText)
+	if len(m) < 2 {
+		return nil
+	}
+	var out []model.ModelOpt
+	for _, raw := range strings.Split(m[1], ",") {
+		id := strings.TrimSpace(raw)
+		if id != "" && ModelNameRe.MatchString(id) {
+			out = append(out, model.ModelOpt{ID: id, Label: id})
+		}
+	}
+	return out
+}
+
+func (c *CodeBuddyAdapter) LocateTranscript(home, cwd, sessionID string, since time.Time) string {
+	projDir := filepath.Join(codebuddyHome(home), "projects")
+	if sessionID != "" {
+		if matches, _ := filepath.Glob(filepath.Join(projDir, "*", sessionID+".jsonl")); len(matches) > 0 {
+			return matches[0]
+		}
+		direct := filepath.Join(projDir, sessionID+".jsonl")
+		if fi, err := os.Stat(direct); err == nil && !fi.IsDir() {
+			return direct
+		}
+		return ""
+	}
+	if cwd == "" {
+		return ""
+	}
+	cwd = filepath.Clean(cwd)
+	if since.IsZero() {
+		since = time.Now().Add(-6 * time.Hour)
+	}
+	files, _ := filepath.Glob(filepath.Join(projDir, "*", "*.jsonl"))
+	type cand struct {
+		path string
+		mod  time.Time
+	}
+	var cands []cand
+	for _, f := range files {
+		fi, err := os.Stat(f)
+		if err != nil || fi.Size() == 0 || fi.ModTime().Before(since.Add(-10*time.Second)) {
+			continue
+		}
+		if codebuddyFileMatchesCwd(f, cwd) {
+			cands = append(cands, cand{path: f, mod: fi.ModTime()})
+		}
+	}
+	if len(cands) == 0 {
+		return ""
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].mod.After(cands[j].mod) })
+	return cands[0].path
+}
+
+func codebuddyFileMatchesCwd(path, wantCwd string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 16<<10), 256<<10)
+	for i := 0; i < 3 && sc.Scan(); i++ {
+		var head struct {
+			Cwd string `json:"cwd"`
+		}
+		if json.Unmarshal(sc.Bytes(), &head) == nil && head.Cwd != "" {
+			return filepath.Clean(head.Cwd) == wantCwd
+		}
+	}
+	return false
+}
+
+func (c *CodeBuddyAdapter) ParseTranscriptLine(line []byte, imgDir string) ([]*model.Message, bool) {
+	var rec struct {
+		Type      string          `json:"type"`
+		Role      string          `json:"role"`
+		Content   json.RawMessage `json:"content"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+		Output    json.RawMessage `json:"output"`
+		Status    string          `json:"status"`
+	}
+	if json.Unmarshal(line, &rec) != nil {
+		return nil, false
+	}
+	switch rec.Type {
+	case "message":
+		if rec.Role != "user" && rec.Role != "assistant" {
+			return nil, false
+		}
+		txt := extractCodeBuddyContent(rec.Content, imgDir)
+		if txt == "" {
+			return nil, false
+		}
+		return []*model.Message{{Kind: rec.Role, Text: txt}}, true
+	case "function_call":
+		if rec.Name == "" {
+			return nil, false
+		}
+		return []*model.Message{{
+			Kind:  "tool",
+			Name:  rec.Name,
+			Input: clipText(decodeRawString(rec.Arguments), 300),
+		}}, true
+	case "function_call_result":
+		out := strings.TrimSpace(decodeRawString(rec.Output))
+		if out == "" {
+			return nil, false
+		}
+		name := rec.Name
+		if name == "" {
+			name = "result"
+		}
+		return []*model.Message{{
+			Kind:   "tool",
+			Name:   name,
+			Output: clipText(out, 800),
+			Error:  strings.EqualFold(rec.Status, "error") || strings.EqualFold(rec.Status, "failed"),
+		}}, true
+	}
+	return nil, false
+}
+
+func extractCodeBuddyContent(raw json.RawMessage, imgDir string) string {
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		return strings.TrimSpace(plain)
+	}
+	var blocks []struct {
+		Type      string `json:"type"`
+		Text      string `json:"text"`
+		MediaType string `json:"media_type"`
+		Data      string `json:"data"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, b := range blocks {
+		switch b.Type {
+		case "input_text", "output_text", "text":
+			if t := strings.TrimSpace(b.Text); t != "" {
+				parts = append(parts, t)
+			}
+		case "input_image", "image":
+			if b.Data != "" {
+				parts = append(parts, ExtractImage(b.MediaType, b.Data, imgDir))
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func decodeRawString(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func (c *CodeBuddyAdapter) ReadContextUsage(transcriptPath string, defaultWindow int) model.ContextUsage {
+	if defaultWindow <= 0 {
+		defaultWindow = 200000
+	}
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return model.ContextUsage{}
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return model.ContextUsage{}
+	}
+	const tail = 1 << 20
+	if fi.Size() > tail {
+		_, _ = f.Seek(fi.Size()-tail, io.SeekStart)
+	}
+	var last model.ContextUsage
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 8<<20)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if !bytes.Contains(line, []byte(`"usage"`)) {
+			continue
+		}
+		var e struct {
+			ProviderData struct {
+				Usage *struct {
+					Total      int `json:"total_tokens"`
+					Input      int `json:"input_tokens"`
+					Output     int `json:"output_tokens"`
+					Prompt     int `json:"prompt_tokens"`
+					Completion int `json:"completion_tokens"`
+				} `json:"usage"`
+			} `json:"providerData"`
+		}
+		if json.Unmarshal(line, &e) == nil && e.ProviderData.Usage != nil {
+			u := e.ProviderData.Usage
+			used := u.Total
+			if used <= 0 {
+				used = u.Input + u.Output
+			}
+			if used <= 0 {
+				used = u.Prompt + u.Completion
+			}
+			if used > 0 {
+				last = model.ContextUsage{Used: used, Window: defaultWindow}
+			}
+		}
+	}
+	return last
+}
+
+func (c *CodeBuddyAdapter) LookupTitle(_, _, terminalTitle string) string {
+	return cleanTerminalTitle(terminalTitle)
+}
+
+func codebuddyHome(home string) string {
+	if d := os.Getenv("CODEBUDDY_CONFIG_DIR"); d != "" {
+		return d
+	}
+	return filepath.Join(home, ".codebuddy")
+}
