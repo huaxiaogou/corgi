@@ -201,7 +201,7 @@ $args
   <key>WorkingDirectory</key><string>$(xml "$HOME")</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>15</integer>
+  <key>ThrottleInterval</key><integer>3</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>$(xml "$log")</string>
   <key>StandardErrorPath</key><string>$(xml "$log")</string>
@@ -210,8 +210,21 @@ $args
     if [ -n "${CORGI_DRY_SERVICE:-}" ]; then say "$unit"; return; fi
     mkdir -p "$(dirname "$plist")" "$(dirname "$log")"
     printf '%s\n' "$unit" > "$plist"
-    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$plist"
+    uid=$(id -u)
+    launchctl bootout "gui/$uid/$label" 2>/dev/null || true
+    # macOS launchctl bootout is asynchronous; wait for teardown before bootstrap.
+    i=0
+    while [ "$i" -lt 10 ] && launchctl print "gui/$uid/$label" >/dev/null 2>&1; do
+      sleep 0.5
+      i=$((i + 1))
+    done
+    i=0
+    until launchctl bootstrap "gui/$uid" "$plist" 2>/dev/null; do
+      i=$((i + 1))
+      [ "$i" -ge 4 ] && launchctl bootstrap "gui/$uid" "$plist"
+      sleep 1
+    done
+    launchctl kickstart -k "gui/$uid/$label" >/dev/null 2>&1 || true
     step "已作为后台服务常驻（launchd: $label）"
     say "    日志：tail -f $log"
   else
