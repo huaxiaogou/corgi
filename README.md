@@ -10,14 +10,19 @@
 
 ```bash
 # 1. 常开 Linux 开发机做 Hub（远程一条命令下载校验并后台常驻）
-curl -fsSL https://raw.githubusercontent.com/huaxiaogou/corgi/main/scripts/install.sh | sh -s -- hub --url http://<linux-hub-ip>:7788
+curl -fsSL https://github.com/huaxiaogou/corgi/releases/latest/download/install.sh | sh -s -- hub --url http://<linux-hub-ip>:7788
 
 # 2. 在 Hub 获取手机配对二维码 / 电脑加入码
 corgi pair               # 手机扫码（或浏览器登录）
 corgi pair --computer    # 8 位一次性电脑加入码
 
-# 3. MacBook 或其他电脑作为 Node 加入（远程一条命令，自动开放 http://127.0.0.1:17788 安装 Dock PWA）
-curl -fsSL https://raw.githubusercontent.com/huaxiaogou/corgi/main/scripts/install.sh | sh -s -- node --hub http://<linux-hub-ip>:7788 --code <8位配对码> --name macbook
+# 3. MacBook 或其他电脑作为 Node 加入（支持分两步，也支持一步到位）
+# 一步到位（安装 + 配对 + 后台常驻 + 开 http://127.0.0.1:17788 独立 Dock PWA）：
+curl -fsSL https://github.com/huaxiaogou/corgi/releases/latest/download/install.sh | sh -s -- node --hub http://<linux-hub-ip>:7788 --code <8位配对码> --name macbook
+
+# 分两步：先普通安装，再连接 Node：
+# curl -fsSL https://github.com/huaxiaogou/corgi/releases/latest/download/install.sh | sh
+# corgi node --hub http://<linux-hub-ip>:7788 --code <8位配对码> --name macbook
 
 # 若在本地源码仓库内直接安装/编译：
 # sh scripts/install.sh hub --url http://<linux-hub-ip>:7788

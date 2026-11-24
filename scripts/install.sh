@@ -12,7 +12,7 @@
 #
 #   4. 使用预编译二进制或远程一键安装：
 #        CORGI_BINARY=./dist/corgi-linux-amd64 sh scripts/install.sh hub --url http://<ip>:7788
-#        curl -fsSL https://raw.githubusercontent.com/huaxiaogou/corgi/main/scripts/install.sh | sh -s -- hub
+#        curl -fsSL https://github.com/huaxiaogou/corgi/releases/latest/download/install.sh | sh -s -- hub
 #
 # 环境变量：
 #   CORGI_BIN_DIR      安装目录（默认 ~/.local/bin）
