@@ -400,7 +400,9 @@ func cmdPair(dir string, args []string) error {
 		return fmt.Errorf("hub reported no addresses")
 	}
 	if *computer {
-		fmt.Printf("\n  在要加入的电脑上运行（10 分钟内有效，一次性）：\n\n    corgi node --hub %s --code %s\n\n", r.Addresses[0], r.Code)
+		const installURL = "https://github.com/huaxiaogou/corgi/releases/latest/download/install.sh"
+		fmt.Printf("\n  在要加入的电脑上运行（10 分钟内有效，一次性；自动安装并后台常驻）：\n\n    curl -fsSL %s | sh -s -- node --hub %s --code %s\n\n  若已安装 corgi 仅前台临时联调：\n\n    corgi node --hub %s --code %s\n\n",
+			installURL, r.Addresses[0], r.Code, r.Addresses[0], r.Code)
 		return nil
 	}
 	u := fleet.PairURL(r.Addresses[0], r.Code)

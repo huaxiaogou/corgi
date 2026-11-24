@@ -14,7 +14,14 @@ interface Props {
   onRevoke: (id: string) => Promise<void>;
 }
 
+const INSTALL_URL = "https://github.com/huaxiaogou/corgi/releases/latest/download/install.sh";
+
 export function DevicesTab({ devices, pairResult, onGenPair, onRevoke }: Props) {
+  const joinCmd =
+    pairResult && pairResult.kind === "machine"
+      ? `curl -fsSL ${INSTALL_URL} | sh -s -- node --hub ${pairResult.addr} --code ${pairResult.code}`
+      : "";
+
   return (
     <div className="space-y-4">
       <div className="flex gap-2">
@@ -26,14 +33,21 @@ export function DevicesTab({ devices, pairResult, onGenPair, onRevoke }: Props) 
         </button>
       </div>
       {pairResult && (
-        <div className="p-4 rounded-xl border border-hairline surface-rail space-y-2">
+        <div className="p-4 rounded-xl border border-hairline surface-rail space-y-2.5">
           <div className="font-medium">
             一次性配对码（10 分钟内有效）：<span className="font-mono-code ml-1">{pairResult.code}</span>
           </div>
           {pairResult.kind === "machine" ? (
-            <pre className="p-2.5 rounded-lg surface-bg border border-hairline font-mono-code overflow-x-auto">
-              corgi node --hub {pairResult.addr} --code {pairResult.code}
-            </pre>
+            <div className="space-y-2">
+              <div className="text-muted">在目标电脑执行（自动安装 + 配对 + 后台常驻）：</div>
+              <pre className="p-2.5 rounded-lg surface-bg border border-hairline font-mono-code overflow-x-auto">{joinCmd}</pre>
+              <div className="text-muted">
+                已装 corgi 仅前台调试：
+                <code className="font-mono-code ml-1">
+                  corgi node --hub {pairResult.addr} --code {pairResult.code}
+                </code>
+              </div>
+            </div>
           ) : (
             <img
               src={`/api/qr?text=${encodeURIComponent(pairResult.pair_url)}`}
