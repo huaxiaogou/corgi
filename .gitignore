@@ -1,0 +1,20 @@
+# Binaries & build outputs
+/bin/
+/dist/
+/corgi
+
+# Frontend dependencies (embedded dist is generated via make build)
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep
+
+# Local data, logs & OS files
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.tmp
+*.pid
+.DS_Store
+.env
+.env.local
