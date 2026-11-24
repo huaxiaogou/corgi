@@ -10,20 +10,20 @@
 #   3. 一条命令把这台电脑作为 Node 加入 Hub 并后台常驻（同步开放 http://127.0.0.1:17788 独立 PWA）：
 #        sh scripts/install.sh node --hub http://<hub>:7788 --code <8位配对码> [--name macbook]
 #
-#   4. 使用预编译二进制或指定版本：
+#   4. 使用预编译二进制或远程一键安装：
 #        CORGI_BINARY=./dist/corgi-linux-amd64 sh scripts/install.sh hub --url http://<ip>:7788
-#        curl -fsSL https://raw.githubusercontent.com/kiperjing/corgi/main/scripts/install.sh | sh -s -- hub
+#        curl -fsSL https://raw.githubusercontent.com/huaxiaogou/corgi/main/scripts/install.sh | sh -s -- hub
 #
 # 环境变量：
 #   CORGI_BIN_DIR      安装目录（默认 ~/.local/bin）
 #   CORGI_BINARY       直接安装指定二进制文件（跳过编译与下载）
-#   CORGI_REPO         GitHub 仓库（默认 kiperjing/corgi）
+#   CORGI_REPO         GitHub 仓库（默认 huaxiaogou/corgi）
 #   CORGI_VERSION      下载版本（默认 latest）
 #   CORGI_NO_HERDR     设为 1 跳过自动安装 herdr
 #   CORGI_DRY_SERVICE  设为 1 仅打印服务配置不写入（调试/自测用）
 set -eu
 
-REPO=${CORGI_REPO:-kiperjing/corgi}
+REPO=${CORGI_REPO:-huaxiaogou/corgi}
 VERSION=${CORGI_VERSION:-latest}
 BIN_DIR=${CORGI_BIN_DIR:-$HOME/.local/bin}
 BIN=$BIN_DIR/corgi
