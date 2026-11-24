@@ -1,10 +1,12 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kiperjing/corgi/internal/channel/wecom"
 	"github.com/kiperjing/corgi/internal/core"
@@ -302,16 +304,87 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 		hookKey = s.Auth.HookKey()
 	}
 	wecomErr := ""
+	wecomPending := []wecom.PendingUser{}
 	if s.WeCom != nil {
 		wecomErr = s.WeCom.LastError()
+		wecomPending = s.WeCom.PendingUsers()
+	}
+	var hubAgents []string
+	if s.Fleet != nil {
+		for _, m := range s.Fleet.Machines() {
+			if m.Local {
+				hubAgents = m.Agents
+				break
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"settings":     masked,
-		"policies":     s.Engine.Policies(),
-		"wecom_online": s.Bus.WeComOnline(),
-		"wecom_error":  wecomErr,
-		"hook_key":     hookKey,
+		"settings":      masked,
+		"policies":      s.Engine.Policies(),
+		"wecom_online":  s.Bus.WeComOnline(),
+		"wecom_error":   wecomErr,
+		"wecom_pending": wecomPending,
+		"hub_agents":    hubAgents,
+		"hook_key":      hookKey,
 	})
+}
+
+func (s *Server) handleWeComApprove(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		UserID  string `json:"user_id"`
+		Dismiss bool   `json:"dismiss"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	uid := strings.TrimSpace(body.UserID)
+	if uid == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "user_id is required"})
+		return
+	}
+	if body.Dismiss {
+		if s.WeCom != nil {
+			s.WeCom.DismissPending(uid)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+
+	st := s.Engine.Settings()
+	exists := false
+	for _, u := range st.WeComAllowUsers {
+		if strings.TrimSpace(u) == uid {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		st.WeComAllowUsers = append(st.WeComAllowUsers, uid)
+	}
+	if err := s.Engine.SaveConfig(r.Context(), &st, nil); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if s.WeCom != nil {
+		s.WeCom.DismissPending(uid)
+		if st.WeComEnabled {
+			s.WeCom.UpdateConfig(wecom.Config{
+				BotID:      st.WeComBotID,
+				Secret:     st.WeComSecret,
+				AllowUsers: st.WeComAllowUsers,
+				DefaultTo:  st.WeComDefaultTo,
+			})
+		}
+		if s.WeCom.Online() {
+			wc := s.WeCom
+			go func() {
+				cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = wc.SendMarkdown(cctx, uid, "已授权绑定 Corgi，现在可以直接在这里发消息指挥你的电脑了。")
+			}()
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "allow_users": st.WeComAllowUsers})
 }
 
 func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {

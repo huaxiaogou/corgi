@@ -1,74 +1,53 @@
-import type { Settings } from "../../types/api";
+import type { PendingWeComUser, Settings } from "../../types/api";
+import { WeComSection } from "./WeComSection";
 
 interface Props {
   settings: Settings;
   allowText: string;
   wecomOnline: boolean;
   wecomError?: string;
+  wecomPending?: PendingWeComUser[];
+  hubAgents?: string[];
   onChange: (next: Settings) => void;
   onAllowChange: (val: string) => void;
   onSave: () => Promise<void>;
+  onApproveWeCom?: (userId: string, dismiss?: boolean) => Promise<void>;
 }
 
 const AGENT_KINDS = ["claude", "codex", "agy", "codebuddy"] as const;
 
-export function SettingsTab({ settings, allowText, wecomOnline, wecomError, onChange, onAllowChange, onSave }: Props) {
+export function SettingsTab({
+  settings,
+  allowText,
+  wecomOnline,
+  wecomError,
+  wecomPending = [],
+  hubAgents = [],
+  onChange,
+  onAllowChange,
+  onSave,
+  onApproveWeCom,
+}: Props) {
+  const hubInstalled = (k: string) => hubAgents.length === 0 || hubAgents.includes(k);
+
   return (
     <div className="space-y-5">
-      <section className="p-4 rounded-xl border border-hairline space-y-3">
-        <div className="flex items-center justify-between">
-          <span className="font-semibold text-sm">企业微信智能机器人（WebSocket 长连接）</span>
-          <span className="font-mono-code" style={{ color: wecomOnline ? "var(--ok)" : "var(--fg-3)" }}>
-            {wecomOnline ? "● 已连接" : "○ 未连接"}
-          </span>
-        </div>
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={Boolean(settings.wecom_enabled)}
-            onChange={(e) => onChange({ ...settings, wecom_enabled: e.target.checked })}
-          />
-          <span>启用企微长连接（免公网 IP）</span>
-        </label>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <input
-            placeholder="BotID"
-            value={settings.wecom_bot_id ?? ""}
-            onChange={(e) => onChange({ ...settings, wecom_bot_id: e.target.value })}
-            className="px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
-          />
-          <input
-            type="password"
-            placeholder="Secret"
-            value={settings.wecom_secret ?? ""}
-            onChange={(e) => onChange({ ...settings, wecom_secret: e.target.value })}
-            className="px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
-          />
-        </div>
-        <input
-          placeholder="允许谁在企微指挥 Corgi（企微 userid，多人用逗号分隔，必填）"
-          value={allowText}
-          onChange={(e) => onAllowChange(e.target.value)}
-          className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
-        />
-        <input
-          placeholder="默认私聊推送给谁（可选，留空自动推给白名单第一位）"
-          value={settings.wecom_default_to ?? ""}
-          onChange={(e) => onChange({ ...settings, wecom_default_to: e.target.value })}
-          className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
-        />
-        {settings.wecom_enabled && !wecomOnline && wecomError && (
-          <div className="px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code break-all" style={{ color: "var(--attn)" }}>
-            连接失败：{wecomError}
-          </div>
-        )}
-      </section>
+      <WeComSection
+        settings={settings}
+        allowText={allowText}
+        wecomOnline={wecomOnline}
+        wecomError={wecomError}
+        wecomPending={wecomPending}
+        onChange={onChange}
+        onAllowChange={onAllowChange}
+        onApproveWeCom={onApproveWeCom}
+      />
 
       <section className="p-4 rounded-xl border border-hairline space-y-3">
         <div className="font-semibold text-sm">Super-Agent 执行与常驻策略</div>
         <div className="grid grid-cols-2 gap-3">
           <label className="space-y-1">
-            <span className="text-muted">大脑 Agent (Router)</span>
+            <span className="text-muted">大脑 Agent (Router，运行在 Hub)</span>
             <select
               value={settings.router_kind}
               onChange={(e) => onChange({ ...settings, router_kind: e.target.value })}
@@ -76,7 +55,7 @@ export function SettingsTab({ settings, allowText, wecomOnline, wecomError, onCh
             >
               {AGENT_KINDS.map((k) => (
                 <option key={k} value={k}>
-                  {k}
+                  {hubInstalled(k) ? k : `${k}（Hub 未安装）`}
                 </option>
               ))}
             </select>

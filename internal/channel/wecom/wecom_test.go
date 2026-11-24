@@ -316,3 +316,31 @@ func TestPreserveWSCaseRoundTripper(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestPendingUserBindingAndAllowlistHotReload(t *testing.T) {
+	cl := NewClient(Config{}, Handlers{}, nil)
+
+	// Group messages from non-allowlisted users must NOT create pending claims.
+	groupMsg := `{"cmd":"aibot_msg_callback","headers":{"req_id":"r1"},"body":{"msgid":"m1","chattype":"group","chatid":"g1","from":{"userid":"T_GROUP_STRANGER"},"text":{"content":"@Corgi hi"}}}`
+	cl.HandleFrame(context.Background(), []byte(groupMsg))
+	if got := cl.PendingUsers(); len(got) != 0 {
+		t.Fatalf("group stranger must not appear in PendingUsers, got %+v", got)
+	}
+
+	// Private single-chat message from unbound user is recorded for one-click approval.
+	dmMsg := `{"cmd":"aibot_msg_callback","headers":{"req_id":"r2"},"body":{"msgid":"m2","chattype":"single","from":{"userid":"T81900036A"},"text":{"content":"你好"}}}`
+	cl.HandleFrame(context.Background(), []byte(dmMsg))
+	got := cl.PendingUsers()
+	if len(got) != 1 || got[0].UserID != "T81900036A" || got[0].Preview != "你好" {
+		t.Fatalf("unexpected PendingUsers: %+v", got)
+	}
+
+	// Approving via UpdateConfig prunes the user from PendingUsers automatically.
+	cl.UpdateConfig(Config{AllowUsers: []string{"T81900036A"}})
+	if rem := cl.PendingUsers(); len(rem) != 0 {
+		t.Fatalf("expected approved user pruned from PendingUsers, got %+v", rem)
+	}
+	if !cl.IsAllowed("T81900036A") {
+		t.Fatal("expected T81900036A to be allowed after UpdateConfig")
+	}
+}

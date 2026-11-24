@@ -204,6 +204,12 @@ export interface Settings {
   wecom_default_to?: string;
 }
 
+export interface PendingWeComUser {
+  user_id: string;
+  preview?: string;
+  at: string;
+}
+
 export interface MemoryFile {
   name: string;
   text: string;

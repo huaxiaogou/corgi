@@ -66,6 +66,8 @@ type Client struct {
 	reqSeq         atomic.Uint64
 	lastErr        string
 	lastSingleUser string
+	pendingUsers   map[string]PendingUser
+	lastHintAt     map[string]time.Time
 	wake           chan struct{}
 	pendingMu      sync.Mutex
 	pending        map[string]chan wsResp
@@ -113,14 +115,19 @@ func (c *Client) UpdateConfig(cfg Config) {
 	cfg.Secret = strings.TrimSpace(cfg.Secret)
 	cfg.DefaultTo = strings.TrimSpace(cfg.DefaultTo)
 	c.mu.Lock()
+	credsChanged := c.cfg.BotID != cfg.BotID || c.cfg.Secret != cfg.Secret || c.cfg.GatewayURL != cfg.GatewayURL
 	c.cfg = cfg
-	c.lastErr = ""
-	conn := c.conn
+	c.pruneAllowedPendingLocked()
+	var conn *websocket.Conn
+	if credsChanged {
+		c.lastErr = ""
+		conn = c.conn
+	}
 	c.mu.Unlock()
 	if conn != nil {
 		_ = conn.Close(websocket.StatusNormalClosure, "reconfigure")
 	}
-	if c.wake != nil {
+	if credsChanged && c.wake != nil {
 		select {
 		case c.wake <- struct{}{}:
 		default:
@@ -292,6 +299,9 @@ func (c *Client) handleFrameWithErr(ctx context.Context, data []byte) error {
 		msg.ReqID = reqID
 		if !c.IsAllowed(msg.FromUser) {
 			c.logger.Info("dropped wecom message from non-allowlisted user", "user", msg.FromUser, "chat_type", msg.ChatType)
+			if msg.ChatType != "group" && msg.FromUser != "" {
+				c.recordPendingUser(ctx, msg.FromUser, msg.Text)
+			}
 			return nil
 		}
 		if msg.ChatType != "group" && msg.FromUser != "" {
