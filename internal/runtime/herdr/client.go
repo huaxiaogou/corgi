@@ -36,6 +36,7 @@ type DialFunc func(ctx context.Context) (net.Conn, error)
 // Client speaks herdr's newline-delimited JSON socket API.
 type Client struct {
 	dial     DialFunc
+	home     string
 	seq      atomic.Uint64
 	customMu sync.Mutex
 	custom   map[string]model.Agent // fallback-launched agents (e.g. codebuddy when herdr lacks native kind)
@@ -51,6 +52,7 @@ func NewClient(dial DialFunc) *Client {
 func NewUnixClient(socketPath, home string, logger *slog.Logger) *Client {
 	starter := &serverStarter{home: home, logger: logger}
 	return &Client{
+		home: home,
 		dial: func(ctx context.Context) (net.Conn, error) {
 			var d net.Dialer
 			c, err := d.DialContext(ctx, "unix", socketPath)
@@ -368,9 +370,24 @@ func (c *Client) StartAgent(ctx context.Context, paneID, kind, name string, args
 	if !isUnsupportedKindErr(err) {
 		return err
 	}
-	cmdLine := shellJoin(append([]string{kind}, args...))
+	bin := kind
+	if c.home != "" {
+		resolved := FindBin(kind, c.home)
+		if resolved == "" {
+			return err
+		}
+		bin = resolved
+	}
+	cmdLine := shellJoin(append([]string{bin}, args...))
 	if sendErr := c.SendText(ctx, paneID, cmdLine, true); sendErr != nil {
 		return err
+	}
+	if c.home != "" {
+		// Give shell-launched TUIs (e.g. codebuddy) a brief moment to boot before accepting prompts.
+		select {
+		case <-ctx.Done():
+		case <-time.After(3500 * time.Millisecond):
+		}
 	}
 	n := name
 	k := kind
@@ -462,6 +479,13 @@ func (c *Client) SendText(ctx context.Context, paneID, text string, enter bool) 
 		return err
 	}
 	if enter {
+		if c.home != "" && len(text) > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(150 * time.Millisecond):
+			}
+		}
 		return c.SendKeys(ctx, paneID, "enter")
 	}
 	return nil

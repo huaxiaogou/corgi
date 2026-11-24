@@ -182,8 +182,17 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 		return
 	}
 	body := formatWeComReply(entry)
-	b.outbox[chatID] = append(b.outbox[chatID], outboxItem{text: body, at: now})
-	b.mu.Unlock()
+	if wecomRecent {
+		// Active WeCom conversation: deliver immediately instead of holding 20s in Outbox.
+		send := b.sendFn
+		b.mu.Unlock()
+		if err := send(ctx, chatID, body); err != nil {
+			b.logger.Warn("immediate wecom reply failed", "chat_id", chatID, "err", err)
+		}
+	} else {
+		b.outbox[chatID] = append(b.outbox[chatID], outboxItem{text: body, at: now})
+		b.mu.Unlock()
+	}
 
 	// Offline-readable report delivery: push referenced .md report files or very long replies as attachments.
 	b.maybeSendReportAttachment(ctx, chatID, entry.Text)

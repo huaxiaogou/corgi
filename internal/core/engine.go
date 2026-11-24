@@ -175,8 +175,10 @@ func (e *Engine) Policies() []model.Policy {
 
 // SaveConfig persists updated Settings and/or Policies and refreshes Router docs.
 func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []model.Policy) error {
+	var routerChanged bool
 	e.mu.Lock()
 	if st != nil {
+		prev := e.settings
 		ns := *st
 		if agent.NormalizeKind(ns.RouterKind) == "" {
 			ns.RouterKind = e.settings.RouterKind
@@ -209,6 +211,10 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 		if ns.WorkerCwd == "" {
 			ns.WorkerCwd = e.home
 		}
+		routerChanged = prev.RouterKind != ns.RouterKind ||
+			prev.RouterModel != ns.RouterModel ||
+			prev.RouterEffort != ns.RouterEffort ||
+			prev.AskPermissions != ns.AskPermissions
 		e.settings = ns
 	}
 	if pols != nil {
@@ -237,6 +243,13 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 		if err := e.store.SavePolicies(ctx, curPolicies); err != nil {
 			return err
 		}
+	}
+	if routerChanged && e.fleet != nil {
+		go func() {
+			rctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			_ = e.RestartRouter(rctx)
+		}()
 	}
 	sink.OnStateChanged()
 	return nil

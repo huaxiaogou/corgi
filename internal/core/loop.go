@@ -405,6 +405,15 @@ func (e *Engine) ensureRouter(ctx context.Context) {
 		if kind == "" {
 			kind = "claude"
 		}
+		if e.agents.CheckInstalled(e.home, kind) != nil {
+			installed := e.agents.DetectInstalled(e.home, true)
+			if len(installed) == 0 {
+				e.logger.Error("no agent CLI installed on hub for router", "configured", kind)
+				return
+			}
+			e.logger.Warn("configured router agent not installed on hub, falling back", "configured", kind, "fallback", installed[0])
+			kind = installed[0]
+		}
 		ad, err := e.agents.Get(kind)
 		if err != nil {
 			e.logger.Error("router adapter invalid", "kind", kind, "err", err)
@@ -417,7 +426,8 @@ func (e *Engine) ensureRouter(ctx context.Context) {
 			_ = ad.PreTrustWorkspace(e.home, e.memory.RouterDir())
 		}
 		args := ad.LaunchArgs(st.RouterModel, st.RouterEffort, !st.AskPermissions)
-		_, paneID, err := e.fleet.CreateWorkspace(bg, "", e.memory.RouterDir(), model.RouterLabel)
+		e.closeWorkspacesByLabel(bg, model.RouterLabel)
+		wsID, paneID, err := e.fleet.CreateWorkspace(bg, "", e.memory.RouterDir(), model.RouterLabel)
 		if err != nil {
 			e.logger.Error("create router workspace failed", "err", err)
 			return
@@ -425,7 +435,8 @@ func (e *Engine) ensureRouter(ctx context.Context) {
 		if err := e.fleet.StartAgent(bg, paneID, kind, model.RouterName, args); err != nil {
 			var he *herdr.Error
 			if !(errors.As(err, &he) && he.Code == "agent_not_ready") {
-				e.logger.Error("start router agent failed", "err", err)
+				e.logger.Error("start router agent failed, closing workspace", "kind", kind, "err", err)
+				_ = e.fleet.CloseWorkspace(bg, wsID)
 				return
 			}
 		}
