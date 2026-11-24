@@ -5,7 +5,23 @@ import "@xterm/xterm/css/xterm.css";
 
 interface Props {
   frame: string;
+  onKey?: (key: string) => void;
+  onText?: (text: string) => void;
 }
+
+const KEY_MAP: Record<string, string> = {
+  "\x1b[A": "up",
+  "\x1b[B": "down",
+  "\x1b[C": "right",
+  "\x1b[D": "left",
+  "\r": "enter",
+  "\x1b": "esc",
+  "\t": "tab",
+  "\x7f": "backspace",
+  "\x03": "ctrl+c",
+  "\x04": "ctrl+d",
+  "\x0c": "ctrl+l",
+};
 
 function readThemeColors() {
   const cs = getComputedStyle(document.documentElement);
@@ -15,16 +31,20 @@ function readThemeColors() {
   return { background: bg, foreground: fg, cursor };
 }
 
-export function TerminalScreen({ frame }: Props) {
+export function TerminalScreen({ frame, onKey, onText }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const onKeyRef = useRef(onKey);
+  const onTextRef = useRef(onText);
+  onKeyRef.current = onKey;
+  onTextRef.current = onText;
 
   useEffect(() => {
     const el = hostRef.current;
     if (!el) return;
     const term = new Terminal({
-      disableStdin: true,
+      disableStdin: false,
       convertEol: true,
       scrollback: 1000,
       fontSize: 12.5,
@@ -38,6 +58,17 @@ export function TerminalScreen({ frame }: Props) {
     fit.fit();
     termRef.current = term;
     fitRef.current = fit;
+
+    const dataSub = term.onData((data) => {
+      const mapped = KEY_MAP[data];
+      if (mapped) {
+        onKeyRef.current?.(mapped);
+        return;
+      }
+      if (data && !data.startsWith("\x1b")) {
+        onTextRef.current?.(data);
+      }
+    });
 
     const ro = new ResizeObserver(() => {
       try {
@@ -54,6 +85,7 @@ export function TerminalScreen({ frame }: Props) {
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
     return () => {
+      dataSub.dispose();
       mo.disconnect();
       ro.disconnect();
       term.dispose();

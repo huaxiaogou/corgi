@@ -68,6 +68,10 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
     await api(`/api/panes/${encodeURIComponent(pane.pane_id)}/keys`, { keys: [key] });
   };
 
+  const sendRawText = async (text: string) => {
+    await api(`/api/panes/${encodeURIComponent(pane.pane_id)}/text`, { text, enter: false });
+  };
+
   const answerApproval = async (choice: Approval["choices"][number]) => {
     if (approval?.style === "cursor" && choice.cursor && choice.cursor > 0) {
       const keys = [...Array<string>(Math.max(0, choice.cursor - 1)).fill("down"), "enter"];
@@ -125,7 +129,7 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
       <div className="flex-1 overflow-y-auto px-5 py-5 min-h-0">
         {mode === "screen" ? (
           <div className="h-full max-w-[960px] mx-auto">
-            <TerminalScreen frame={logText} />
+            <TerminalScreen frame={logText} onKey={(k) => void sendKey(k)} onText={(t) => void sendRawText(t)} />
           </div>
         ) : mode === "chat" && messages.length > 0 ? (
           <div className="max-w-[740px] mx-auto space-y-4">

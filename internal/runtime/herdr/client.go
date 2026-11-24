@@ -132,7 +132,10 @@ func FindBin(name, home string) string {
 		filepath.Join(home, ".volta", "bin", name),
 	} {
 		if matches, _ := filepath.Glob(pat); len(matches) > 0 {
-			candidates = append(candidates, matches...)
+			// Reverse glob order so newer Node versions (e.g. v24 before v20) win.
+			for i := len(matches) - 1; i >= 0; i-- {
+				candidates = append(candidates, matches[i])
+			}
 		}
 	}
 	for _, p := range candidates {
