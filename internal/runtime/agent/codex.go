@@ -5,13 +5,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/kiperjing/corgi/internal/model"
+	"github.com/kiperjing/corgi/internal/runtime/herdr"
 )
 
 // CodexAdapter adapts OpenAI Codex CLI to Corgi's runtime.
@@ -44,16 +48,233 @@ func (c *CodexAdapter) ResumeArgs(sessionID string) []string {
 
 func (c *CodexAdapter) PreTrustWorkspace(_, _ string) error { return nil }
 
-func (c *CodexAdapter) DiscoverModels(_ context.Context, _ string) (*model.ModelCatalog, error) {
-	return &model.ModelCatalog{
+func (c *CodexAdapter) DiscoverModels(ctx context.Context, home string) (*model.ModelCatalog, error) {
+	cat := &model.ModelCatalog{
 		Kind:    "codex",
-		Efforts: AllEfforts,
-		Models: []model.ModelOpt{
-			{ID: "gpt-5.3-codex", Label: "GPT-5.3 Codex", Note: "主力编码"},
-			{ID: "gpt-5-codex", Label: "GPT-5 Codex", Note: "通用稳定"},
-			{ID: "o4-mini", Label: "o4-mini", Note: "轻量快速"},
+		Efforts: []string{},
+		Models:  []model.ModelOpt{},
+	}
+
+	if b, err := os.ReadFile(filepath.Join(codexHome(home), "config.toml")); err == nil {
+		cat.Default, cat.DefaultEffort = parseCodexConfigTOML(string(b))
+	}
+
+	if bin := herdr.FindBin("codex", home); bin != "" {
+		if items, err := queryCodexAppServer(ctx, bin); err == nil {
+			cat.Models, cat.Efforts = buildCodexCatalog(items)
+		}
+	}
+
+	if cat.Default != "" && ModelNameRe.MatchString(cat.Default) {
+		found := false
+		for _, m := range cat.Models {
+			if m.ID == cat.Default {
+				found = true
+				break
+			}
+		}
+		if !found {
+			cat.Models = append([]model.ModelOpt{{ID: cat.Default, Label: cat.Default, Note: "当前默认"}}, cat.Models...)
+		}
+	}
+	if len(cat.Efforts) == 0 {
+		cat.Efforts = append([]string(nil), AllEfforts...)
+	}
+	if cat.DefaultEffort != "" && ModelNameRe.MatchString(cat.DefaultEffort) && !slices.Contains(cat.Efforts, cat.DefaultEffort) {
+		cat.Efforts = append(cat.Efforts, cat.DefaultEffort)
+	}
+	return cat, nil
+}
+
+type codexModelItem struct {
+	ID          string `json:"id"`
+	Model       string `json:"model"`
+	DisplayName string `json:"displayName"`
+	Hidden      bool   `json:"hidden"`
+	Efforts     []struct {
+		Effort string `json:"reasoningEffort"`
+	} `json:"supportedReasoningEfforts"`
+}
+
+func queryCodexAppServer(ctx context.Context, bin string) ([]codexModelItem, error) {
+	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(cctx, bin, "app-server")
+	cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = stdin.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+
+	return fetchCodexModelsRPC(cctx, stdout, stdin)
+}
+
+func fetchCodexModelsRPC(ctx context.Context, r io.Reader, w io.Writer) ([]codexModelItem, error) {
+	send := func(v any) error {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(append(b, '\n'))
+		return err
+	}
+	if err := send(map[string]any{
+		"id":     1,
+		"method": "initialize",
+		"params": map[string]any{
+			"clientInfo": map[string]string{"name": "corgi", "version": "1"},
 		},
-	}, nil
+	}); err != nil {
+		return nil, err
+	}
+
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+	waitReply := func(wantID int) (json.RawMessage, error) {
+		for sc.Scan() {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			var msg struct {
+				ID     *int            `json:"id"`
+				Method string          `json:"method"`
+				Result json.RawMessage `json:"result"`
+				Error  *struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(sc.Bytes(), &msg) != nil || msg.ID == nil || msg.Method != "" || *msg.ID != wantID {
+				continue
+			}
+			if msg.Error != nil {
+				return nil, fmt.Errorf("codex rpc error: %s", msg.Error.Message)
+			}
+			return msg.Result, nil
+		}
+		if err := sc.Err(); err != nil {
+			return nil, err
+		}
+		return nil, io.EOF
+	}
+
+	if _, err := waitReply(1); err != nil {
+		return nil, err
+	}
+	if err := send(map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {
+		return nil, err
+	}
+	if err := send(map[string]any{"id": 2, "method": "model/list", "params": map[string]any{}}); err != nil {
+		return nil, err
+	}
+	raw, err := waitReply(2)
+	if err != nil {
+		return nil, err
+	}
+	var res struct {
+		Data []codexModelItem `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, err
+	}
+	return res.Data, nil
+}
+
+func buildCodexCatalog(items []codexModelItem) ([]model.ModelOpt, []string) {
+	models := make([]model.ModelOpt, 0, len(items))
+	seen := map[string]bool{}
+	var allEfforts []string
+	for _, it := range items {
+		if it.Hidden {
+			continue
+		}
+		id := strings.TrimSpace(it.Model)
+		if id == "" {
+			id = strings.TrimSpace(it.ID)
+		}
+		if id == "" || seen[id] || !ModelNameRe.MatchString(id) {
+			continue
+		}
+		seen[id] = true
+		label := strings.TrimSpace(it.DisplayName)
+		if label == "" {
+			label = id
+		}
+		var efforts []string
+		for _, e := range it.Efforts {
+			ef := strings.TrimSpace(e.Effort)
+			if ef == "" || !ModelNameRe.MatchString(ef) {
+				continue
+			}
+			if !slices.Contains(efforts, ef) {
+				efforts = append(efforts, ef)
+			}
+			if !slices.Contains(allEfforts, ef) {
+				allEfforts = append(allEfforts, ef)
+			}
+		}
+		models = append(models, model.ModelOpt{
+			ID:      id,
+			Label:   label,
+			Efforts: efforts,
+		})
+	}
+	return models, allEfforts
+}
+
+// parseCodexConfigTOML extracts top-level model and model_reasoning_effort from ~/.codex/config.toml.
+func parseCodexConfigTOML(raw string) (defaultModel, defaultEffort string) {
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			break
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = parseTOMLStringValue(v)
+		switch k {
+		case "model":
+			defaultModel = v
+		case "model_reasoning_effort":
+			defaultEffort = v
+		}
+	}
+	return defaultModel, defaultEffort
+}
+
+func parseTOMLStringValue(raw string) string {
+	v := strings.TrimSpace(raw)
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') {
+		q := v[0]
+		if end := strings.IndexByte(v[1:], q); end >= 0 {
+			return v[1 : 1+end]
+		}
+	}
+	if i := strings.IndexByte(v, '#'); i >= 0 {
+		v = v[:i]
+	}
+	return strings.TrimSpace(v)
 }
 
 func (c *CodexAdapter) LocateTranscript(home, _, sessionID string, _ time.Time) string {

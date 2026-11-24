@@ -149,9 +149,10 @@ export interface PaneState {
 
 export interface ModelCatalog {
   kind: string;
-  models: { id: string; label?: string; note?: string }[];
+  models: { id: string; label?: string; note?: string; efforts?: string[] }[];
   efforts: string[];
   default?: string;
+  default_effort?: string;
 }
 
 export interface Timer {

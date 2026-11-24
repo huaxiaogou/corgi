@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -183,5 +186,81 @@ func TestCodeBuddyTranscriptAndModelDiscovery(t *testing.T) {
 	usage := cb.ReadContextUsage(logPath, 200000)
 	if usage.Used != 42000 || usage.Pct() != 21 {
 		t.Fatalf("unexpected codebuddy usage: %+v", usage)
+	}
+}
+
+func TestCodexModelDiscoveryAndConfigTOML(t *testing.T) {
+	tomlCfg := `
+# top-level codex config
+model = "gpt-6.2-sol" # inline comment
+model_reasoning_effort = 'xhigh'
+
+[profiles.fast]
+model = "ignored-profile-model"
+model_reasoning_effort = "low"
+`
+	defModel, defEffort := parseCodexConfigTOML(tomlCfg)
+	if defModel != "gpt-6.2-sol" || defEffort != "xhigh" {
+		t.Fatalf("unexpected toml defaults: model=%q effort=%q", defModel, defEffort)
+	}
+
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	defer c2sR.Close()
+	defer s2cR.Close()
+
+	go func() {
+		defer s2cW.Close()
+		sc := bufio.NewScanner(c2sR)
+		for sc.Scan() {
+			var req struct {
+				ID     *int   `json:"id"`
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(sc.Bytes(), &req) != nil {
+				continue
+			}
+			switch req.Method {
+			case "initialize":
+				_, _ = io.WriteString(s2cW, `{"method":"server/banner","params":{}}`+"\n")
+				_, _ = io.WriteString(s2cW, `{"id":1,"result":{"userAgent":"corgi/test"}}`+"\n")
+			case "model/list":
+				_, _ = io.WriteString(s2cW, `{"id":2,"result":{"data":[{"id":"gpt-6.2-sol","model":"gpt-6.2-sol","displayName":"GPT-6.2-Sol","hidden":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"xhigh"},{"reasoningEffort":"ultra"}]},{"id":"hidden-internal","model":"hidden-internal","displayName":"Hidden","hidden":true},{"id":"gpt-6-luna","model":"gpt-6-luna","displayName":"GPT-6-Luna","hidden":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"max"}]}]}}`+"\n")
+				return
+			}
+		}
+	}()
+
+	items, err := fetchCodexModelsRPC(context.Background(), s2cR, c2sW)
+	_ = c2sW.Close()
+	if err != nil {
+		t.Fatalf("fetchCodexModelsRPC failed: %v", err)
+	}
+	models, efforts := buildCodexCatalog(items)
+	if len(models) != 2 || models[0].ID != "gpt-6.2-sol" || models[0].Label != "GPT-6.2-Sol" {
+		t.Fatalf("unexpected codex models: %+v", models)
+	}
+	if !slices.Equal(models[0].Efforts, []string{"low", "xhigh", "ultra"}) {
+		t.Fatalf("unexpected per-model efforts: %v", models[0].Efforts)
+	}
+	if !slices.Equal(efforts, []string{"low", "xhigh", "ultra", "max"}) {
+		t.Fatalf("unexpected union efforts: %v", efforts)
+	}
+}
+
+func TestParseAgyModelsOutput(t *testing.T) {
+	raw := "\r⠋ Fetching available models...\rgemini-4-neon-high\tGemini 4 Neon (High)\n" +
+		"gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)\n" +
+		"gemini-4-neon-high\tDuplicate\n" +
+		"claude-opus-5-5-high\tClaude Opus 5.5 (High)\n"
+	got := parseAgyModelsOutput(raw)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 agy models, got %d: %+v", len(got), got)
+	}
+	if got[0].ID != "gemini-4-neon-high" || got[0].Label != "Gemini 4 Neon (High)" {
+		t.Fatalf("unexpected first agy model: %+v", got[0])
+	}
+	if got[2].ID != "claude-opus-5-5-high" || got[2].Label != "Claude Opus 5.5 (High)" {
+		t.Fatalf("unexpected third agy model: %+v", got[2])
 	}
 }

@@ -57,6 +57,18 @@ export function LauncherModal({ open, machines, onClose, onLaunched, onToast }: 
     fetchModels(false);
   }, [open, kind, machine]);
 
+  const selectedModel = (catalog?.models ?? []).find((m) => m.id === modelName);
+  const effortOptions =
+    selectedModel?.efforts && selectedModel.efforts.length > 0
+      ? selectedModel.efforts
+      : (catalog?.efforts ?? ["low", "medium", "high"]);
+
+  useEffect(() => {
+    if (effort && effortOptions.length > 0 && !effortOptions.includes(effort)) {
+      setEffort("");
+    }
+  }, [effort, effortOptions.join(",")]);
+
   if (!open) return null;
 
   const submit = async (e: FormEvent) => {
@@ -80,9 +92,7 @@ export function LauncherModal({ open, machines, onClose, onLaunched, onToast }: 
       <form onSubmit={(e) => void submit(e)} className="w-full max-w-[480px] max-h-[90vh] flex flex-col card-floating rounded-2xl overflow-hidden">
         <div className="px-5 py-3.5 flex items-center justify-between border-b border-hairline shrink-0">
           <h3 className="text-sm font-semibold">手动新建</h3>
-          <button type="button" onClick={onClose} className="text-muted cursor-pointer">
-            <X className="w-4 h-4" />
-          </button>
+          <button type="button" onClick={onClose} className="text-muted cursor-pointer"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="p-5 space-y-4 text-xs overflow-y-auto">
@@ -96,16 +106,12 @@ export function LauncherModal({ open, machines, onClose, onLaunched, onToast }: 
                   <button
                     key={m.id || "local"}
                     type="button"
-                    onClick={() => {
-                      setMachine(m.id);
-                      setCwd("~");
-                    }}
+                    onClick={() => { setMachine(m.id); setCwd("~"); }}
                     className={`px-3 py-1.5 rounded-lg border cursor-pointer ${
                       machine === m.id ? "border-strong surface-rail font-medium text-primary" : "border-hairline text-secondary"
                     }`}
                   >
-                    {m.name}
-                    {m.local ? " (hub)" : ""}
+                    {m.name}{m.local ? " (hub)" : ""}
                   </button>
                 ))}
               </div>
@@ -119,11 +125,7 @@ export function LauncherModal({ open, machines, onClose, onLaunched, onToast }: 
                 <button
                   key={k}
                   type="button"
-                  onClick={() => {
-                    setKind(k);
-                    setModelName("");
-                    setEffort("");
-                  }}
+                  onClick={() => { setKind(k); setModelName(""); setEffort(""); }}
                   className={`py-2 px-3 rounded-xl cursor-pointer font-medium border ${
                     kind === k ? "border-strong surface-rail text-primary" : "border-hairline text-secondary"
                   } ${ready ? "" : "opacity-50"}`}
@@ -137,31 +139,22 @@ export function LauncherModal({ open, machines, onClose, onLaunched, onToast }: 
 
           {kind !== "shell" && (
             <div className="flex items-center gap-2">
-              <select
-                value={modelName}
-                onChange={(e) => setModelName(e.target.value)}
-                className="flex-1 min-w-0 px-3 py-2 rounded-lg surface-rail border border-hairline outline-none"
-              >
+              <select value={modelName} onChange={(e) => setModelName(e.target.value)} className="flex-1 min-w-0 px-3 py-2 rounded-lg surface-rail border border-hairline outline-none">
                 <option value="">{loadingModels ? "读取可用模型中…" : catalog?.default ? `默认（${catalog.default}）` : "默认模型"}</option>
                 {(catalog?.models ?? []).map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label || m.id}
-                    {m.note ? ` · ${m.note}` : ""}
-                  </option>
+                  <option key={m.id} value={m.id}>{m.label || m.id}{m.note ? ` · ${m.note}` : ""}</option>
                 ))}
               </select>
               <select
                 value={effort}
-                disabled={Boolean(catalog && catalog.efforts.length === 0)}
+                disabled={Boolean(catalog && effortOptions.length === 0)}
                 onChange={(e) => setEffort(e.target.value)}
                 className="w-32 shrink-0 px-3 py-2 rounded-lg surface-rail border border-hairline outline-none disabled:opacity-50"
               >
-                <option value="">{catalog && catalog.efforts.length === 0 ? "无思考强度" : "默认思考"}</option>
-                {(catalog?.efforts ?? ["low", "medium", "high"]).map((ef) => (
-                  <option key={ef} value={ef}>
-                    {ef}
-                  </option>
-                ))}
+                <option value="">
+                  {catalog && effortOptions.length === 0 ? "无思考强度" : catalog?.default_effort ? `默认（${catalog.default_effort}）` : "默认思考"}
+                </option>
+                {effortOptions.map((ef) => <option key={ef} value={ef}>{ef}</option>)}
               </select>
               <button
                 type="button"
@@ -178,31 +171,15 @@ export function LauncherModal({ open, machines, onClose, onLaunched, onToast }: 
 
           {kind !== "shell" && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="名字（可选，小写字母开头）"
-                className="w-full px-3 py-2 rounded-lg font-mono-code surface-rail border border-hairline outline-none"
-              />
-              <input
-                type="text"
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder="第一个任务（可选）"
-                className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline outline-none"
-              />
+              <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="名字（可选，小写字母开头）" className="w-full px-3 py-2 rounded-lg font-mono-code surface-rail border border-hairline outline-none" />
+              <input type="text" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="第一个任务（可选）" className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline outline-none" />
             </div>
           )}
         </div>
 
         <div className="px-5 py-3 flex justify-end gap-2 border-t border-hairline shrink-0">
-          <button type="button" onClick={onClose} className="px-3.5 py-1.5 rounded-lg text-xs border border-strong text-secondary cursor-pointer">
-            取消
-          </button>
-          <button type="submit" disabled={busy} className="px-4 py-1.5 rounded-lg text-xs font-medium btn-accent cursor-pointer disabled:opacity-50">
-            {busy ? "启动中…" : "启动"}
-          </button>
+          <button type="button" onClick={onClose} className="px-3.5 py-1.5 rounded-lg text-xs border border-strong text-secondary cursor-pointer">取消</button>
+          <button type="submit" disabled={busy} className="px-4 py-1.5 rounded-lg text-xs font-medium btn-accent cursor-pointer disabled:opacity-50">{busy ? "启动中…" : "启动"}</button>
         </div>
       </form>
     </div>

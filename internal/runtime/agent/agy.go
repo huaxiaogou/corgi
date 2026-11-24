@@ -108,33 +108,68 @@ func (a *AgyAdapter) DiscoverModels(ctx context.Context, home string) (*model.Mo
 		Efforts: AllEfforts,
 		Models:  []model.ModelOpt{},
 	}
-	bin := herdr.FindBin("agy", home)
-	if bin != "" {
-		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	if bin := herdr.FindBin("agy", home); bin != "" {
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
-		if out, err := exec.CommandContext(cctx, bin, "models").Output(); err == nil {
-			for _, line := range strings.Split(string(out), "\n") {
-				fields := strings.Fields(strings.TrimSpace(line))
-				if len(fields) == 0 || strings.HasPrefix(fields[0], "#") || strings.EqualFold(fields[0], "MODEL") {
-					continue
-				}
-				id := strings.TrimPrefix(fields[0], "*")
-				if ModelNameRe.MatchString(id) && len(id) > 1 {
-					label := id
-					if len(fields) > 1 {
-						label = strings.Join(fields[1:], " ")
-					}
-					cat.Models = append(cat.Models, model.ModelOpt{ID: id, Label: label})
-				}
+		cmd := exec.CommandContext(cctx, bin, "models")
+		cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if out, err := cmd.Output(); err == nil {
+			cat.Models = parseAgyModelsOutput(string(out))
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(agyHome(home), "settings.json")); err == nil {
+		var cfg struct {
+			Model  string `json:"model"`
+			Effort string `json:"effort"`
+		}
+		if json.Unmarshal(b, &cfg) == nil {
+			if cfg.Model != "" {
+				cat.Default = cfg.Model
+			}
+			if cfg.Effort != "" {
+				cat.DefaultEffort = cfg.Effort
 			}
 		}
 	}
-	if len(cat.Models) == 0 {
-		cat.Models = []model.ModelOpt{
-			{ID: "default", Label: "Antigravity 默认模型"},
-		}
-	}
 	return cat, nil
+}
+
+func parseAgyModelsOutput(raw string) []model.ModelOpt {
+	var models []model.ModelOpt
+	seen := map[string]bool{}
+	for _, line := range strings.Split(raw, "\n") {
+		if idx := strings.LastIndexByte(line, '\r'); idx >= 0 {
+			line = line[idx+1:]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		var id, label string
+		if left, right, ok := strings.Cut(line, "\t"); ok {
+			id = strings.TrimSpace(left)
+			label = strings.TrimSpace(right)
+		} else {
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
+			}
+			id = fields[0]
+			if len(fields) > 1 {
+				label = strings.Join(fields[1:], " ")
+			}
+		}
+		id = strings.TrimPrefix(id, "*")
+		if id == "" || len(id) <= 1 || strings.EqualFold(id, "MODEL") || seen[id] || !ModelNameRe.MatchString(id) {
+			continue
+		}
+		seen[id] = true
+		if label == "" {
+			label = id
+		}
+		models = append(models, model.ModelOpt{ID: id, Label: label})
+	}
+	return models
 }
 
 func (a *AgyAdapter) LocateTranscript(home, cwd, sessionID string, since time.Time) string {
