@@ -26,10 +26,13 @@ type CodeBuddyAdapter struct{}
 func (c *CodeBuddyAdapter) Kind() string        { return "codebuddy" }
 func (c *CodeBuddyAdapter) DisplayName() string { return "CodeBuddy" }
 
-func (c *CodeBuddyAdapter) LaunchArgs(modelName, _ string, bypassPerm bool) []string {
+func (c *CodeBuddyAdapter) LaunchArgs(modelName, effort string, bypassPerm bool) []string {
 	var args []string
 	if modelName != "" {
 		args = append(args, "--model", modelName)
+	}
+	if effort != "" {
+		args = append(args, "--effort", effort)
 	}
 	if bypassPerm {
 		args = append(args, "--dangerously-skip-permissions")
@@ -53,12 +56,16 @@ func (c *CodeBuddyAdapter) DiscoverModels(ctx context.Context, home string) (*mo
 		Models:  []model.ModelOpt{},
 	}
 	if bin := herdr.FindBin("codebuddy", home); bin != "" {
-		cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(cctx, bin, "--help")
 		cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
-		if out, err := cmd.CombinedOutput(); err == nil {
-			cat.Models = parseCodeBuddyHelpModels(string(out))
+		if out, err := cmd.Output(); err == nil {
+			txt := string(out)
+			cat.Models = parseCodeBuddyHelpModels(txt)
+			if strings.Contains(txt, "--effort") {
+				cat.Efforts = AllEfforts
+			}
 		}
 	}
 	if len(cat.Models) == 0 {
@@ -75,6 +82,16 @@ func (c *CodeBuddyAdapter) DiscoverModels(ctx context.Context, home string) (*mo
 		}
 		if json.Unmarshal(b, &cfg) == nil && cfg.Model != "" {
 			cat.Default = cfg.Model
+			found := false
+			for _, m := range cat.Models {
+				if m.ID == cfg.Model {
+					found = true
+					break
+				}
+			}
+			if !found && ModelNameRe.MatchString(cfg.Model) {
+				cat.Models = append([]model.ModelOpt{{ID: cfg.Model, Label: cfg.Model, Note: "当前默认"}}, cat.Models...)
+			}
 		}
 	}
 	return cat, nil

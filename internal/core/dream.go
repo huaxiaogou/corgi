@@ -309,19 +309,29 @@ statusCheck:
 	e.mu.Unlock()
 
 	wait := time.Since(d.at)
+	journal := filepath.Join(e.memory.DreamsDir(), journalName(d.at)+".md")
+	journalFresh := false
+	if fi, err := os.Stat(journal); err == nil && !fi.ModTime().Before(d.at) && fi.Size() > 0 {
+		journalFresh = true
+	}
 	switch {
 	case worked && !idleAt.IsZero() && time.Since(idleAt) > 6*time.Second:
 		e.finishDream(ctx, d, true)
+	case !worked && journalFresh && !idleAt.IsZero() && time.Since(idleAt) > 10*time.Second:
+		e.finishDream(ctx, d, true)
 	case !alive && worked, wait > 25*time.Minute, !worked && !idleAt.IsZero() && time.Since(idleAt) > 2*time.Minute:
-		e.finishDream(ctx, d, worked)
+		e.finishDream(ctx, d, worked || journalFresh)
 	}
 }
 
 func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 	e.closeWorkspacesByLabel(ctx, model.DreamLabel)
 	summary, skills, fixes := "", "", ""
-	if ok {
+	if ok || d.reason == "nightly" {
+		// Always advance last_dream on nightly runs so a failed dream cannot spin in a 2-minute loop.
 		e.setLastDream(ctx, time.Now())
+	}
+	if ok {
 		journal := filepath.Join(e.memory.DreamsDir(), journalName(d.at)+".md")
 		summary = parseDreamSummary(journal)
 		skills = parseDreamPrefixLine(journal, dreamSkillsPrefix)

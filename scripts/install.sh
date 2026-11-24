@@ -202,7 +202,7 @@ $args
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>3</integer>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>$(xml "$log")</string>
   <key>StandardErrorPath</key><string>$(xml "$log")</string>
 </dict>
