@@ -1,0 +1,41 @@
+@import "tailwindcss";
+@import "./tokens.css";
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-mono-code {
+  font-family: var(--mono);
+}
+
+.surface-bg { background: var(--bg); }
+.surface-rail { background: var(--bg-2); }
+.surface-hover:hover { background: var(--bg-3); }
+.border-hairline { border-color: var(--line); }
+.border-strong { border-color: var(--line-2); }
+.text-primary { color: var(--fg); }
+.text-secondary { color: var(--fg-2); }
+.text-muted { color: var(--fg-3); }
+.btn-accent { background: var(--accent); color: var(--on-accent); }
+.pill-user { background: var(--user-bg); color: var(--user-fg); }
+.card-floating {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-card);
+}
+.composer-box {
+  background: var(--bg);
+  border: 1px solid var(--line-2);
+  box-shadow: var(--shadow-composer);
+}
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 999px; }
+::-webkit-scrollbar-track { background: transparent; }

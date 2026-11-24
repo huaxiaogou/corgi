@@ -1,0 +1,15 @@
+{
+  "id": "/",
+  "name": "Corgi",
+  "short_name": "Corgi",
+  "description": "1 个柯基大脑 + 多台电脑手脚，放牧你的编程 Agent",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
