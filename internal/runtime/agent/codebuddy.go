@@ -55,7 +55,9 @@ func (c *CodeBuddyAdapter) DiscoverModels(ctx context.Context, home string) (*mo
 	if bin := herdr.FindBin("codebuddy", home); bin != "" {
 		cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		defer cancel()
-		if out, err := exec.CommandContext(cctx, bin, "--help").CombinedOutput(); err == nil {
+		cmd := exec.CommandContext(cctx, bin, "--help")
+		cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if out, err := cmd.CombinedOutput(); err == nil {
 			cat.Models = parseCodeBuddyHelpModels(string(out))
 		}
 	}
