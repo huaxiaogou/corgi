@@ -84,6 +84,46 @@ checkout() {
   printf '%s\n' "$d"
 }
 
+ensure_shell_path() {
+  # If /usr/local/bin is writable (e.g. root on Linux), link corgi/herdr there so
+  # the current shell can run `corgi` immediately without even re-sourcing rc files.
+  if [ -d /usr/local/bin ] && [ -w /usr/local/bin ] && [ "$BIN_DIR" != "/usr/local/bin" ]; then
+    ln -sf "$BIN" /usr/local/bin/corgi
+    [ -x "$BIN_DIR/herdr" ] && ln -sf "$BIN_DIR/herdr" /usr/local/bin/herdr
+  fi
+
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) return 0 ;;
+  esac
+
+  line="export PATH=\"$BIN_DIR:\$PATH\""
+  updated=""
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    [ -f "$rc" ] || continue
+    if ! grep -Fq "$BIN_DIR" "$rc" 2>/dev/null; then
+      printf '\n# Added by Corgi installer\n%s\n' "$line" >> "$rc"
+      updated="$updated $rc"
+    fi
+  done
+  if [ -z "$updated" ]; then
+    case "${SHELL:-}" in
+      */zsh)  target_rc="$HOME/.zshrc" ;;
+      */bash) target_rc="$HOME/.bashrc" ;;
+      *)      target_rc="$HOME/.profile" ;;
+    esac
+    if ! grep -Fq "$BIN_DIR" "$target_rc" 2>/dev/null; then
+      printf '\n# Added by Corgi installer\n%s\n' "$line" >> "$target_rc"
+      updated=" $target_rc"
+    fi
+  fi
+  if [ -n "$updated" ]; then
+    step "已自动将 $BIN_DIR 写入$updated"
+    if [ ! -L /usr/local/bin/corgi ]; then
+      say "    当前终端若未立即生效，执行一次：export PATH=\"$BIN_DIR:\$PATH\""
+    fi
+  fi
+}
+
 install_binary() {
   asset=corgi-$os-$arch
   if [ "$VERSION" = latest ]; then
@@ -126,11 +166,9 @@ install_binary() {
   chmod 755 "$tmp/$asset"
   mv -f "$tmp/$asset" "$BIN.new" && mv -f "$BIN.new" "$BIN"
   step "已安装 $("$BIN" version 2>/dev/null || echo corgi) → $BIN"
-  case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) say "    提示：$BIN_DIR 不在 PATH 中，建议写入 ~/.zshrc 或 ~/.bashrc："
-       say "      export PATH=\"$BIN_DIR:\$PATH\"" ;;
-  esac
+  if [ -z "${CORGI_DRY_SERVICE:-}" ]; then
+    ensure_shell_path
+  fi
 }
 
 # ------------------------------------------------------------------ daemon service
@@ -220,7 +258,11 @@ WantedBy=default.target"
     step "已作为后台服务常驻（systemd --user: corgi-$name）"
     say "    日志：journalctl --user -u corgi-$name -f"
     if command -v loginctl >/dev/null 2>&1 && ! loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes; then
-      say "    提示：退出 SSH 后保持常驻请运行一次：loginctl enable-linger"
+      if loginctl enable-linger "$(id -un)" 2>/dev/null; then
+        step "已自动开启 loginctl enable-linger（断开 SSH 后继续后台常驻）"
+      else
+        say "    提示：退出 SSH 后保持常驻请运行一次：loginctl enable-linger"
+      fi
     fi
   fi
 }
@@ -235,6 +277,7 @@ setup_herdr() {
     step "自动安装 herdr（Corgi 底层终端引擎；跳过可设 CORGI_NO_HERDR=1）"
     if curl -fsSL https://herdr.dev/install.sh | HERDR_INSTALL_DIR="$BIN_DIR" sh >/dev/null 2>&1; then
       hb=$BIN_DIR/herdr
+      [ -d /usr/local/bin ] && [ -w /usr/local/bin ] && [ "$BIN_DIR" != "/usr/local/bin" ] && ln -sf "$hb" /usr/local/bin/herdr
       step "herdr 安装完成 → $hb"
     else
       warn "herdr 自动安装未成功，可稍后手动执行：curl -fsSL https://herdr.dev/install.sh | sh"
