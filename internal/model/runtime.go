@@ -162,10 +162,11 @@ type PaneSession struct {
 
 // Choice is one selectable option parsed from a terminal confirmation dialog.
 type Choice struct {
-	Key    string `json:"key"`
-	Label  string `json:"label"`
-	Cursor int    `json:"cursor,omitempty"` // 1-based cursor index when menu uses arrows
-	Active bool   `json:"active,omitempty"`
+	Key    string   `json:"key"`
+	Label  string   `json:"label"`
+	Keys   []string `json:"keys,omitempty"` // explicit key sequence (e.g. ["down","right","enter"]) when menu requires cursor navigation
+	Cursor int      `json:"cursor,omitempty"`
+	Active bool     `json:"active,omitempty"`
 }
 
 // Approval is a parsed interactive dialog blocking a terminal agent.

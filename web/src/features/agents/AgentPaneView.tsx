@@ -150,6 +150,10 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
 
   const answerApproval = async (choice: Approval["choices"][number], idx: number) => {
     const enc = encodeURIComponent(pane.pane_id);
+    if (choice.keys && choice.keys.length > 0) {
+      await api(`/api/panes/${enc}/keys`, { keys: choice.keys });
+      return;
+    }
     if (approval?.style === "cursor") {
       await api(`/api/panes/${enc}/keys`, { keys: computeCursorMoveKeys(approval, idx) });
       return;

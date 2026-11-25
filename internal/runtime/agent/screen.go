@@ -16,14 +16,23 @@ import (
 )
 
 var (
-	numChoiceRe     = regexp.MustCompile(`^\s*([›>•❯▶]?)\s*(\d+)[.)]\s+(.+)$`)
-	cursorChoiceRe  = regexp.MustCompile(`^\s*([›>❯▶])\s+(.+)$`)
-	bracketBtnRe    = regexp.MustCompile(`\[([A-Za-z0-9][A-Za-z0-9 _/-]{1,24})\]`)
+	numChoiceRe     = regexp.MustCompile(`^\s*([›>•❯▶▸●➜→]?)\s*(\d+)[.)]\s+(.+)$`)
+	cursorChoiceRe  = regexp.MustCompile(`^(\s*)([›>❯▶▸➜→])\s+(.+)$`)
+	checkboxLineRe  = regexp.MustCompile(`^\s*([›>❯▶▸➜→])?\s*(\[[ xX✓]\])\s+(.+)$`)
+	horizTokenRe    = regexp.MustCompile(`(?:\[([A-Za-z][A-Za-z0-9 _/-]{1,20})\]|([›>❯▶▸➜→])\s+([A-Za-z][A-Za-z0-9/-]{1,20})(?:\s{2,}|$))`)
+	primaryBtnRe    = regexp.MustCompile(`(?i)^(done|confirm|continue|next|ok|accept|allow|yes|finish|submit)$`)
+	ruleOrLogoRe    = regexp.MustCompile(`^[-─━═╭╮╰╯┌┐└┘│┃|╌┄┈▄▀█▌▐░▒▓\s]+$`)
+	footerHintRe    = regexp.MustCompile(`(?i)(↑/↓|navigate\s*·|enter\s+(confirm|toggle|select)|esc\s+to\s+(cancel|interrupt)|\bauto\s*·\s*[a-z0-9])`)
 	bgFooterRe      = regexp.MustCompile(`(?i)\b[1-9]\d*\s+(background\s+(task|shell|job)s?\b|task\(s\)|shells?\s+running\b)`)
 	quotaErrRe      = regexp.MustCompile(`(?i)(usage limit|limit reached|hit your( \w+)? limit|reached your( \w+)? limit|quota exceeded|exceeded your( current)? quota|resource.?exhausted|daily limit|rate.?limit(ed)?\b|credit balance|out of credits|please run /login|not logged in|invalid api key|api error|overloaded|unexpected status \d{3}|try again (at|in) )`)
 	confirmHintRe   = regexp.MustCompile(`(?i)(do you want to|allow|proceed|trust (this|the files|the contents)|do you trust|confirm|press enter|esc to cancel|y/n|yes,?\s*(i trust|allow|proceed)|choose your color scheme|terms of service|select login method)`)
 	activityGlyphRe = regexp.MustCompile(`^[✢✳✶✻✽✹●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*(.+)$`)
 )
+
+type horizButton struct {
+	label   string
+	focused bool
+}
 
 // ScreenAsks reports whether a terminal screen is currently displaying an interactive confirmation dialog.
 func ScreenAsks(screen string) bool {
@@ -31,72 +40,339 @@ func ScreenAsks(screen string) bool {
 	return len(a.Choices) >= 2
 }
 
-// ParseApproval extracts structured question/choices from a terminal confirmation dialog.
+// cleanSplitColumn strips side-by-side preview panes (e.g. `light | Here's the change: |` or `│ preview │`)
+// while leaving normal single-column commands (like `cat a | grep b` which do not end in `|`) intact.
+func cleanSplitColumn(raw string) string {
+	line := strings.TrimRight(raw, " \t\r")
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return ""
+	}
+	// Strip outer Unicode vertical frame borders if present.
+	if strings.HasPrefix(trimmed, "│") || strings.HasPrefix(trimmed, "┃") {
+		idx := strings.IndexAny(line, "│┃")
+		line = line[idx+len("│"):]
+	}
+	if strings.HasSuffix(line, "│") || strings.HasSuffix(line, "┃") {
+		if last := strings.LastIndexAny(line, "│┃"); last >= 0 {
+			line = strings.TrimRight(line[:last], " ")
+		}
+	}
+	// Split on inner Unicode column divider.
+	if mid := strings.IndexAny(line, "│┃"); mid >= 0 {
+		line = strings.TrimRight(line[:mid], " ")
+	}
+	// Split on ASCII side-by-side preview box (`option | preview |`).
+	if strings.HasSuffix(strings.TrimSpace(line), "|") {
+		if bar := strings.Index(line, " |"); bar >= 0 {
+			line = strings.TrimRight(line[:bar], " ")
+		} else if strings.HasPrefix(strings.TrimSpace(line), "|") {
+			return ""
+		}
+	}
+	return line
+}
+
+func parseHorizontalButtons(line string) ([]horizButton, bool) {
+	t := strings.TrimSpace(line)
+	if t == "" || checkboxLineRe.MatchString(line) || numChoiceRe.MatchString(line) || strings.HasPrefix(t, "-") || strings.HasPrefix(t, "•") {
+		return nil, false
+	}
+	matches := horizTokenRe.FindAllStringSubmatch(line, -1)
+	if len(matches) < 2 {
+		return nil, false
+	}
+	out := make([]horizButton, 0, len(matches))
+	for _, m := range matches {
+		if m[1] != "" {
+			out = append(out, horizButton{label: strings.TrimSpace(m[1]), focused: false})
+		} else if m[3] != "" {
+			out = append(out, horizButton{label: strings.TrimSpace(m[3]), focused: true})
+		}
+	}
+	if len(out) < 2 {
+		return nil, false
+	}
+	return out, true
+}
+
+func verticalMoveKeys(curIdx, targetIdx int) []string {
+	var keys []string
+	for d := curIdx; d < targetIdx; d++ {
+		keys = append(keys, "down")
+	}
+	for d := curIdx; d > targetIdx; d-- {
+		keys = append(keys, "up")
+	}
+	return append(keys, "enter")
+}
+
+func horizontalMoveKeys(curIdx, targetIdx int) []string {
+	var keys []string
+	for d := curIdx; d < targetIdx; d++ {
+		keys = append(keys, "right")
+	}
+	for d := curIdx; d > targetIdx; d-- {
+		keys = append(keys, "left")
+	}
+	return append(keys, "enter")
+}
+
+// ParseApproval extracts structured question/choices and exact navigation keys from a terminal dialog.
 func ParseApproval(screen string) model.Approval {
-	lines := nonEmptyTail(screen, 28)
-	out := model.Approval{Raw: strings.Join(lines, "\n")}
-	if len(lines) == 0 {
+	var rawLines []string
+	for _, r := range strings.Split(screen, "\n") {
+		cleaned := cleanSplitColumn(r)
+		t := strings.TrimSpace(cleaned)
+		if t == "" || footerHintRe.MatchString(t) {
+			continue
+		}
+		rawLines = append(rawLines, cleaned)
+	}
+	if len(rawLines) > 32 {
+		rawLines = rawLines[len(rawLines)-32:]
+	}
+	trimmedLines := make([]string, len(rawLines))
+	for i, l := range rawLines {
+		trimmedLines[i] = strings.TrimSpace(l)
+	}
+	rawJoined := strings.Join(trimmedLines, "\n")
+	out := model.Approval{Raw: rawJoined}
+	if len(rawLines) == 0 {
 		return out
 	}
 
 	var choices []model.Choice
 	style := ""
 	firstChoiceIdx := -1
-	for i, l := range lines {
-		if m := numChoiceRe.FindStringSubmatch(l); m != nil {
-			if firstChoiceIdx < 0 {
-				firstChoiceIdx = i
+
+	// 1. First check for horizontal wizard button bars (e.g. `[Previous]  [Done]` or `> Previous  [Done]`),
+	// optionally paired with an agreement checkbox (`> [x] Yes, I agree...`) above the buttons.
+	if confirmHintRe.MatchString(rawJoined) {
+		for i := len(rawLines) - 1; i >= 0; i-- {
+			btns, ok := parseHorizontalButtons(rawLines[i])
+			if !ok {
+				continue
 			}
-			style = "number"
-			choices = append(choices, model.Choice{
-				Key:    m[2],
-				Label:  strings.TrimSpace(m[3]),
-				Cursor: len(choices) + 1,
-				Active: m[1] != "",
-			})
-			continue
-		}
-		if len(choices) == 0 {
-			if m := cursorChoiceRe.FindStringSubmatch(l); m != nil && confirmHintRe.MatchString(strings.Join(lines[:i+1], "\n")) {
-				firstChoiceIdx = i
-				style = "cursor"
-				choices = append(choices, model.Choice{
-					Key:    "1",
-					Label:  strings.TrimSpace(m[2]),
-					Cursor: 1,
-					Active: true,
-				})
+			firstChoiceIdx = i
+			style = "cursor"
+
+			// Look upward for an optional checkbox control above the button bar.
+			cbIdx := -1
+			cbFocused := false
+			cbMark := ""
+			cbText := ""
+			for j := i - 1; j >= 0; j-- {
+				if ruleOrLogoRe.MatchString(trimmedLines[j]) {
+					break
+				}
+				if m := checkboxLineRe.FindStringSubmatch(rawLines[j]); m != nil {
+					cbIdx = j
+					cbFocused = m[1] != ""
+					cbMark = m[2]
+					parts := []string{strings.TrimSpace(m[3])}
+					for k := j + 1; k < i; k++ {
+						tk := trimmedLines[k]
+						if tk == "" || strings.HasPrefix(strings.ToLower(tk), "links:") || strings.HasPrefix(tk, "- ") || ruleOrLogoRe.MatchString(tk) {
+							break
+						}
+						parts = append(parts, tk)
+					}
+					cbText = clipText(cbMark+" "+strings.Join(parts, " "), 96)
+					break
+				}
 			}
-		} else if style == "cursor" {
-			t := strings.TrimSpace(l)
-			low := strings.ToLower(t)
-			if t != "" && !strings.HasPrefix(low, "esc") && !strings.HasPrefix(low, "enter") && !strings.HasPrefix(low, "↑") && len(choices) < 6 {
+			if cbIdx >= 0 && cbIdx < firstChoiceIdx {
+				firstChoiceIdx = cbIdx
+			}
+
+			curBtn := -1
+			for bIdx, b := range btns {
+				if b.focused {
+					curBtn = bIdx
+					break
+				}
+			}
+
+			if cbIdx >= 0 {
+				// Wizard with checkbox + horizontal button bar:
+				// Surface the primary confirm button (e.g. Done) first so one tap completes setup,
+				// followed by the checkbox toggle and secondary navigation buttons.
+				type orderedBtn struct {
+					idx int
+					btn horizButton
+				}
+				var primary, secondary []orderedBtn
+				for bIdx, b := range btns {
+					if primaryBtnRe.MatchString(b.label) {
+						primary = append(primary, orderedBtn{idx: bIdx, btn: b})
+					} else {
+						secondary = append(secondary, orderedBtn{idx: bIdx, btn: b})
+					}
+				}
+				if len(primary) == 0 && len(secondary) > 0 {
+					last := secondary[len(secondary)-1]
+					primary = []orderedBtn{last}
+					secondary = secondary[:len(secondary)-1]
+				}
+
+				btnKeys := func(targetBtn int) []string {
+					if cbFocused || curBtn < 0 {
+						keys := []string{"down"}
+						for r := 0; r < targetBtn; r++ {
+							keys = append(keys, "right")
+						}
+						return append(keys, "enter")
+					}
+					return horizontalMoveKeys(curBtn, targetBtn)
+				}
+
+				for _, ob := range primary {
+					choices = append(choices, model.Choice{
+						Key:    strconv.Itoa(len(choices) + 1),
+						Label:  ob.btn.label,
+						Keys:   btnKeys(ob.idx),
+						Cursor: len(choices) + 1,
+						Active: ob.btn.focused,
+					})
+				}
+				cbKeys := []string{"enter"}
+				if !cbFocused && curBtn >= 0 {
+					cbKeys = []string{"up", "enter"}
+				}
 				choices = append(choices, model.Choice{
 					Key:    strconv.Itoa(len(choices) + 1),
-					Label:  t,
+					Label:  cbText,
+					Keys:   cbKeys,
 					Cursor: len(choices) + 1,
+					Active: cbFocused,
 				})
+				for _, ob := range secondary {
+					choices = append(choices, model.Choice{
+						Key:    strconv.Itoa(len(choices) + 1),
+						Label:  ob.btn.label,
+						Keys:   btnKeys(ob.idx),
+						Cursor: len(choices) + 1,
+						Active: ob.btn.focused,
+					})
+				}
+			} else {
+				// Pure horizontal button bar (no checkbox above).
+				if curBtn < 0 {
+					curBtn = len(btns) - 1
+				}
+				for bIdx, b := range btns {
+					choices = append(choices, model.Choice{
+						Key:    strconv.Itoa(bIdx + 1),
+						Label:  b.label,
+						Keys:   horizontalMoveKeys(curBtn, bIdx),
+						Cursor: bIdx + 1,
+						Active: bIdx == curBtn,
+					})
+				}
 			}
+			break
 		}
 	}
 
-	// Recognize horizontal wizard buttons like "[Previous]  [Done]" on onboarding/ToS dialogs.
-	if len(choices) < 2 && confirmHintRe.MatchString(out.Raw) {
-		for i := len(lines) - 1; i >= 0; i-- {
-			matches := bracketBtnRe.FindAllStringSubmatch(lines[i], -1)
-			if len(matches) >= 2 {
-				firstChoiceIdx = i
-				style = "cursor"
-				for idx, bm := range matches {
-					lbl := strings.TrimSpace(bm[1])
+	// 2. Numbered or vertical cursor menus (e.g. permission prompts, folder trust, color scheme picker).
+	if len(choices) < 2 {
+		choices = nil
+		style = ""
+		firstChoiceIdx = -1
+		cursorTextIndent := -1
+
+		for i, l := range rawLines {
+			t := trimmedLines[i]
+			if ruleOrLogoRe.MatchString(t) {
+				continue
+			}
+			if m := numChoiceRe.FindStringSubmatch(l); m != nil {
+				if firstChoiceIdx < 0 {
+					firstChoiceIdx = i
+				}
+				style = "number"
+				choices = append(choices, model.Choice{
+					Key:    m[2],
+					Label:  strings.TrimSpace(m[3]),
+					Cursor: len(choices) + 1,
+					Active: m[1] != "",
+				})
+				continue
+			}
+			if len(choices) == 0 {
+				// Do not mistake a standalone checkbox `[x] ...` for a vertical cursor list.
+				if checkboxLineRe.MatchString(l) {
+					continue
+				}
+				if m := cursorChoiceRe.FindStringSubmatch(l); m != nil && confirmHintRe.MatchString(strings.Join(trimmedLines[:i+1], "\n")) {
+					firstChoiceIdx = i
+					style = "cursor"
+					// Track column where option text starts (e.g. "  > terminal" -> indent 4) so
+					// deeper-indented wrapped paragraph lines are not mistaken for sibling options.
+					cursorTextIndent = len(m[1]) + len(m[2]) + 1
+					// Also collect any sibling options immediately above the cursor line (when cursor moved down!).
+					var above []string
+					for j := i - 1; j >= 0; j-- {
+						tj := trimmedLines[j]
+						if tj == "" || ruleOrLogoRe.MatchString(tj) || strings.HasSuffix(tj, "?") || strings.HasSuffix(tj, "？") || strings.HasSuffix(tj, ":") || confirmHintRe.MatchString(tj) {
+							break
+						}
+						ind := len(rawLines[j]) - len(strings.TrimLeft(rawLines[j], " "))
+						if ind >= 1 && ind <= cursorTextIndent+1 && len(tj) <= 80 {
+							above = append([]string{tj}, above...)
+							firstChoiceIdx = j
+						} else {
+							break
+						}
+					}
+					for _, prevOpt := range above {
+						choices = append(choices, model.Choice{
+							Key:    strconv.Itoa(len(choices) + 1),
+							Label:  prevOpt,
+							Cursor: len(choices) + 1,
+							Active: false,
+						})
+					}
 					choices = append(choices, model.Choice{
-						Key:    strconv.Itoa(idx + 1),
-						Label:  lbl,
-						Cursor: idx + 1,
-						Active: idx == len(matches)-1,
+						Key:    strconv.Itoa(len(choices) + 1),
+						Label:  strings.TrimSpace(m[3]),
+						Cursor: len(choices) + 1,
+						Active: true,
 					})
 				}
+			} else if style == "cursor" {
+				low := strings.ToLower(t)
+				if strings.HasPrefix(low, "esc") || strings.HasPrefix(low, "enter") || strings.HasPrefix(low, "↑") || strings.HasPrefix(low, "links:") {
+					break
+				}
+				ind := len(l) - len(strings.TrimLeft(l, " "))
+				if t != "" && ind <= cursorTextIndent+1 && len(t) <= 80 && len(choices) < 9 {
+					choices = append(choices, model.Choice{
+						Key:    strconv.Itoa(len(choices) + 1),
+						Label:  t,
+						Cursor: len(choices) + 1,
+					})
+				} else {
+					break
+				}
+			}
+		}
+
+		// Populate vertical arrow+Enter Keys on cursor menus AND on numbered menus that show a cursor
+		// (e.g. Codex folder trust `› 1. Yes`, which requires Enter rather than a bare digit).
+		curIdx := -1
+		for i, c := range choices {
+			if c.Active {
+				curIdx = i
 				break
+			}
+		}
+		if curIdx >= 0 && (style == "cursor" || style == "number") {
+			for i := range choices {
+				if style == "cursor" {
+					choices[i].Keys = verticalMoveKeys(curIdx, i)
+				}
 			}
 		}
 	}
@@ -107,18 +383,22 @@ func ParseApproval(screen string) model.Approval {
 	out.Choices = choices
 	out.Style = style
 
+	var detailLines []string
 	for i := firstChoiceIdx - 1; i >= 0; i-- {
-		t := strings.TrimSpace(lines[i])
-		if t == "" || strings.HasPrefix(t, "─") || strings.HasPrefix(t, "═") || strings.HasPrefix(t, "╭") || strings.HasPrefix(t, "╰") {
+		t := trimmedLines[i]
+		if t == "" || ruleOrLogoRe.MatchString(t) {
 			continue
 		}
-		if out.Title == "" && (strings.HasSuffix(t, "?") || strings.HasSuffix(t, "？") || confirmHintRe.MatchString(t)) {
+		if out.Title == "" && (strings.HasSuffix(t, "?") || strings.HasSuffix(t, "？") || strings.HasSuffix(t, ":") || confirmHintRe.MatchString(t)) {
 			out.Title = clipText(t, 120)
 		} else if out.Command == "" && looksLikeCommand(t) {
 			out.Command = clipText(t, 180)
-		} else if out.Detail == "" {
-			out.Detail = clipText(t, 160)
+		} else if len(detailLines) < 3 {
+			detailLines = append([]string{t}, detailLines...)
 		}
+	}
+	if len(detailLines) > 0 {
+		out.Detail = clipText(strings.Join(detailLines, " "), 220)
 	}
 	if out.Title == "" {
 		out.Title = "Agent 等待确认"
@@ -126,10 +406,13 @@ func ParseApproval(screen string) model.Approval {
 	return out
 }
 
-// MoveKeys computes the exact key sequence (up/down/left/right + enter) to pick targetIdx (0-based) on a cursor menu.
+// MoveKeys returns the exact key sequence to select targetIdx (0-based) on an Approval dialog.
 func MoveKeys(ap model.Approval, targetIdx int) []string {
 	if targetIdx < 0 || targetIdx >= len(ap.Choices) {
 		return []string{"enter"}
+	}
+	if len(ap.Choices[targetIdx].Keys) > 0 {
+		return append([]string(nil), ap.Choices[targetIdx].Keys...)
 	}
 	activeIdx := 0
 	for i, c := range ap.Choices {
@@ -138,16 +421,7 @@ func MoveKeys(ap model.Approval, targetIdx int) []string {
 			break
 		}
 	}
-	var keys []string
-	for activeIdx < targetIdx {
-		keys = append(keys, "down")
-		activeIdx++
-	}
-	for activeIdx > targetIdx {
-		keys = append(keys, "up")
-		activeIdx--
-	}
-	return append(keys, "enter")
+	return verticalMoveKeys(activeIdx, targetIdx)
 }
 
 // ProgressHash hashes a terminal screen after stripping spinner lines and elapsed-time/token digits

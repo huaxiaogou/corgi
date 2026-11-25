@@ -367,7 +367,7 @@ func TestAgyContextProtoProgressHashWizardAndPatch(t *testing.T) {
 		t.Fatal("ProgressHash should change when real output lands")
 	}
 
-	// Wizard horizontal buttons "[Previous]  [Done]" detection and MoveKeys.
+	// Wizard horizontal buttons "[Previous]  [Done]" detection and horizontal MoveKeys.
 	wiz := "Terms of Service & Data Use\nPress Enter to confirm.\n  [Previous]  [Done]"
 	if !ScreenAsks(wiz) {
 		t.Fatal("expected wizard screen to be recognized by ScreenAsks")
@@ -376,8 +376,38 @@ func TestAgyContextProtoProgressHashWizardAndPatch(t *testing.T) {
 	if len(ap.Choices) != 2 || ap.Choices[1].Label != "Done" || !ap.Choices[1].Active {
 		t.Fatalf("unexpected wizard approval: %+v", ap)
 	}
-	if keys := MoveKeys(ap, 0); !slices.Equal(keys, []string{"up", "enter"}) {
+	if keys := MoveKeys(ap, 0); !slices.Equal(keys, []string{"left", "enter"}) {
 		t.Fatalf("unexpected MoveKeys to choice 0: %v", keys)
+	}
+
+	// Full Antigravity ToS wizard with multi-line checkbox + [Previous] [Done] across cursor states.
+	tosScreen := "Terms of Service & Data Use\nAI coding agents are known to have certain security risks.\n-------------------------------------------------\n  > [x] Yes, I agree to help improve Antigravity CLI by allowing\n      Google to collect and use my Interactions data,\n      settings.\n      Links:\n      - Terms: https://antigravity.google/terms\n    [Previous]      [Done]\n  ↑/↓ Navigate · enter Toggle\n  auto · Gemini 4 Neon · xhigh"
+	tosAp := ParseApproval(tosScreen)
+	if len(tosAp.Choices) != 3 || tosAp.Choices[0].Label != "Done" {
+		t.Fatalf("expected Done first + checkbox + Previous, got %+v", tosAp.Choices)
+	}
+	if !slices.Equal(MoveKeys(tosAp, 0), []string{"down", "right", "enter"}) {
+		t.Fatalf("expected Done from checkbox to send [down right enter], got %v", MoveKeys(tosAp, 0))
+	}
+	if !slices.Equal(MoveKeys(tosAp, 1), []string{"enter"}) {
+		t.Fatalf("expected checkbox toggle to send [enter], got %v", MoveKeys(tosAp, 1))
+	}
+	if !slices.Equal(MoveKeys(tosAp, 2), []string{"down", "enter"}) {
+		t.Fatalf("expected Previous from checkbox to send [down enter], got %v", MoveKeys(tosAp, 2))
+	}
+
+	// State when cursor already moved down to Previous (`>  Previous       [Done]`).
+	tosPrevFocused := strings.Replace(strings.Replace(tosScreen, "  > [x]", "    [x]", 1), "    [Previous]      [Done]", "  >  Previous       [Done]", 1)
+	tosAp2 := ParseApproval(tosPrevFocused)
+	if len(tosAp2.Choices) != 3 || !slices.Equal(MoveKeys(tosAp2, 0), []string{"right", "enter"}) {
+		t.Fatalf("expected Done from Previous to send [right enter], got %+v", tosAp2.Choices)
+	}
+
+	// Split-column theme picker (`Choose your color scheme:` with right-side diff preview box).
+	themeScreen := "Choose your color scheme:\n  > terminal | |\n    light | Here's the change: |\n    solarized dark | 5 - func main() { |\n                         | 6   fmt.Println() |"
+	themeAp := ParseApproval(themeScreen)
+	if len(themeAp.Choices) != 3 || themeAp.Choices[0].Label != "terminal" || themeAp.Choices[1].Label != "light" || themeAp.Choices[2].Label != "solarized dark" {
+		t.Fatalf("expected split-column preview stripped cleanly, got %+v", themeAp.Choices)
 	}
 
 	// MsgSync incremental patching + EarlierMessages.

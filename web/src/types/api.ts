@@ -271,7 +271,7 @@ export interface Approval {
   title: string;
   detail?: string;
   command?: string;
-  choices: { key: string; label: string; cursor?: number; active?: boolean }[];
+  choices: { key: string; label: string; keys?: string[]; cursor?: number; active?: boolean }[];
   style: string;
 }
 
