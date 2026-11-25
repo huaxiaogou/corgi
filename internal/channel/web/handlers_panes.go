@@ -96,7 +96,7 @@ func (s *Server) buildPaneState(ctx context.Context) model.PaneState {
 				if v.Kind == "" {
 					v.Kind = *ag.Agent
 				}
-				if v.Status == "" {
+				if ag.AgentStatus != "" && (v.Status == "" || v.Status == "unknown" || p.Agent == nil) {
 					v.Status = ag.AgentStatus
 				}
 			}

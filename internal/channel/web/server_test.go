@@ -371,11 +371,11 @@ func TestBuildPaneStateClassifiesCustomAgentsAndResolvesTitles(t *testing.T) {
 					map[string]any{"workspace_id": "w3", "number": 3, "label": "scratch"},
 				}}
 			case "pane.list":
-				// Simulate herdr pane.list where shell-fallback codebuddy panes have agent=null.
+				// Simulate herdr pane.list where shell-fallback codebuddy panes have agent=null and agent_status="unknown".
 				resp["result"] = map[string]any{"panes": []any{
-					map[string]any{"pane_id": "w1:p1", "workspace_id": "w1", "cwd": srv.Home, "terminal_title_stripped": "Analyze corgi Taihu access plan", "agent": nil, "agent_status": ""},
-					map[string]any{"pane_id": "w2:p1", "workspace_id": "w2", "cwd": srv.Home, "terminal_title_stripped": "Router session", "agent": nil, "agent_status": ""},
-					map[string]any{"pane_id": "w3:p1", "workspace_id": "w3", "cwd": srv.Home, "terminal_title_stripped": "zsh", "agent": nil, "agent_status": ""},
+					map[string]any{"pane_id": "w1:p1", "workspace_id": "w1", "cwd": srv.Home, "terminal_title_stripped": "Analyze corgi Taihu access plan", "agent": nil, "agent_status": "unknown"},
+					map[string]any{"pane_id": "w2:p1", "workspace_id": "w2", "cwd": srv.Home, "terminal_title_stripped": "Router session", "agent": nil, "agent_status": "unknown"},
+					map[string]any{"pane_id": "w3:p1", "workspace_id": "w3", "cwd": srv.Home, "terminal_title_stripped": "zsh", "agent": nil, "agent_status": "unknown"},
 				}}
 			case "agent.list":
 				// Simulate herdr.Client.Agents returning merged custom codebuddy entries.
