@@ -243,7 +243,7 @@ model_reasoning_effort = "low"
 	if !slices.Equal(models[0].Efforts, []string{"low", "xhigh", "ultra"}) {
 		t.Fatalf("unexpected per-model efforts: %v", models[0].Efforts)
 	}
-	if !slices.Equal(efforts, []string{"low", "xhigh", "ultra", "max"}) {
+	if !slices.Equal(efforts, []string{"low", "xhigh", "max", "ultra"}) {
 		t.Fatalf("unexpected union efforts: %v", efforts)
 	}
 }
@@ -254,14 +254,14 @@ func TestParseAgyModelsOutput(t *testing.T) {
 		"gemini-4-neon-high\tDuplicate\n" +
 		"claude-opus-5-5-high\tClaude Opus 5.5 (High)\n"
 	got := parseAgyModelsOutput(raw)
-	if len(got) != 3 {
-		t.Fatalf("expected 3 agy models, got %d: %+v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 agy models after family grouping, got %d: %+v", len(got), got)
 	}
-	if got[0].ID != "gemini-4-neon-high" || got[0].Label != "Gemini 4 Neon (High)" {
-		t.Fatalf("unexpected first agy model: %+v", got[0])
+	if got[0].ID != "gemini-4-neon" || got[0].Label != "Gemini 4 Neon" || !slices.Equal(got[0].Efforts, []string{"high", "xhigh"}) {
+		t.Fatalf("unexpected first grouped agy model: %+v", got[0])
 	}
-	if got[2].ID != "claude-opus-5-5-high" || got[2].Label != "Claude Opus 5.5 (High)" {
-		t.Fatalf("unexpected third agy model: %+v", got[2])
+	if got[1].ID != "claude-opus-5-5-high" || got[1].Label != "Claude Opus 5.5 (High)" || len(got[1].Efforts) != 0 {
+		t.Fatalf("unexpected single-tier agy model: %+v", got[1])
 	}
 }
 
@@ -403,5 +403,91 @@ func TestAgyContextProtoProgressHashWizardAndPatch(t *testing.T) {
 	older, nextCur := EarlierMessages(logPath, &ClaudeAdapter{}, "", p1.Earlier)
 	if len(older) != 20 || nextCur != 0 {
 		t.Fatalf("expected 20 older messages and cursor=0, got len=%d cur=%d", len(older), nextCur)
+	}
+}
+
+func TestAgyFamilyGroupingAndModelEffortMapping(t *testing.T) {
+	rawAgy := strings.Join([]string{
+		"gemini-4-neon-high\tGemini 4 Neon (High)",
+		"gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)",
+		"gemini-4-neon-medium\tGemini 4 Neon (Medium)",
+		"gemini-4-neon-low\tGemini 4 Neon (Low)",
+		"gemini-4-carbon-medium\tGemini 4 Carbon (Medium)",
+		"gemini-4-carbon-high\tGemini 4 Carbon (High)",
+		"gemini-4-carbon-low\tGemini 4 Carbon (Low)",
+		"gemini-pro-orchestrator-neon\tOrchestrator (Neon)",
+		"gpt-oss-120b-medium\tGPT-OSS 120B (Medium)",
+	}, "\n")
+	models := parseAgyModelsOutput(rawAgy)
+	if len(models) != 4 {
+		t.Fatalf("expected 4 grouped models, got %d: %+v", len(models), models)
+	}
+	// 1. Gemini 4 Neon grouped with sorted [low, medium, high, xhigh]
+	if models[0].ID != "gemini-4-neon" || models[0].Label != "Gemini 4 Neon" ||
+		!slices.Equal(models[0].Efforts, []string{"low", "medium", "high", "xhigh"}) {
+		t.Fatalf("unexpected neon group: %+v", models[0])
+	}
+	// 2. Gemini 4 Carbon grouped with [low, medium, high] (no xhigh/max)
+	if models[1].ID != "gemini-4-carbon" || !slices.Equal(models[1].Efforts, []string{"low", "medium", "high"}) {
+		t.Fatalf("unexpected carbon group: %+v", models[1])
+	}
+	// 3. Orchestrator has explicit empty [] efforts (serialized as "efforts":[] in JSON)
+	if models[2].ID != "gemini-pro-orchestrator-neon" || len(models[2].Efforts) != 0 || models[2].Efforts == nil {
+		t.Fatalf("expected explicit empty efforts on orchestrator: %+v", models[2])
+	}
+	jb, err := json.Marshal(models[2])
+	if err != nil || !strings.Contains(string(jb), `"efforts":[]`) {
+		t.Fatalf("expected JSON to preserve empty efforts array, got %s (err=%v)", string(jb), err)
+	}
+	// 4. Single-tier model keeps exact preset ID and empty efforts
+	if models[3].ID != "gpt-oss-120b-medium" || len(models[3].Efforts) != 0 {
+		t.Fatalf("unexpected single-tier model: %+v", models[3])
+	}
+
+	// Agy LaunchArgs stitches base + effort without redundant --effort, and avoids conflicts on pre-suffixed IDs.
+	agy := &AgyAdapter{}
+	if got := agy.LaunchArgs("gemini-4-neon", "xhigh", false); !slices.Equal(got, []string{"--model", "gemini-4-neon-xhigh"}) {
+		t.Fatalf("unexpected stitched LaunchArgs: %v", got)
+	}
+	if got := agy.LaunchArgs("gemini-4-neon-xhigh", "low", false); !slices.Equal(got, []string{"--model", "gemini-4-neon-xhigh"}) {
+		t.Fatalf("expected pre-suffixed model ID to ignore conflicting effort, got %v", got)
+	}
+	if got := agy.LaunchArgs("", "low", false); !slices.Equal(got, []string{"--effort", "low"}) {
+		t.Fatalf("expected default-model effort flag, got %v", got)
+	}
+
+	// Claude gateway capabilities + effortLevel discovery.
+	home := t.TempDir()
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claudeCfg := `{"model":"gw-fast","effortLevel":"low","env":{"CLAUDE_CODE_MODEL_CAPABILITIES":"gw-pro=effort,xhigh_effort;gw-fast="}}`
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(claudeCfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clCat, err := (&ClaudeAdapter{}).DiscoverModels(context.Background(), home)
+	if err != nil || clCat.Default != "gw-fast" || clCat.DefaultEffort != "low" {
+		t.Fatalf("unexpected claude catalog defaults: %+v (err=%v)", clCat, err)
+	}
+	var gwPro, gwFastFound bool
+	for _, m := range clCat.Models {
+		if m.ID == "gw-pro" && slices.Equal(m.Efforts, []string{"low", "medium", "high", "xhigh"}) {
+			gwPro = true
+		}
+		if m.ID == "gw-fast" && m.Efforts != nil && len(m.Efforts) == 0 {
+			gwFastFound = true
+		}
+	}
+	if !gwPro || !gwFastFound {
+		t.Fatalf("expected gateway capability mapping in claude models: %+v", clCat.Models)
+	}
+
+	// CodeBuddy per-model effort mapping (echo -> [], gpt-6.1-sol -> minimal..xhigh).
+	if eff := codeBuddyEffortsForModel("echo"); len(eff) != 0 {
+		t.Fatalf("expected echo to have 0 efforts, got %v", eff)
+	}
+	if eff := codeBuddyEffortsForModel("gpt-6.1-sol"); !slices.Contains(eff, "xhigh") || slices.Contains(eff, "max") {
+		t.Fatalf("unexpected gpt-6.1-sol efforts: %v", eff)
 	}
 }

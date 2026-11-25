@@ -149,7 +149,7 @@ export interface PaneState {
 
 export interface ModelCatalog {
   kind: string;
-  models: { id: string; label?: string; note?: string; efforts?: string[] }[];
+  models: { id: string; label?: string; note?: string; efforts?: string[] | null }[];
   efforts: string[];
   default?: string;
   default_effort?: string;

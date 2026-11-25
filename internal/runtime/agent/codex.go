@@ -215,7 +215,9 @@ func buildCodexCatalog(items []codexModelItem) ([]model.ModelOpt, []string) {
 		if label == "" {
 			label = id
 		}
-		var efforts []string
+		// Initialize to empty non-nil slice so models with 0 supported efforts serialize as []
+		// rather than null, letting the UI hide the effort selector cleanly.
+		efforts := []string{}
 		for _, e := range it.Efforts {
 			ef := strings.TrimSpace(e.Effort)
 			if ef == "" || !ModelNameRe.MatchString(ef) {
@@ -231,10 +233,10 @@ func buildCodexCatalog(items []codexModelItem) ([]model.ModelOpt, []string) {
 		models = append(models, model.ModelOpt{
 			ID:      id,
 			Label:   label,
-			Efforts: efforts,
+			Efforts: sortEffortsCanonical(efforts),
 		})
 	}
-	return models, allEfforts
+	return models, sortEffortsCanonical(allEfforts)
 }
 
 // parseCodexConfigTOML extracts top-level model and model_reasoning_effort from ~/.codex/config.toml.

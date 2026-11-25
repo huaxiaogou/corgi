@@ -109,9 +109,10 @@ func (c *CodeBuddyAdapter) PreTrustWorkspace(home, cwd string) error {
 func (c *CodeBuddyAdapter) DiscoverModels(ctx context.Context, home string) (*model.ModelCatalog, error) {
 	cat := &model.ModelCatalog{
 		Kind:    "codebuddy",
-		Efforts: []string{},
+		Efforts: []string{"low", "medium", "high"},
 		Models:  []model.ModelOpt{},
 	}
+	hasEffortFlag := true
 	if bin := herdr.FindBin("codebuddy", home); bin != "" {
 		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
@@ -119,18 +120,23 @@ func (c *CodeBuddyAdapter) DiscoverModels(ctx context.Context, home string) (*mo
 		cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
 		if out, err := cmd.Output(); err == nil {
 			txt := string(out)
+			hasEffortFlag = strings.Contains(txt, "--effort")
 			cat.Models = parseCodeBuddyHelpModels(txt)
-			if strings.Contains(txt, "--effort") {
-				cat.Efforts = AllEfforts
-			}
 		}
 	}
 	if len(cat.Models) == 0 {
-		cat.Models = []model.ModelOpt{
-			{ID: "deepseek-v4-pro", Label: "deepseek-v4-pro"},
-			{ID: "glm-5.3", Label: "glm-5.3"},
-			{ID: "kimi-k3.1-pro", Label: "kimi-k3.1-pro"},
-			{ID: "hy4std", Label: "hy4std"},
+		for _, id := range []string{"deepseek-v4-pro", "glm-5.3", "kimi-k3.1-pro", "hy4std"} {
+			cat.Models = append(cat.Models, model.ModelOpt{
+				ID:      id,
+				Label:   id,
+				Efforts: codeBuddyEffortsForModel(id),
+			})
+		}
+	}
+	if !hasEffortFlag {
+		cat.Efforts = []string{}
+		for i := range cat.Models {
+			cat.Models[i].Efforts = []string{}
 		}
 	}
 	if b, err := os.ReadFile(filepath.Join(codebuddyHome(home), "settings.json")); err == nil {
@@ -147,11 +153,34 @@ func (c *CodeBuddyAdapter) DiscoverModels(ctx context.Context, home string) (*mo
 				}
 			}
 			if !found && ModelNameRe.MatchString(cfg.Model) {
-				cat.Models = append([]model.ModelOpt{{ID: cfg.Model, Label: cfg.Model, Note: "当前默认"}}, cat.Models...)
+				effs := []string{}
+				if hasEffortFlag {
+					effs = codeBuddyEffortsForModel(cfg.Model)
+				}
+				cat.Models = append([]model.ModelOpt{{ID: cfg.Model, Label: cfg.Model, Note: "当前默认", Efforts: effs}}, cat.Models...)
+			}
+			if hasEffortFlag {
+				cat.Efforts = codeBuddyEffortsForModel(cfg.Model)
 			}
 		}
 	}
 	return cat, nil
+}
+
+func codeBuddyEffortsForModel(id string) []string {
+	low := strings.ToLower(strings.TrimSpace(id))
+	switch {
+	case low == "echo":
+		return []string{}
+	case strings.HasPrefix(low, "gpt-"):
+		return []string{"minimal", "low", "medium", "high", "xhigh"}
+	case strings.HasPrefix(low, "claude-opus"):
+		return []string{"low", "medium", "high", "max"}
+	case strings.HasPrefix(low, "gemini-4"):
+		return []string{"low", "medium", "high", "xhigh"}
+	default:
+		return []string{"low", "medium", "high"}
+	}
 }
 
 func parseCodeBuddyHelpModels(helpText string) []model.ModelOpt {
@@ -163,7 +192,11 @@ func parseCodeBuddyHelpModels(helpText string) []model.ModelOpt {
 	for _, raw := range strings.Split(m[1], ",") {
 		id := strings.TrimSpace(raw)
 		if id != "" && ModelNameRe.MatchString(id) {
-			out = append(out, model.ModelOpt{ID: id, Label: id})
+			out = append(out, model.ModelOpt{
+				ID:      id,
+				Label:   id,
+				Efforts: codeBuddyEffortsForModel(id),
+			})
 		}
 	}
 	return out

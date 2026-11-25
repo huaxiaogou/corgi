@@ -15,6 +15,46 @@ import (
 // AllEfforts lists standard thinking effort levels supported across agent CLIs.
 var AllEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 
+// CanonicalEffortOrder defines the low-to-high display order for reasoning effort tiers.
+var CanonicalEffortOrder = []string{"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+
+func isKnownEffort(ef string) bool {
+	for _, k := range CanonicalEffortOrder {
+		if k == ef {
+			return true
+		}
+	}
+	return false
+}
+
+func sortEffortsCanonical(efforts []string) []string {
+	if len(efforts) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(efforts))
+	for _, k := range CanonicalEffortOrder {
+		for _, e := range efforts {
+			if e == k {
+				out = append(out, k)
+				break
+			}
+		}
+	}
+	for _, e := range efforts {
+		found := false
+		for _, x := range out {
+			if x == e {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // ModelNameRe validates CLI-safe model and effort flags.
 var ModelNameRe = regexp.MustCompile(`^[A-Za-z0-9._:/@\[\]-]{0,120}$`)
 

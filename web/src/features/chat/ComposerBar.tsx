@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { ArrowUp, Paperclip, X } from "lucide-react";
 import { api, uploadFile } from "../../lib/api";
+import { getSupportedEfforts } from "../../lib/models";
 import type { Entry, Machine, ModelCatalog } from "../../types/api";
 
 const ALL_KINDS = ["claude", "codex", "agy", "codebuddy"];
@@ -53,13 +54,14 @@ export function ComposerBar({ machines, replyTo, onClearReply, onSend, onToast }
       .catch(() => setCatalog(null));
   }, [kind, machine]);
 
-  const selectedModelObj = catalog?.models.find((m) => m.id === model);
-  const efforts =
-    selectedModelObj?.efforts && selectedModelObj.efforts.length > 0
-      ? selectedModelObj.efforts
-      : catalog?.efforts && catalog.efforts.length > 0
-        ? catalog.efforts
-        : ["low", "medium", "high", "xhigh"];
+  const efforts = getSupportedEfforts(catalog, model);
+  const hideEffort = Boolean(kind && catalog && efforts.length === 0);
+
+  useEffect(() => {
+    if (effort && (hideEffort || (efforts.length > 0 && !efforts.includes(effort)))) {
+      setEffort("");
+    }
+  }, [effort, hideEffort, efforts.join(",")]);
 
   const handleFiles = async (files: FileList | File[] | null) => {
     if (!files) return;
@@ -192,7 +194,14 @@ export function ComposerBar({ machines, replyTo, onClearReply, onSend, onToast }
             </select>
             <select
               value={model}
-              onChange={(e) => setModel(e.target.value)}
+              onChange={(e) => {
+                const nextModel = e.target.value;
+                const nextEfforts = getSupportedEfforts(catalog, nextModel);
+                setModel(nextModel);
+                if (effort && !nextEfforts.includes(effort)) {
+                  setEffort("");
+                }
+              }}
               disabled={!kind}
               className="bg-transparent text-secondary outline-none cursor-pointer disabled:opacity-50 max-w-[140px] truncate"
             >
@@ -203,14 +212,16 @@ export function ComposerBar({ machines, replyTo, onClearReply, onSend, onToast }
                 </option>
               ))}
             </select>
-            <select value={effort} onChange={(e) => setEffort(e.target.value)} className="bg-transparent text-secondary outline-none cursor-pointer">
-              <option value="">默认思考</option>
-              {efforts.map((ef) => (
-                <option key={ef} value={ef}>
-                  思考 · {ef}
-                </option>
-              ))}
-            </select>
+            {!hideEffort && (
+              <select value={effort} onChange={(e) => setEffort(e.target.value)} className="bg-transparent text-secondary outline-none cursor-pointer">
+                <option value="">默认思考</option>
+                {efforts.map((ef) => (
+                  <option key={ef} value={ef}>
+                    思考 · {ef}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
           <button type="submit" className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer hover:opacity-85 shrink-0" title="发送">
             <ArrowUp className="w-4 h-4" strokeWidth={2} />

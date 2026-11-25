@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -45,25 +47,121 @@ func (c *ClaudeAdapter) ResumeArgs(sessionID string) []string {
 func (c *ClaudeAdapter) PreTrustWorkspace(_, _ string) error { return nil }
 
 func (c *ClaudeAdapter) DiscoverModels(_ context.Context, home string) (*model.ModelCatalog, error) {
-	cat := &model.ModelCatalog{
-		Kind:    "claude",
-		Efforts: []string{"low", "medium", "high", "max"},
-		Models: []model.ModelOpt{
-			{ID: "sonnet", Label: "Claude Sonnet", Note: "均衡推荐"},
-			{ID: "opus", Label: "Claude Opus", Note: "复杂推理"},
-			{ID: "haiku", Label: "Claude Haiku", Note: "轻量快速"},
-		},
+	var cfg struct {
+		Model  string            `json:"model"`
+		Effort string            `json:"effortLevel"`
+		Env    map[string]string `json:"env"`
 	}
 	cfgPath := filepath.Join(claudeConfigDir(home), "settings.json")
 	if b, err := os.ReadFile(cfgPath); err == nil {
-		var cfg struct {
-			Model string `json:"model"`
+		_ = json.Unmarshal(b, &cfg)
+	}
+	envVal := func(k string) string {
+		if cfg.Env != nil && cfg.Env[k] != "" {
+			return cfg.Env[k]
 		}
-		if json.Unmarshal(b, &cfg) == nil && cfg.Model != "" {
-			cat.Default = cfg.Model
+		return os.Getenv(k)
+	}
+
+	// Parse gateway-declared model capabilities if configured:
+	// e.g. "modelA=effort,xhigh_effort,max_effort;modelB=effort"
+	gwMap := map[string][]string{}
+	var gwModels []model.ModelOpt
+	for _, part := range strings.Split(envVal("CLAUDE_CODE_MODEL_CAPABILITIES"), ";") {
+		id, caps, _ := strings.Cut(strings.TrimSpace(part), "=")
+		id = strings.TrimSpace(id)
+		if id == "" || !ModelNameRe.MatchString(id) {
+			continue
+		}
+		effs := []string{}
+		for _, capName := range strings.Split(caps, ",") {
+			switch strings.TrimSpace(capName) {
+			case "effort":
+				effs = append(effs, "low", "medium", "high")
+			case "xhigh_effort":
+				effs = append(effs, "xhigh")
+			case "max_effort":
+				effs = append(effs, "max")
+			}
+		}
+		effs = sortEffortsCanonical(effs)
+		gwMap[id] = effs
+		gwModels = append(gwModels, model.ModelOpt{ID: id, Label: id, Efforts: effs})
+	}
+	sort.SliceStable(gwModels, func(i, j int) bool { return gwModels[i].ID < gwModels[j].ID })
+
+	aliasEfforts := func(target string, fallback []string) []string {
+		if target != "" {
+			if effs, ok := gwMap[target]; ok {
+				return effs
+			}
+		}
+		return fallback
+	}
+
+	cat := &model.ModelCatalog{
+		Kind:          "claude",
+		Default:       cfg.Model,
+		DefaultEffort: cfg.Effort,
+		Efforts:       []string{"low", "medium", "high", "max"},
+		Models:        []model.ModelOpt{},
+	}
+	seen := map[string]bool{}
+	add := func(o model.ModelOpt) {
+		if o.ID != "" && !seen[o.ID] && ModelNameRe.MatchString(o.ID) {
+			seen[o.ID] = true
+			cat.Models = append(cat.Models, o)
+		}
+	}
+
+	sonnetTarget := envVal("ANTHROPIC_DEFAULT_SONNET_MODEL")
+	opusTarget := envVal("ANTHROPIC_DEFAULT_OPUS_MODEL")
+	haikuTarget := envVal("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+	add(model.ModelOpt{
+		ID:      "sonnet",
+		Label:   "Claude Sonnet",
+		Note:    orNote(sonnetTarget, "均衡推荐"),
+		Efforts: aliasEfforts(sonnetTarget, []string{"low", "medium", "high"}),
+	})
+	add(model.ModelOpt{
+		ID:      "opus",
+		Label:   "Claude Opus",
+		Note:    orNote(opusTarget, "复杂推理"),
+		Efforts: aliasEfforts(opusTarget, []string{"low", "medium", "high", "max"}),
+	})
+	add(model.ModelOpt{
+		ID:      "haiku",
+		Label:   "Claude Haiku",
+		Note:    orNote(haikuTarget, "轻量快速"),
+		Efforts: aliasEfforts(haikuTarget, []string{"low", "medium", "high"}),
+	})
+	for _, gm := range gwModels {
+		add(gm)
+	}
+	if cfg.Model != "" {
+		add(model.ModelOpt{ID: cfg.Model, Label: cfg.Model, Note: "当前默认"})
+	}
+	if len(gwModels) > 0 {
+		union := []string{}
+		for _, m := range cat.Models {
+			for _, ef := range m.Efforts {
+				if !slices.Contains(union, ef) {
+					union = append(union, ef)
+				}
+			}
+		}
+		if len(union) > 0 {
+			cat.Efforts = sortEffortsCanonical(union)
 		}
 	}
 	return cat, nil
+}
+
+func orNote(primary, fallback string) string {
+	if strings.TrimSpace(primary) != "" {
+		return strings.TrimSpace(primary)
+	}
+	return fallback
 }
 
 func (c *ClaudeAdapter) LocateTranscript(home, _, sessionID string, _ time.Time) string {

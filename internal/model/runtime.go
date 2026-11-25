@@ -102,11 +102,12 @@ type PaneState struct {
 }
 
 // ModelOpt describes one selectable model exposed by an agent CLI.
+// Note: Efforts omits omitempty so nil ("inherit catalog default") and [] ("explicitly no effort") serialize distinctly.
 type ModelOpt struct {
 	ID      string   `json:"id"`
 	Label   string   `json:"label,omitempty"`
 	Note    string   `json:"note,omitempty"`
-	Efforts []string `json:"efforts,omitempty"`
+	Efforts []string `json:"efforts"`
 }
 
 // ModelCatalog lists discovered models and thinking efforts for an agent kind.

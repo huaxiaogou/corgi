@@ -30,10 +30,20 @@ func (a *AgyAdapter) DisplayName() string { return "Antigravity" }
 
 func (a *AgyAdapter) LaunchArgs(modelName, effort string, bypassPerm bool) []string {
 	var args []string
+	modelName = strings.TrimSpace(modelName)
+	effort = strings.ToLower(strings.TrimSpace(effort))
 	if modelName != "" {
-		args = append(args, "--model", modelName)
-	}
-	if effort != "" {
+		if _, _, _, hasSuffix := splitAgyEffortVariant(modelName, ""); hasSuffix {
+			// Model ID already encodes a concrete tier (e.g. gemini-4-neon-xhigh or gpt-oss-120b-medium);
+			// never pass a redundant or conflicting --effort flag alongside it.
+			args = append(args, "--model", modelName)
+		} else if effort != "" && isKnownEffort(effort) && !strings.Contains(strings.ToLower(modelName), "orchestrator") {
+			// Stitch grouped base model ID + selected effort into canonical agy model ID.
+			args = append(args, "--model", modelName+"-"+effort)
+		} else {
+			args = append(args, "--model", modelName)
+		}
+	} else if effort != "" {
 		args = append(args, "--effort", effort)
 	}
 	if bypassPerm {
@@ -108,7 +118,7 @@ func (a *AgyAdapter) PreTrustWorkspace(home, cwd string) error {
 func (a *AgyAdapter) DiscoverModels(ctx context.Context, home string) (*model.ModelCatalog, error) {
 	cat := &model.ModelCatalog{
 		Kind:    "agy",
-		Efforts: AllEfforts,
+		Efforts: []string{"low", "medium", "high", "xhigh"},
 		Models:  []model.ModelOpt{},
 	}
 	if bin := herdr.FindBin("agy", home); bin != "" {
@@ -118,6 +128,17 @@ func (a *AgyAdapter) DiscoverModels(ctx context.Context, home string) (*model.Mo
 		cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
 		if out, err := cmd.Output(); err == nil {
 			cat.Models = parseAgyModelsOutput(string(out))
+			union := []string{}
+			for _, m := range cat.Models {
+				for _, ef := range m.Efforts {
+					if !slices.Contains(union, ef) {
+						union = append(union, ef)
+					}
+				}
+			}
+			if len(union) > 0 {
+				cat.Efforts = sortEffortsCanonical(union)
+			}
 		}
 	}
 	if b, err := os.ReadFile(filepath.Join(agyHome(home), "settings.json")); err == nil {
@@ -127,7 +148,15 @@ func (a *AgyAdapter) DiscoverModels(ctx context.Context, home string) (*model.Mo
 		}
 		if json.Unmarshal(b, &cfg) == nil {
 			if cfg.Model != "" {
-				cat.Default = cfg.Model
+				baseID, _, ef, hasSuffix := splitAgyEffortVariant(cfg.Model, "")
+				if hasSuffix && slices.ContainsFunc(cat.Models, func(m model.ModelOpt) bool { return m.ID == baseID }) {
+					cat.Default = baseID
+					if cfg.Effort == "" {
+						cat.DefaultEffort = ef
+					}
+				} else {
+					cat.Default = cfg.Model
+				}
 			}
 			if cfg.Effort != "" {
 				cat.DefaultEffort = cfg.Effort
@@ -137,9 +166,45 @@ func (a *AgyAdapter) DiscoverModels(ctx context.Context, home string) (*model.Mo
 	return cat, nil
 }
 
+// splitAgyEffortVariant splits flat agy model rows like ("gemini-4-neon-xhigh", "Gemini 4 Neon (XHigh)")
+// into ("gemini-4-neon", "Gemini 4 Neon", "xhigh", true). Non-tiered rows like
+// ("gemini-pro-orchestrator-neon", "Orchestrator (Neon)") return ok=false.
+func splitAgyEffortVariant(id, label string) (baseID, baseLabel, effort string, ok bool) {
+	lowerID := strings.ToLower(id)
+	for _, ef := range CanonicalEffortOrder {
+		suffix := "-" + ef
+		if strings.HasSuffix(lowerID, suffix) && len(id) > len(suffix) {
+			baseID = id[:len(id)-len(suffix)]
+			baseLabel = strings.TrimSpace(label)
+			if baseLabel != "" {
+				re := regexp.MustCompile(`(?i)\s*\(\s*` + regexp.QuoteMeta(ef) + `\s*\)\s*$`)
+				baseLabel = strings.TrimSpace(re.ReplaceAllString(baseLabel, ""))
+			}
+			if baseLabel == "" {
+				baseLabel = baseID
+			}
+			return baseID, baseLabel, ef, true
+		}
+	}
+	return id, label, "", false
+}
+
 func parseAgyModelsOutput(raw string) []model.ModelOpt {
-	var models []model.ModelOpt
+	type rawRow struct {
+		id    string
+		label string
+	}
+	type groupEntry struct {
+		isGroup   bool
+		baseID    string
+		baseLabel string
+		variants  []rawRow
+		efforts   []string
+	}
+	var order []*groupEntry
+	groups := map[string]*groupEntry{}
 	seen := map[string]bool{}
+
 	for _, line := range strings.Split(raw, "\n") {
 		if idx := strings.LastIndexByte(line, '\r'); idx >= 0 {
 			line = line[idx+1:]
@@ -170,7 +235,53 @@ func parseAgyModelsOutput(raw string) []model.ModelOpt {
 		if label == "" {
 			label = id
 		}
-		models = append(models, model.ModelOpt{ID: id, Label: label})
+
+		if baseID, baseLabel, ef, ok := splitAgyEffortVariant(id, label); ok {
+			g := groups[baseID]
+			if g == nil {
+				g = &groupEntry{isGroup: true, baseID: baseID, baseLabel: baseLabel}
+				groups[baseID] = g
+				order = append(order, g)
+			}
+			g.variants = append(g.variants, rawRow{id: id, label: label})
+			if !slices.Contains(g.efforts, ef) {
+				g.efforts = append(g.efforts, ef)
+			}
+		} else {
+			order = append(order, &groupEntry{
+				isGroup:   false,
+				baseID:    id,
+				baseLabel: label,
+			})
+		}
+	}
+
+	models := make([]model.ModelOpt, 0, len(order))
+	for _, g := range order {
+		if !g.isGroup {
+			models = append(models, model.ModelOpt{
+				ID:      g.baseID,
+				Label:   g.baseLabel,
+				Efforts: []string{},
+			})
+			continue
+		}
+		if len(g.variants) == 1 {
+			// Single fixed-tier model (e.g. gpt-oss-120b-medium -> GPT-OSS 120B (Medium)):
+			// keep exact ID/Label and expose [] so the UI hides the redundant effort picker.
+			v := g.variants[0]
+			models = append(models, model.ModelOpt{
+				ID:      v.id,
+				Label:   v.label,
+				Efforts: []string{},
+			})
+			continue
+		}
+		models = append(models, model.ModelOpt{
+			ID:      g.baseID,
+			Label:   g.baseLabel,
+			Efforts: sortEffortsCanonical(g.efforts),
+		})
 	}
 	return models
 }

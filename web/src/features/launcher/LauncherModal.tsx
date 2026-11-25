@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { RefreshCw, X } from "lucide-react";
 import { DirPicker, rememberRecentDir } from "../../components/DirPicker";
 import { api } from "../../lib/api";
+import { getSupportedEfforts } from "../../lib/models";
 import type { Machine, ModelCatalog } from "../../types/api";
 
 interface Props {
@@ -57,17 +58,14 @@ export function LauncherModal({ open, machines, onClose, onLaunched, onToast }: 
     fetchModels(false);
   }, [open, kind, machine]);
 
-  const selectedModel = (catalog?.models ?? []).find((m) => m.id === modelName);
-  const effortOptions =
-    selectedModel?.efforts && selectedModel.efforts.length > 0
-      ? selectedModel.efforts
-      : (catalog?.efforts ?? ["low", "medium", "high"]);
+  const effortOptions = getSupportedEfforts(catalog, modelName);
+  const hideEffort = Boolean(catalog && effortOptions.length === 0);
 
   useEffect(() => {
-    if (effort && effortOptions.length > 0 && !effortOptions.includes(effort)) {
+    if (effort && (hideEffort || (effortOptions.length > 0 && !effortOptions.includes(effort)))) {
       setEffort("");
     }
-  }, [effort, effortOptions.join(",")]);
+  }, [effort, hideEffort, effortOptions.join(",")]);
 
   if (!open) return null;
 
@@ -139,23 +137,35 @@ export function LauncherModal({ open, machines, onClose, onLaunched, onToast }: 
 
           {kind !== "shell" && (
             <div className="flex items-center gap-2">
-              <select value={modelName} onChange={(e) => setModelName(e.target.value)} className="flex-1 min-w-0 px-3 py-2 rounded-lg surface-rail border border-hairline outline-none">
+              <select
+                value={modelName}
+                onChange={(e) => {
+                  const nextModel = e.target.value;
+                  const nextEfforts = getSupportedEfforts(catalog, nextModel);
+                  setModelName(nextModel);
+                  if (effort && !nextEfforts.includes(effort)) {
+                    setEffort("");
+                  }
+                }}
+                className="flex-1 min-w-0 px-3 py-2 rounded-lg surface-rail border border-hairline outline-none"
+              >
                 <option value="">{loadingModels ? "读取可用模型中…" : catalog?.default ? `默认（${catalog.default}）` : "默认模型"}</option>
                 {(catalog?.models ?? []).map((m) => (
                   <option key={m.id} value={m.id}>{m.label || m.id}{m.note ? ` · ${m.note}` : ""}</option>
                 ))}
               </select>
-              <select
-                value={effort}
-                disabled={Boolean(catalog && effortOptions.length === 0)}
-                onChange={(e) => setEffort(e.target.value)}
-                className="w-32 shrink-0 px-3 py-2 rounded-lg surface-rail border border-hairline outline-none disabled:opacity-50"
-              >
-                <option value="">
-                  {catalog && effortOptions.length === 0 ? "无思考强度" : catalog?.default_effort ? `默认（${catalog.default_effort}）` : "默认思考"}
-                </option>
-                {effortOptions.map((ef) => <option key={ef} value={ef}>{ef}</option>)}
-              </select>
+              {!hideEffort && (
+                <select
+                  value={effort}
+                  onChange={(e) => setEffort(e.target.value)}
+                  className="w-32 shrink-0 px-3 py-2 rounded-lg surface-rail border border-hairline outline-none"
+                >
+                  <option value="">
+                    {catalog?.default_effort ? `默认（${catalog.default_effort}）` : "默认思考"}
+                  </option>
+                  {effortOptions.map((ef) => <option key={ef} value={ef}>{ef}</option>)}
+                </select>
+              )}
               <button
                 type="button"
                 onClick={() => fetchModels(true)}
