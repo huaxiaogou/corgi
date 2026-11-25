@@ -3,11 +3,12 @@ package model
 import "time"
 
 const (
-	MainThread  = "chat:main"
-	RouterName  = "corgi"
-	RouterLabel = "corgi · router"
-	DreamName   = "corgi-dream"
-	DreamLabel  = "corgi · dream"
+	MainThread       = "chat:main"
+	RouterName       = "corgi"
+	RouterLabel      = "corgi · router"
+	DreamName        = "corgi-dream"
+	DreamLabel       = "corgi · dream"
+	DefaultRotatePct = 90
 )
 
 // Quote references an earlier message, worker report, or timer that a reply answers.
@@ -193,7 +194,7 @@ type Settings struct {
 	ActiveHours       string   `json:"active_hours,omitempty"`        // "" = default "09:00-22:30", "24h" = always
 	StaleArchiveDays  int      `json:"stale_archive_days,omitempty"`  // 0 = default 3, -1 = off
 	MorningDigest     *bool    `json:"morning_digest,omitempty"`      // nil = default true
-	RotatePct         int      `json:"rotate_pct,omitempty"`          // 0 = default 60, -1 = never
+	RotatePct         int      `json:"rotate_pct,omitempty"`          // 0 = default 90, -1 = never
 	DreamAt           string   `json:"dream_at,omitempty"`            // "HH:MM", "" = "04:00", "off" = disabled
 	NotifyLevel       string   `json:"notify_level,omitempty"`        // quiet | normal
 	AskPermissions    bool     `json:"ask_permissions,omitempty"`
@@ -254,7 +255,7 @@ func DefaultSettings(_ string) Settings {
 		ActiveHours:       "09:00-22:30",
 		StaleArchiveDays:  3,
 		MorningDigest:     &on,
-		RotatePct:         60,
+		RotatePct:         DefaultRotatePct,
 		DreamAt:           "04:00",
 		NotifyLevel:       "quiet",
 	}

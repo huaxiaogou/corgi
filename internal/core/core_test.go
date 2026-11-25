@@ -644,3 +644,51 @@ func TestDecisionReceiptLinkingFollowUpAndSnapshot(t *testing.T) {
 		t.Fatalf("expected event entries linked to action_id: dialog=%v snooze=%v", hasDialogEvent, hasSnoozeEvent)
 	}
 }
+
+func TestDefaultRotatePctAndNormalization(t *testing.T) {
+	if got := model.DefaultSettings("").RotatePct; got != 90 {
+		t.Fatalf("DefaultSettings().RotatePct = %d, want 90", got)
+	}
+
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"claude"})
+	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	if snap := eng.Snapshot(ctx, model.MainThread); snap.Router.RotateAt != 90 {
+		t.Fatalf("initial Snapshot Router.RotateAt = %d, want 90", snap.Router.RotateAt)
+	}
+
+	cases := []struct {
+		name         string
+		input        int
+		wantRotateAt int
+	}{
+		{name: "zero falls back to 90", input: 0, wantRotateAt: 90},
+		{name: "negative disables handover", input: -1, wantRotateAt: 0},
+		{name: "valid explicit value kept", input: 75, wantRotateAt: 75},
+		{name: "below min resets to default 90", input: 10, wantRotateAt: 90},
+		{name: "above max resets to default 90", input: 99, wantRotateAt: 90},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := eng.Settings()
+			cfg.RotatePct = tc.input
+			if err := eng.SaveConfig(ctx, &cfg, nil); err != nil {
+				t.Fatalf("SaveConfig(%d): %v", tc.input, err)
+			}
+			if got := eng.Snapshot(ctx, model.MainThread).Router.RotateAt; got != tc.wantRotateAt {
+				t.Fatalf("RotateAt after SaveConfig(%d) = %d, want %d", tc.input, got, tc.wantRotateAt)
+			}
+		})
+	}
+}

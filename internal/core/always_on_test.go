@@ -64,15 +64,16 @@ func TestHandoverTriggersAndArchivesSession(t *testing.T) {
 	}
 	defer st.Close()
 
-	// Seed a Claude JSONL transcript with 140k/200k tokens (70% >= 60% rotate threshold).
+	// Seed a Claude JSONL transcript with 140k/200k tokens (70% < 90% default rotate threshold).
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(dir, ".claude"))
 	projDir := filepath.Join(dir, ".claude", "projects", "router")
 	if err := os.MkdirAll(projDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	sessID := "11111111-2222-3333-4444-555555555555"
-	trLine := `{"type":"assistant","message":{"usage":{"input_tokens":140000,"output_tokens":500}}}` + "\n"
-	if err := os.WriteFile(filepath.Join(projDir, sessID+".jsonl"), []byte(trLine), 0o600); err != nil {
+	trPath := filepath.Join(projDir, sessID+".jsonl")
+	trLine70 := `{"type":"assistant","message":{"usage":{"input_tokens":140000,"output_tokens":500}}}` + "\n"
+	if err := os.WriteFile(trPath, []byte(trLine70), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -111,10 +112,20 @@ func TestHandoverTriggersAndArchivesSession(t *testing.T) {
 		model.RouterName: {pane: "w-router:p1", status: "idle", ready: true, kind: "claude", session: sessID},
 	}
 
-	// 1. Triggers handover flush prompt.
+	// 0. At 70% (< 90% default threshold), handover must NOT trigger yet.
+	eng.checkHandover(ctx, live, false)
+	if eng.handingOver() {
+		t.Fatal("handover must not start at 70% under default 90% threshold")
+	}
+
+	// 1. Advance transcript to 184k/200k tokens (92% >= 90% default) -> triggers handover flush prompt.
+	trLine92 := `{"type":"assistant","message":{"usage":{"input_tokens":184000,"output_tokens":500}}}` + "\n"
+	if err := os.WriteFile(trPath, []byte(trLine92), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	eng.checkHandover(ctx, live, false)
 	if !eng.handingOver() {
-		t.Fatal("expected handover to start at 70% context fill")
+		t.Fatal("expected handover to start at 92% context fill")
 	}
 	mu.Lock()
 	if len(prompts) != 1 || !strings.Contains(prompts[0], "Handover") {
@@ -461,7 +472,7 @@ func TestCodeBuddyHandoverWithoutHerdrSessionAndSayPersistsMessagesMD(t *testing
 		t.Fatalf("expected Say to flush memory/messages.md, got err=%v content=%q", err, string(rawMsgs))
 	}
 
-	// 2. CodeBuddy Router with empty li.session still triggers handover at >=60% via turn-metrics & transcript UUID.
+	// 2. CodeBuddy Router with empty li.session still triggers handover at >=90% via turn-metrics & transcript UUID.
 	sessID := "01a211cb-d92c-7bcd-8eda-a1d84c15e871"
 	cbProj := filepath.Join(home, ".codebuddy", "projects", "router")
 	if err := os.MkdirAll(cbProj, 0o755); err != nil {
@@ -471,7 +482,7 @@ func TestCodeBuddyHandoverWithoutHerdrSessionAndSayPersistsMessagesMD(t *testing
 		`{"type":"session-meta","cwd":"` + eng.memory.RouterDir() + `"}`,
 		`{"type":"message","role":"assistant","providerData":{"messageId":"s1","requestModelId":"hy4std"}}`,
 		`{"type":"message","role":"assistant","providerData":{"messageId":"s2","requestModelId":"hy4std"}}`,
-		`{"type":"turn-metrics","durationMs":50000,"tokenDelta":280000}`,
+		`{"type":"turn-metrics","durationMs":50000,"tokenDelta":368000}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(filepath.Join(cbProj, sessID+".jsonl"), []byte(cbLines), 0o600); err != nil {
 		t.Fatal(err)

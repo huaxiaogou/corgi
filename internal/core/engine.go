@@ -661,7 +661,7 @@ func (e *Engine) rotatePctLocked() int {
 		return 0
 	}
 	if e.settings.RotatePct == 0 {
-		return 60
+		return model.DefaultRotatePct
 	}
 	return e.settings.RotatePct
 }
