@@ -191,6 +191,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
               <span className="font-mono-code text-muted">
                 {w.kind}
                 {w.machine ? ` · ${w.machine}` : ""}
+                {w.worktree_branch ? ` · ${w.worktree_branch}` : ""}
               </span>
             </button>
           ))}

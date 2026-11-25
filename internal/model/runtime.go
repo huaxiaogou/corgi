@@ -90,6 +90,8 @@ type AgentView struct {
 	IsAgent        bool       `json:"is_agent"`
 	Machine        string     `json:"machine"`
 	Run            *[2]string `json:"run,omitempty"`
+	RepoRoot       string     `json:"repo_root,omitempty"`
+	WorktreeBranch string     `json:"worktree_branch,omitempty"`
 }
 
 // QueuedPrompt is one durable human prompt waiting for a busy agent pane or main Corgi chat thread.

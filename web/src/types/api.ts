@@ -66,6 +66,9 @@ export interface Worker {
   last_report?: string;
   ended?: boolean;
   session?: string;
+  repo_root?: string;
+  worktree_path?: string;
+  worktree_branch?: string;
 }
 
 export interface Thread {
@@ -154,6 +157,8 @@ export interface AgentView {
   is_agent: boolean;
   machine: string;
   run?: [string, string];
+  repo_root?: string;
+  worktree_branch?: string;
 }
 
 export interface PaneState {

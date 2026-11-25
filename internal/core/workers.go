@@ -34,6 +34,9 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 			return nil, fmt.Errorf("worker %q has no saved session id to resume; spawn a fresh worker", req.Resume)
 		}
 		req.Kind, req.Cwd, req.Machine, sessionID = old.Kind, old.Cwd, old.Machine, old.Session
+		if old.RepoRoot != "" {
+			req.Cwd = e.resolveResumeCwd(ctx, old.Machine, old.Cwd, old.RepoRoot)
+		}
 		if req.Name == "" {
 			req.Name = old.Name
 		}
@@ -122,6 +125,18 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		}
 	}
 
+	e.wtMu.Lock()
+	var wtPrep *worktreePrep
+	if sessionID == "" {
+		effCwd, prep, wErr := e.prepareWorktree(ctx, machine, cwd, name, req.Worktree)
+		if wErr != nil {
+			e.wtMu.Unlock()
+			return nil, wErr
+		}
+		cwd = effCwd
+		wtPrep = prep
+	}
+
 	wk := &model.Worker{
 		Name:      name,
 		Kind:      kind,
@@ -137,7 +152,16 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		Status:    "starting",
 		Session:   sessionID,
 	}
-	if err := e.store.UpsertWorker(ctx, wk); err != nil {
+	if wtPrep != nil {
+		wk.RepoRoot = wtPrep.RepoRoot
+		wk.RepoCommonDir = wtPrep.CommonDir
+		wk.WorktreePath = wtPrep.WorktreePath
+		wk.WorktreeBranch = wtPrep.WorktreeBranch
+		wk.WorktreeBase = wtPrep.BaseCommit
+	}
+	err = e.store.UpsertWorker(ctx, wk)
+	e.wtMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	sub := thread != model.MainThread
@@ -151,7 +175,11 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	if sessionID != "" {
 		verb = "续接"
 	}
-	e.addEvent(ctx, thread, fmt.Sprintf("%s %s（%s%s）", verb, name, kind, machineTag(mc.Name, mc.Local)), name, "spawn")
+	wtTag := ""
+	if wk.WorktreeBranch != "" {
+		wtTag = " · Worktree " + wk.WorktreeBranch
+	}
+	e.addEvent(ctx, thread, fmt.Sprintf("%s %s（%s%s%s）", verb, name, kind, machineTag(mc.Name, mc.Local), wtTag), name, "spawn")
 	e.notifyChanged()
 
 	workerBin := e.binPath
@@ -203,8 +231,8 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		default:
 		}
 
-		brief := fmt.Sprintf("[corgi task · worker=%s · thread=%s]\n%s\n\nHow this works:\n- Report completion with `%s report \"outcome summary & file paths\"`.\n- If blocked on a decision only the human can make or repeated failures, report `BLOCKED: <need> · tried: <attempts> · recommendation: <choice>`.",
-			name, thread, strings.TrimSpace(req.Task), workerBin)
+		brief := fmt.Sprintf("[corgi task · worker=%s · thread=%s]\n%s\n\nHow this works:\n- Report completion with `%s report \"outcome summary & file paths\"`.\n- If blocked on a decision only the human can make or repeated failures, report `BLOCKED: <need> · tried: <attempts> · recommendation: <choice>`.%s",
+			name, thread, strings.TrimSpace(req.Task), workerBin, worktreePromptNote(wtPrep))
 		_, _ = e.Ingest(lctx, "router", thread, model.RouterName, brief, "", name, name)
 	}()
 
@@ -232,6 +260,7 @@ type LaunchManagedRequest struct {
 	Effort    string
 	Prompt    string
 	SessionID string
+	Worktree  string // auto (default) | on | off
 	ExtraArgs []string
 }
 
@@ -294,6 +323,19 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 		_, seq, _ := e.store.NextID(ctx, "w")
 		name = fmt.Sprintf("%s-%d", name, seq)
 	}
+
+	e.wtMu.Lock()
+	var wtPrep *worktreePrep
+	if req.SessionID == "" {
+		effCwd, prep, wErr := e.prepareWorktree(ctx, machine, cwd, name, req.Worktree)
+		if wErr != nil {
+			e.wtMu.Unlock()
+			return nil, wErr
+		}
+		cwd = effCwd
+		wtPrep = prep
+	}
+	e.wtMu.Unlock()
 
 	st := e.Settings()
 	if !st.AskPermissions {
@@ -359,6 +401,13 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 		Status:      status,
 		Session:     req.SessionID,
 	}
+	if wtPrep != nil {
+		wk.RepoRoot = wtPrep.RepoRoot
+		wk.RepoCommonDir = wtPrep.CommonDir
+		wk.WorktreePath = wtPrep.WorktreePath
+		wk.WorktreeBranch = wtPrep.WorktreeBranch
+		wk.WorktreeBase = wtPrep.BaseCommit
+	}
 	if err := e.store.UpsertWorker(ctx, wk); err != nil {
 		return nil, err
 	}
@@ -367,12 +416,16 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 	if req.SessionID != "" {
 		verb = "续接受管会话"
 	}
-	e.addEvent(ctx, model.MainThread, fmt.Sprintf("%s %s（%s%s · %s）", verb, name, kind, machineTag(mc.Name, mc.Local), cwd), name, "spawn")
+	wtTag := ""
+	if wk.WorktreeBranch != "" {
+		wtTag = " · 自动 Worktree " + wk.WorktreeBranch
+	}
+	e.addEvent(ctx, model.MainThread, fmt.Sprintf("%s %s（%s%s · %s%s）", verb, name, kind, machineTag(mc.Name, mc.Local), cwd, wtTag), name, "spawn")
 	e.notifyChanged()
 
 	if prompt != "" {
-		brief := fmt.Sprintf("[corgi task · worker=%s · thread=%s]\n%s\n\nHow this works:\n- Report completion with `%s report \"outcome summary & file paths\"`.\n- If blocked on a decision only the human can make or repeated failures, report `BLOCKED: <need> · tried: <attempts> · recommendation: <choice>`.",
-			name, model.MainThread, prompt, workerBin)
+		brief := fmt.Sprintf("[corgi task · worker=%s · thread=%s]\n%s\n\nHow this works:\n- Report completion with `%s report \"outcome summary & file paths\"`.\n- If blocked on a decision only the human can make or repeated failures, report `BLOCKED: <need> · tried: <attempts> · recommendation: <choice>`.%s",
+			name, model.MainThread, prompt, workerBin, worktreePromptNote(wtPrep))
 		_, _ = e.Ingest(ctx, "router", model.MainThread, "you", brief, "", name, name)
 	}
 	return wk, nil
@@ -567,14 +620,27 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 		_ = e.store.DeleteQueuedPromptsByScope(ctx, wk.PaneID)
 		e.setQueuePaused(wk.PaneID, false)
 	}
+	wtNote := ""
+	if wk.WorktreePath != "" && wk.RepoRoot != "" {
+		if clRes, clErr := e.cleanupWorktreeOnMachine(ctx, wk.Machine, wk.RepoRoot, wk.WorktreePath, wk.WorktreeBranch, wk.WorktreeBase); clErr != nil {
+			wtNote = "；Worktree 清理跳过：" + clErr.Error()
+		} else if clRes.Note != "" {
+			wtNote = "；" + clRes.Note
+		}
+	}
 	if wk.Session != "" {
+		histCwd := wk.Cwd
+		if wk.WorktreePath != "" && wk.RepoRoot != "" {
+			// If worktree dir was cleaned up, History resume uses repo root cleanly.
+			histCwd = e.resolveResumeCwd(ctx, wk.Machine, wk.Cwd, wk.RepoRoot)
+		}
 		eid, _, _ := e.store.NextID(ctx, "h")
 		_ = e.store.SaveEndedSession(ctx, &model.EndedSession{
-			ID: eid, Kind: wk.Kind, Machine: wk.Machine, Cwd: wk.Cwd,
+			ID: eid, Kind: wk.Kind, Machine: wk.Machine, Cwd: histCwd,
 			Name: wk.Name, Title: orStr(wk.Title, wk.Name), Session: wk.Session, EndedAt: time.Now(),
 		}, 40)
 	}
-	e.addEvent(ctx, wk.Thread, "已停止 "+wk.Name+"（会话已保留，可随时续接）", wk.Name, "info")
+	e.addEvent(ctx, wk.Thread, "已停止 "+wk.Name+"（会话已保留，可随时续接"+wtNote+"）", wk.Name, "info")
 	e.notifyChanged()
 	return nil
 }

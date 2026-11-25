@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent } from "react";
-import { ArrowDown, ArrowUp, Keyboard, Paperclip, Square, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, GitBranch, Keyboard, Paperclip, Square, Trash2, X } from "lucide-react";
 import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { TerminalScreen } from "../../components/TerminalScreen";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
@@ -449,6 +449,15 @@ export function AgentPaneView({ pane, focusSeq = 0, queuedPrompts = [], queuePau
           <div className="flex items-center gap-2">
             <span className="font-semibold text-[15px] truncate">{pane.topic || pane.name}</span>
             <span className="text-[11px] font-mono-code px-1.5 py-0.5 rounded border border-strong text-secondary">{pane.is_agent ? pane.kind : "shell"}</span>
+            {pane.worktree_branch && (
+              <span
+                title={pane.repo_root ? `独立 Worktree（源仓库：${pane.repo_root}）` : "独立 Git Worktree"}
+                className="inline-flex items-center gap-1 text-[11px] font-mono-code px-1.5 py-0.5 rounded border border-hairline surface-rail text-secondary shrink-0"
+              >
+                <GitBranch className="w-3 h-3" />
+                <span>{pane.worktree_branch}</span>
+              </span>
+            )}
             {contextPct > 0 && <span className="text-[11px] font-mono-code text-muted">上下文 {contextPct}%</span>}
           </div>
           <div className="text-[11.5px] font-mono-code text-muted truncate mt-0.5">{pane.machine ? `${pane.machine} · ` : ""}{pane.cwd}</div>

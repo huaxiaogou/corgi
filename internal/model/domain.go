@@ -82,25 +82,30 @@ type Thread struct {
 
 // Worker represents a managed coding agent spawned by Corgi.
 type Worker struct {
-	Name        string     `json:"name"`
-	Kind        string     `json:"kind"` // claude | codex | agy | codebuddy
-	Machine     string     `json:"machine,omitempty"`
-	Cwd         string     `json:"cwd"`
-	Task        string     `json:"task"`
-	Thread      string     `json:"thread"`
-	PaneID      string     `json:"pane_id,omitempty"`
-	WorkspaceID string     `json:"workspace_id,omitempty"`
-	CreatedBy   string     `json:"created_by"`
-	CreatedAt   time.Time  `json:"created_at"`
-	Model       string     `json:"model,omitempty"`
-	Effort      string     `json:"effort,omitempty"`
-	Run         *[2]string `json:"run,omitempty"`
-	Title       string     `json:"title,omitempty"`
-	Status      string     `json:"status"` // starting | working | waiting | idle | done | blocked | gone | failed
-	LastReport  string     `json:"last_report,omitempty"`
-	ReportAt    time.Time  `json:"report_at,omitempty"`
-	Ended       bool       `json:"ended,omitempty"`
-	Session     string     `json:"session,omitempty"`
+	Name           string     `json:"name"`
+	Kind           string     `json:"kind"` // claude | codex | agy | codebuddy
+	Machine        string     `json:"machine,omitempty"`
+	Cwd            string     `json:"cwd"`
+	Task           string     `json:"task"`
+	Thread         string     `json:"thread"`
+	PaneID         string     `json:"pane_id,omitempty"`
+	WorkspaceID    string     `json:"workspace_id,omitempty"`
+	CreatedBy      string     `json:"created_by"`
+	CreatedAt      time.Time  `json:"created_at"`
+	Model          string     `json:"model,omitempty"`
+	Effort         string     `json:"effort,omitempty"`
+	Run            *[2]string `json:"run,omitempty"`
+	Title          string     `json:"title,omitempty"`
+	Status         string     `json:"status"` // starting | working | waiting | idle | done | blocked | gone | failed
+	LastReport     string     `json:"last_report,omitempty"`
+	ReportAt       time.Time  `json:"report_at,omitempty"`
+	Ended          bool       `json:"ended,omitempty"`
+	Session        string     `json:"session,omitempty"`
+	RepoRoot       string     `json:"repo_root,omitempty"`
+	RepoCommonDir  string     `json:"repo_common_dir,omitempty"`
+	WorktreePath   string     `json:"worktree_path,omitempty"`
+	WorktreeBranch string     `json:"worktree_branch,omitempty"`
+	WorktreeBase   string     `json:"worktree_base,omitempty"`
 }
 
 const (

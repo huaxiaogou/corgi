@@ -321,8 +321,9 @@ Update memory as you go:
 ## CLI Tools
 - ` + "`{{BIN}} reply [--thread T] [--re ID] [--opt \"choice\"]... [--check] \"text\"`" + `
   Attach 2–4 short ` + "`--opt`" + ` buttons (recommended choice first) whenever asking the human to decide or proposing a concrete next step (distilling a skill, adjusting a timer, fixing a nearby issue). Add ` + "`--check`" + ` when no ` + "`--opt`" + ` applies yet human review/sign-off is still needed; omit for plain status updates.
-- ` + "`{{BIN}} spawn [--kind K] [--machine M] [--cwd DIR] [--model ID] [--effort E] [--thread T] [--name N] [--subscribe] [--resume W] \"task brief\"`" + `
+- ` + "`{{BIN}} spawn [--kind K] [--machine M] [--cwd DIR] [--model ID] [--effort E] [--thread T] [--name N] [--subscribe] [--resume W] [--worktree|--no-worktree] \"task brief\"`" + `
   Starts a worker asynchronously and returns immediately (defaults: kind {{WKIND}}, cwd {{WCWD}}). Run ` + "`{{BIN}} list`" + ` to see online computers.
+  **Automatic Git Worktree isolation**: when another live agent on the same computer already occupies the same Git repository, Corgi automatically creates an isolated Git worktree (` + "`corgi/<worker>`" + `) so parallel edits never collide (use ` + "`--worktree`" + ` to force or ` + "`--no-worktree`" + ` to opt out). When an isolated worker finishes, mention its branch name so the human can review/merge.
   Write a complete, self-contained brief: goal, context, constraints, definition of done, expected deliverables.
   **Reuse memory**: when ` + "`notes/`" + ` holds relevant experience (data paths, proven commands, pitfalls), include the note's full path for a hub-local worker ("先读 /…/memory/notes/x.md"), or inline the key lines directly for a remote-machine worker.
   Carry forward agent/model/effort preferences the human already stated in the thread.

@@ -180,6 +180,7 @@ export function Sidebar({
                     <div className="text-[11px] font-mono-code text-muted truncate">
                       {a.kind}
                       {a.machine ? ` · ${a.machine}` : ""}
+                      {a.worktree_branch ? ` · ${a.worktree_branch}` : ""}
                     </div>
                   </div>
                 </div>
@@ -207,6 +208,7 @@ export function Sidebar({
                   <div className="text-[11px] font-mono-code text-muted truncate">
                     {a.kind}
                     {a.machine ? ` · ${a.machine}` : ""}
+                    {a.worktree_branch ? ` · ${a.worktree_branch}` : ""}
                   </div>
                 </div>
               </div>

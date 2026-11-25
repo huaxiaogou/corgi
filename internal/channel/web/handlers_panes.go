@@ -47,6 +47,23 @@ func (s *Server) buildPaneState(ctx context.Context) model.PaneState {
 	for _, a := range agents {
 		agentMap[a.PaneID] = a
 	}
+	workerByPane := map[string]*model.Worker{}
+	workerByName := map[string]*model.Worker{}
+	if s.Store != nil {
+		if wsList, wErr := s.Store.ListWorkers(ctx); wErr == nil {
+			for _, w := range wsList {
+				if w.Ended {
+					continue
+				}
+				if w.PaneID != "" {
+					workerByPane[w.PaneID] = w
+				}
+				if w.Name != "" {
+					workerByName[w.Name] = w
+				}
+			}
+		}
+	}
 
 	st := model.PaneState{OK: true, Agents: []model.AgentView{}, Shells: []model.AgentView{}, Machines: machines}
 	titlesByMachine := map[string]map[string]model.PaneSession{"": s.titlesForMachine(ctx, "")}
@@ -95,6 +112,13 @@ func (s *Server) buildPaneState(ctx context.Context) model.PaneState {
 				}
 			}
 			v.Status = s.Fleet.EffectiveStatus(p.ID, v.Status)
+			if wk := workerByPane[p.ID]; wk != nil {
+				v.WorktreeBranch = wk.WorktreeBranch
+				v.RepoRoot = wk.RepoRoot
+			} else if wk := workerByName[v.Name]; wk != nil {
+				v.WorktreeBranch = wk.WorktreeBranch
+				v.RepoRoot = wk.RepoRoot
+			}
 			st.Agents = append(st.Agents, v)
 		} else {
 			v.Status = "shell"
@@ -126,15 +150,16 @@ func (s *Server) handleGetState(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLaunchAgent(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Kind    string   `json:"kind"` // claude | codex | agy | codebuddy | shell
-		Machine string   `json:"machine"`
-		Name    string   `json:"name"`
-		Cwd     string   `json:"cwd"`
-		Label   string   `json:"label"`
-		Model   string   `json:"model"`
-		Effort  string   `json:"effort"`
-		Prompt  string   `json:"prompt"`
-		Args    []string `json:"args"`
+		Kind     string   `json:"kind"` // claude | codex | agy | codebuddy | shell
+		Machine  string   `json:"machine"`
+		Name     string   `json:"name"`
+		Cwd      string   `json:"cwd"`
+		Label    string   `json:"label"`
+		Model    string   `json:"model"`
+		Effort   string   `json:"effort"`
+		Prompt   string   `json:"prompt"`
+		Worktree string   `json:"worktree"` // auto (default) | on | off
+		Args     []string `json:"args"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -189,6 +214,7 @@ func (s *Server) handleLaunchAgent(w http.ResponseWriter, r *http.Request) {
 			Model:     body.Model,
 			Effort:    body.Effort,
 			Prompt:    body.Prompt,
+			Worktree:  body.Worktree,
 			ExtraArgs: body.Args,
 		})
 		if err != nil {
@@ -197,10 +223,13 @@ func (s *Server) handleLaunchAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		s.markStarted(wk.PaneID)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"pane_id":      wk.PaneID,
-			"workspace_id": wk.WorkspaceID,
-			"name":         wk.Name,
-			"worker":       wk.Name,
+			"pane_id":         wk.PaneID,
+			"workspace_id":    wk.WorkspaceID,
+			"name":            wk.Name,
+			"worker":          wk.Name,
+			"cwd":             wk.Cwd,
+			"worktree_branch": wk.WorktreeBranch,
+			"worktree_path":   wk.WorktreePath,
 		})
 		return
 	}

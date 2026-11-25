@@ -21,6 +21,7 @@ export function LauncherModal({ open, machines, onClose, onLaunched, onToast }: 
   const [modelName, setModelName] = useState("");
   const [effort, setEffort] = useState("");
   const [cwd, setCwd] = useState("~");
+  const [worktree, setWorktree] = useState<"auto" | "on" | "off">("auto");
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
@@ -74,9 +75,21 @@ export function LauncherModal({ open, machines, onClose, onLaunched, onToast }: 
     if (busy) return;
     setBusy(true);
     try {
-      const res = await api<{ pane_id: string }>("/api/agents", { kind, machine, model: modelName, effort, cwd, name, prompt });
+      const res = await api<{ pane_id: string; worktree_branch?: string }>("/api/agents", {
+        kind,
+        machine,
+        model: modelName,
+        effort,
+        cwd,
+        name,
+        prompt,
+        worktree,
+      });
       rememberRecentDir(machine, cwd);
       onClose();
+      if (res.worktree_branch) {
+        onToast(`已自动创建独立 Worktree：${res.worktree_branch}`);
+      }
       if (res.pane_id) onLaunched(res.pane_id);
     } catch (err) {
       onToast(err instanceof Error ? err.message : "启动失败");
@@ -178,6 +191,21 @@ export function LauncherModal({ open, machines, onClose, onLaunched, onToast }: 
           )}
 
           <DirPicker machine={machine} value={cwd} onChange={setCwd} />
+
+          {kind !== "shell" && (
+            <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg surface-rail border border-hairline">
+              <span className="text-secondary shrink-0">Git Worktree 隔离</span>
+              <select
+                value={worktree}
+                onChange={(e) => setWorktree(e.target.value as "auto" | "on" | "off")}
+                className="bg-transparent text-primary outline-none cursor-pointer text-right"
+              >
+                <option value="auto">同仓库并发自动触发（默认）</option>
+                <option value="on">始终创建独立 Worktree</option>
+                <option value="off">共享原目录（不隔离）</option>
+              </select>
+            </div>
+          )}
 
           {kind !== "shell" && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">

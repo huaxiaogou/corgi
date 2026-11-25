@@ -178,6 +178,8 @@ func cmdSpawn(dir string, args []string) error {
 	effort := fs.String("effort", "", "thinking effort")
 	sub := fs.Bool("subscribe", false, "subscribe worker to thread")
 	resume := fs.String("resume", "", "stopped worker name to resume")
+	worktree := fs.Bool("worktree", false, "force isolated git worktree")
+	noWorktree := fs.Bool("no-worktree", false, "disable automatic git worktree isolation")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -185,10 +187,16 @@ func cmdSpawn(dir string, args []string) error {
 	if err != nil {
 		return err
 	}
+	wtMode := "auto"
+	if *worktree {
+		wtMode = "on"
+	} else if *noWorktree {
+		wtMode = "off"
+	}
 	body := map[string]any{
 		"kind": *kind, "machine": *machine, "cwd": *cwd, "thread": *thread,
 		"name": *name, "model": *modelName, "effort": *effort, "resume": *resume,
-		"task": task, "by": caller(),
+		"worktree": wtMode, "task": task, "by": caller(),
 	}
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "subscribe" {

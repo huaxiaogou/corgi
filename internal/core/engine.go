@@ -45,6 +45,7 @@ type SpawnRequest struct {
 	Effort    string `json:"effort"`
 	Subscribe *bool  `json:"subscribe"`
 	Resume    string `json:"resume"`
+	Worktree  string `json:"worktree,omitempty"` // auto (default) | on | off
 }
 
 // SayRequest represents an incoming human message from Web, WeCom, or CLI.
@@ -111,6 +112,7 @@ type Engine struct {
 
 	wakeCh        chan struct{}
 	queueMu       sync.Mutex
+	wtMu          sync.Mutex
 	pausedQueues  map[string]bool
 	drainCooldown map[string]time.Time
 }

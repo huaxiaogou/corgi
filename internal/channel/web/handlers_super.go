@@ -218,13 +218,19 @@ func (s *Server) handleSuperSpawn(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{
+	res := map[string]any{
 		"worker":  wk.Name,
 		"kind":    wk.Kind,
 		"machine": wk.Machine,
 		"thread":  wk.Thread,
 		"status":  wk.Status,
-	})
+		"cwd":     wk.Cwd,
+	}
+	if wk.WorktreeBranch != "" {
+		res["worktree_branch"] = wk.WorktreeBranch
+		res["worktree_path"] = wk.WorktreePath
+	}
+	writeJSON(w, http.StatusAccepted, res)
 }
 
 func (s *Server) handleSuperSend(w http.ResponseWriter, r *http.Request) {
