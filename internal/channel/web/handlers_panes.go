@@ -91,6 +91,18 @@ func (s *Server) buildPaneState(ctx context.Context) model.PaneState {
 		}
 		if ag, ok := agentMap[p.ID]; ok {
 			v.Name = deref(ag.Name)
+			if ag.Agent != nil && *ag.Agent != "" {
+				v.IsAgent = true
+				if v.Kind == "" {
+					v.Kind = *ag.Agent
+				}
+				if v.Status == "" {
+					v.Status = ag.AgentStatus
+				}
+			}
+			if v.Cwd == "" && ag.Cwd != nil {
+				v.Cwd = *ag.Cwd
+			}
 			if ag.Session != nil {
 				v.Session = extractSessionToken(ag.Session.Kind, ag.Session.Value)
 			}

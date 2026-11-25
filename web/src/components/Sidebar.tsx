@@ -36,13 +36,13 @@ export function Sidebar({
   onCloseMobile,
   onToast,
 }: Props) {
-  const visibleAgents = agents.filter(
-    (a) =>
-      a.name !== "corgi" &&
-      a.name !== "corgi-dream" &&
-      a.workspace_label !== "corgi · router" &&
-      a.workspace_label !== "corgi · dream"
-  );
+  const isInternalPane = (a: AgentView) =>
+    a.name === "corgi" ||
+    a.name === "corgi-dream" ||
+    a.workspace_label === "corgi · router" ||
+    a.workspace_label === "corgi · dream";
+  const visibleAgents = agents.filter((a) => !isInternalPane(a));
+  const visibleShells = shells.filter((s) => !isInternalPane(s));
   const blocked = visibleAgents.filter((a) => a.status === "blocked");
   const active = visibleAgents.filter((a) => a.status !== "blocked");
   const activeWorkers = (superView?.workers ?? []).filter((w) => !w.ended);
@@ -217,10 +217,10 @@ export function Sidebar({
           ))}
         </div>
 
-        {shells.length > 0 && (
+        {visibleShells.length > 0 && (
           <div className="space-y-1">
-            <div className="px-2.5 text-[11px] font-medium text-muted">终端 {shells.length}</div>
-            {shells.map((s) => (
+            <div className="px-2.5 text-[11px] font-medium text-muted">终端 {visibleShells.length}</div>
+            {visibleShells.map((s) => (
               <button
                 key={s.pane_id}
                 type="button"

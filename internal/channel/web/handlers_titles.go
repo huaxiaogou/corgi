@@ -65,10 +65,19 @@ func (s *Server) localPaneSessions(ctx context.Context) map[string]model.PaneSes
 	}
 	for _, p := range panes {
 		localID, machine := fleet.SplitID(p.ID)
-		if machine != "" || p.Agent == nil {
+		if machine != "" {
 			continue
 		}
-		kind := agent.NormalizeKind(*p.Agent)
+		rawKind := deref(p.Agent)
+		if rawKind == "" {
+			if ag, ok := agentByPane[p.ID]; ok && ag.Agent != nil {
+				rawKind = *ag.Agent
+			}
+		}
+		if rawKind == "" {
+			continue
+		}
+		kind := agent.NormalizeKind(rawKind)
 		ad, err := s.Agents.Get(kind)
 		if err != nil {
 			continue

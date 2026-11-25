@@ -342,3 +342,79 @@ func TestSelfUpdateVersionCheckAndTrustEndpoint(t *testing.T) {
 		t.Fatalf("/api/trust failed: code=%d body=%s", tRec.Code, tRec.Body.String())
 	}
 }
+
+func TestBuildPaneStateClassifiesCustomAgentsAndResolvesTitles(t *testing.T) {
+	srv, _ := newTestServer(t)
+	fakeH := herdr.NewClient(func(ctx context.Context) (net.Conn, error) {
+		c1, c2 := net.Pipe()
+		go func() {
+			defer c2.Close()
+			rd := bufio.NewReader(c2)
+			line, err := rd.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			var req struct {
+				ID     string         `json:"id"`
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+			}
+			if json.Unmarshal(line, &req) != nil {
+				return
+			}
+			resp := map[string]any{"id": req.ID, "result": map[string]any{}}
+			switch req.Method {
+			case "workspace.list":
+				resp["result"] = map[string]any{"workspaces": []any{
+					map[string]any{"workspace_id": "w1", "number": 1, "label": "corgi · taihu-plan"},
+					map[string]any{"workspace_id": "w2", "number": 2, "label": "corgi · router"},
+					map[string]any{"workspace_id": "w3", "number": 3, "label": "scratch"},
+				}}
+			case "pane.list":
+				// Simulate herdr pane.list where shell-fallback codebuddy panes have agent=null.
+				resp["result"] = map[string]any{"panes": []any{
+					map[string]any{"pane_id": "w1:p1", "workspace_id": "w1", "cwd": srv.Home, "terminal_title_stripped": "Analyze corgi Taihu access plan", "agent": nil, "agent_status": ""},
+					map[string]any{"pane_id": "w2:p1", "workspace_id": "w2", "cwd": srv.Home, "terminal_title_stripped": "Router session", "agent": nil, "agent_status": ""},
+					map[string]any{"pane_id": "w3:p1", "workspace_id": "w3", "cwd": srv.Home, "terminal_title_stripped": "zsh", "agent": nil, "agent_status": ""},
+				}}
+			case "agent.list":
+				// Simulate herdr.Client.Agents returning merged custom codebuddy entries.
+				resp["result"] = map[string]any{"agents": []any{
+					map[string]any{"pane_id": "w1:p1", "workspace_id": "w1", "name": "taihu-plan", "agent": "codebuddy", "agent_status": "idle", "cwd": srv.Home},
+					map[string]any{"pane_id": "w2:p1", "workspace_id": "w2", "name": "corgi", "agent": "codebuddy", "agent_status": "idle", "cwd": srv.Home},
+				}}
+			}
+			b, _ := json.Marshal(resp)
+			_, _ = c2.Write(append(b, '\n'))
+		}()
+		return c1, nil
+	})
+	srv.Fleet = fleet.NewFleet(fakeH, "hub", srv.Home, "test", []string{"codebuddy"})
+	srv.Engine.SetFleet(srv.Fleet)
+
+	st := srv.buildPaneState(context.Background())
+	if !st.OK {
+		t.Fatalf("buildPaneState failed: %s", st.Error)
+	}
+	if len(st.Agents) != 2 {
+		t.Fatalf("want 2 agents (taihu-plan + corgi), got %d: %+v", len(st.Agents), st.Agents)
+	}
+	if len(st.Shells) != 1 || st.Shells[0].PaneID != "w3:p1" {
+		t.Fatalf("want only plain shell w3:p1 in Shells, got %+v", st.Shells)
+	}
+	var taihu *model.AgentView
+	for i := range st.Agents {
+		if st.Agents[i].Name == "taihu-plan" {
+			taihu = &st.Agents[i]
+		}
+	}
+	if taihu == nil {
+		t.Fatalf("taihu-plan missing from Agents: %+v", st.Agents)
+	}
+	if !taihu.IsAgent || taihu.Kind != "codebuddy" || taihu.Status != "idle" {
+		t.Fatalf("unexpected taihu-plan classification: %+v", taihu)
+	}
+	if taihu.Topic != "Analyze corgi Taihu access plan" {
+		t.Fatalf("expected resolved topic for codebuddy pane, got %q", taihu.Topic)
+	}
+}

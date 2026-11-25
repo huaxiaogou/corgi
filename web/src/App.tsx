@@ -52,7 +52,13 @@ export function App() {
   }
 
   const allAgents = paneState?.agents ?? [];
-  const agents = allAgents.filter((a) => a.name !== "corgi" && a.name !== "corgi-dream");
+  const agents = allAgents.filter(
+    (a) =>
+      a.name !== "corgi" &&
+      a.name !== "corgi-dream" &&
+      a.workspace_label !== "corgi · router" &&
+      a.workspace_label !== "corgi · dream"
+  );
   const shells = paneState?.shells ?? [];
   const machines = paneState?.machines ?? [];
   const pendingCount = (superView?.actions ?? []).filter((a) => a.status === "pending").length;
