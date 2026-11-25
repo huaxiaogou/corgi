@@ -282,6 +282,12 @@ func (c *Client) Agents(ctx context.Context) ([]model.Agent, error) {
 				ca.TerminalTitle = *lp.Title
 			}
 			ca.AgentStatus = c.inferCustomStatus(ctx, pid, ca.TerminalTitle, lp.Revision)
+		} else {
+			c.customMu.Lock()
+			if prev, ok := c.revCache[pid]; ok && prev.status != "" {
+				ca.AgentStatus = prev.status
+			}
+			c.customMu.Unlock()
 		}
 		r.Agents = append(r.Agents, ca)
 	}

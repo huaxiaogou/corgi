@@ -653,3 +653,70 @@ func TestCreateWorkspaceRejectsEmptyIDs(t *testing.T) {
 		t.Fatalf("expected error on empty workspace/pane id, got %v", err)
 	}
 }
+
+func TestClassifyCustomScreenAndTransientReadPreservesStatus(t *testing.T) {
+	cases := []struct {
+		name   string
+		screen string
+		want   string
+	}{
+		{
+			name:   "bottom spinner verb without elapsed seconds",
+			screen: "Previous answer\n\n⠋ Thinking…\nshift+tab to cycle",
+			want:   "working",
+		},
+		{
+			name:   "bottom chinese working spinner",
+			screen: "工具输出\n✳ 思考中…\nbypass permissions on",
+			want:   "working",
+		},
+		{
+			name:   "old spinner far above idle chrome stays idle",
+			screen: "⠋ Thinking…\n1\n2\n3\n4\n5\n6\n7\n8\n9\nDone!\n>\nbypass permissions on · shift+tab to cycle",
+			want:   "idle",
+		},
+		{
+			name:   "approval dialog still classifies as blocked",
+			screen: "Do you want to proceed?\n  › 1. Yes, allow\n    2. No, esc to cancel",
+			want:   "blocked",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyCustomScreen(tc.screen); got != tc.want {
+				t.Fatalf("classifyCustomScreen() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	// Transient pane.read error must preserve previous "working" status rather than flashing "idle".
+	var (
+		mu       sync.Mutex
+		failRead bool
+		rev      uint64 = 1
+	)
+	client := newRPCTestClient(func(method string, params map[string]any) (any, *Error) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch method {
+		case "pane.read":
+			if failRead {
+				return nil, &Error{Code: "timeout", Message: "transient read timeout"}
+			}
+			return map[string]any{"read": map[string]any{"text": "⠋ Thinking…\nshift+tab to cycle"}}, nil
+		}
+		return map[string]any{}, nil
+	})
+
+	ctx := context.Background()
+	if got := client.inferCustomStatus(ctx, "w3:p1", "", rev); got != "working" {
+		t.Fatalf("initial status = %q, want working", got)
+	}
+	mu.Lock()
+	failRead = true
+	rev = 2 // bust cache
+	mu.Unlock()
+	if got := client.inferCustomStatus(ctx, "w3:p1", "", rev); got != "working" {
+		t.Fatalf("transient read failure should preserve working, got %q", got)
+	}
+}

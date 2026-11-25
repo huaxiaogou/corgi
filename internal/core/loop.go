@@ -84,7 +84,13 @@ func (e *Engine) tick(parent context.Context) {
 		if a.Session != nil {
 			li.session = extractSessionID(a.Session.Kind, a.Session.Value)
 		}
+		if *a.Name == model.RouterName {
+			li.status = e.stabilizeRouterStatus(a.PaneID, li.kind, li.status, now)
+		}
 		live[*a.Name] = li
+	}
+	if _, alive := live[model.RouterName]; !alive {
+		e.clearRouterLive()
 	}
 
 	// Auto-adopt any live non-system agent session into Corgi's managed workers table
@@ -540,8 +546,11 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 	if fresh {
 		e.routerFresh = false
 	}
-	if target == model.RouterName && e.routerAskedAt.IsZero() {
-		e.routerAskedAt = time.Now()
+	if target == model.RouterName {
+		if e.routerAskedAt.IsZero() {
+			e.routerAskedAt = time.Now()
+		}
+		e.routerRepliedAt = time.Time{}
 	}
 	e.mu.Unlock()
 
@@ -652,6 +661,13 @@ func (e *Engine) RestartRouter(ctx context.Context) error {
 	e.mu.Lock()
 	e.routerFresh = true
 	e.routerAskedAt = time.Time{}
+	e.routerRepliedAt = time.Time{}
+	e.routerLastAlive = false
+	e.routerLastPane = ""
+	e.routerLastStatus = ""
+	e.routerLastSeenAt = time.Time{}
+	e.routerWorkingAt = time.Time{}
+	e.routerIdleSince = time.Time{}
 	e.mu.Unlock()
 	e.notifyChanged()
 	return nil

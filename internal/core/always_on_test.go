@@ -504,3 +504,127 @@ func TestCodeBuddyHandoverWithoutHerdrSessionAndSayPersistsMessagesMD(t *testing
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestRouterStatusStabilizationAndSnapshotResilience(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	var (
+		mu        sync.Mutex
+		rawStatus = "working"
+		failList  bool
+	)
+	hc := newFakeHerdrClient(func(method string, params map[string]any) (any, *herdr.Error) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch method {
+		case "agent.list":
+			if failList {
+				return nil, &herdr.Error{Code: "timeout", Message: "transient herdr hiccup"}
+			}
+			return map[string]any{
+				"agents": []map[string]any{{
+					"name":              model.RouterName,
+					"pane_id":           "w0:p1",
+					"workspace_id":      "w0",
+					"agent":             "codebuddy",
+					"agent_status":      rawStatus,
+					"interactive_ready": true,
+				}},
+			}, nil
+		case "pane.send_keys":
+			return map[string]any{"ok": true}, nil
+		}
+		return map[string]any{}, nil
+	})
+	fl := fleet.NewFleet(hc, "hub", dir, "test", []string{"codebuddy"})
+	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.mu.Lock()
+	eng.routerIdleGrace = 80 * time.Millisecond
+	eng.mu.Unlock()
+
+	ctx := context.Background()
+
+	// 1. Working enters immediately.
+	snap1 := eng.Snapshot(ctx, model.MainThread)
+	if !snap1.Router.Alive || snap1.Router.Status != "working" || snap1.Router.Replied {
+		t.Fatalf("expected working router snapshot, got %+v", snap1.Router)
+	}
+
+	// 2. Brief idle/unknown blips inside grace window keep "working" without flickering.
+	mu.Lock()
+	rawStatus = "idle"
+	mu.Unlock()
+	snap2 := eng.Snapshot(ctx, model.MainThread)
+	if snap2.Router.Status != "working" {
+		t.Fatalf("expected transient idle blip held as working, got %+v", snap2.Router)
+	}
+
+	// 3. Transient herdr error preserves last known alive/working view instead of dropping to asleep.
+	mu.Lock()
+	failList = true
+	mu.Unlock()
+	snapErr := eng.Snapshot(ctx, model.MainThread)
+	if !snapErr.Router.Alive || snapErr.Router.Status != "working" {
+		t.Fatalf("expected transient poll error to preserve alive/working router, got %+v", snapErr.Router)
+	}
+
+	// 4. Resuming working resets grace timer; calling Reply marks Replied=true while still working.
+	mu.Lock()
+	failList = false
+	rawStatus = "working"
+	mu.Unlock()
+	if _, _, _, err := eng.Reply(ctx, model.MainThread, "已收到，正在处理", "", nil, false); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	snapReplied := eng.Snapshot(ctx, model.MainThread)
+	if snapReplied.Router.Status != "working" || !snapReplied.Router.Replied {
+		t.Fatalf("expected working with Replied=true after Reply, got %+v", snapReplied.Router)
+	}
+
+	// 5. Continuous idle past grace settles cleanly to "idle" and clears Replied.
+	mu.Lock()
+	rawStatus = "idle"
+	mu.Unlock()
+	_ = eng.Snapshot(ctx, model.MainThread) // starts idle grace clock
+	time.Sleep(100 * time.Millisecond)
+	snapIdle := eng.Snapshot(ctx, model.MainThread)
+	if snapIdle.Router.Status != "idle" || snapIdle.Router.Replied {
+		t.Fatalf("expected settled idle after grace window, got %+v", snapIdle.Router)
+	}
+
+	// 6. Blocked transitions immediately without waiting for grace; StopRouter resets working immediately.
+	mu.Lock()
+	rawStatus = "working"
+	mu.Unlock()
+	if s := eng.Snapshot(ctx, model.MainThread); s.Router.Status != "working" {
+		t.Fatalf("expected working again, got %+v", s.Router)
+	}
+	mu.Lock()
+	rawStatus = "blocked"
+	mu.Unlock()
+	if s := eng.Snapshot(ctx, model.MainThread); s.Router.Status != "blocked" {
+		t.Fatalf("expected immediate blocked transition, got %+v", s.Router)
+	}
+
+	mu.Lock()
+	rawStatus = "working"
+	mu.Unlock()
+	_ = eng.Snapshot(ctx, model.MainThread)
+	if _, err := eng.StopRouter(ctx, model.MainThread); err != nil {
+		t.Fatalf("StopRouter: %v", err)
+	}
+	mu.Lock()
+	rawStatus = "idle"
+	mu.Unlock()
+	if s := eng.Snapshot(ctx, model.MainThread); s.Router.Status != "idle" {
+		t.Fatalf("expected StopRouter to clear working hold immediately, got %+v", s.Router)
+	}
+}

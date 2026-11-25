@@ -19,12 +19,13 @@ type paneRevStatus struct {
 }
 
 var (
-	customWorkingRe    = regexp.MustCompile(`(?i)(esc to interrupt|streaming\s*·|task running|[✢✳✶✻✽✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*\(\d+s)`)
-	titleSpinnerRe     = regexp.MustCompile(`^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✢✳✶✻✽✹]`)
-	customReadyRe      = regexp.MustCompile(`(?i)(codebuddy code|bypass permissions|do you trust|shift\+tab to cycle|^>\s*$)`)
-	customIdleChromeRe = regexp.MustCompile(`(?i)(bypass permissions on|← for agents|↵\s*send|⇧tab to cycle|shift\+tab to cycle)`)
-	customChoiceRe     = regexp.MustCompile(`(?m)^\s*([›>•❯▶]\s+.+|\d+[.)]\s+.+)$`)
-	customAskHintRe    = regexp.MustCompile(`(?i)(do you trust|trust (this|the files|the contents)|do you want to|allow|proceed|confirm|esc to cancel|yes,?\s*(i trust|allow|proceed))`)
+	customWorkingRe       = regexp.MustCompile(`(?i)(esc to interrupt|streaming\s*·|task running|[✢✳✶✻✽✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*\(\d+s)`)
+	customBottomWorkingRe = regexp.MustCompile(`(?im)^\s*[✢✳✶✻✽✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒◴◷◶◵]\s*(thinking|pondering|working|streaming|brewing|churning|running|executing|generating|connecting|retrying|waiting|printing|reading|writing|searching|editing|analyzing|思考中|处理中|执行中|生成中)`)
+	titleSpinnerRe        = regexp.MustCompile(`^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✢✳✶✻✽✹◐◓◑◒◴◷◶◵]`)
+	customReadyRe         = regexp.MustCompile(`(?i)(codebuddy code|bypass permissions|do you trust|shift\+tab to cycle|^>\s*$)`)
+	customIdleChromeRe    = regexp.MustCompile(`(?i)(bypass permissions on|← for agents|↵\s*send|⇧tab to cycle|shift\+tab to cycle)`)
+	customChoiceRe        = regexp.MustCompile(`(?m)^\s*([›>•❯▶]\s+.+|\d+[.)]\s+.+)$`)
+	customAskHintRe       = regexp.MustCompile(`(?i)(do you trust|trust (this|the files|the contents)|do you want to|allow|proceed|confirm|esc to cancel|yes,?\s*(i trust|allow|proceed))`)
 )
 
 // SetCustomStore configures on-disk persistence for shell-fallback agents (e.g. codebuddy)
@@ -119,11 +120,15 @@ func persistCustomFile(path string, data map[string]model.Agent) {
 // CodeBuddy into "blocked", "working", or "idle".
 func (c *Client) inferCustomStatus(ctx context.Context, paneID, termTitle string, rev uint64) string {
 	now := time.Now()
+	var prevStatus string
 	c.customMu.Lock()
 	if c.revCache != nil {
-		if prev, ok := c.revCache[paneID]; ok && prev.rev == rev && now.Sub(prev.at) < 1200*time.Millisecond && prev.status != "" {
-			c.customMu.Unlock()
-			return prev.status
+		if prev, ok := c.revCache[paneID]; ok {
+			prevStatus = prev.status
+			if prev.rev == rev && now.Sub(prev.at) < 1200*time.Millisecond && prev.status != "" {
+				c.customMu.Unlock()
+				return prev.status
+			}
 		}
 	}
 	c.customMu.Unlock()
@@ -131,6 +136,9 @@ func (c *Client) inferCustomStatus(ctx context.Context, paneID, termTitle string
 	status := "idle"
 	if rr, err := c.Read(ctx, paneID, "detection", "text", 0); err == nil {
 		status = classifyCustomScreen(rr.Text)
+	} else if prevStatus != "" {
+		// Preserve last known status across transient pane.read failures instead of flashing idle.
+		status = prevStatus
 	}
 	if status == "idle" && titleSpinnerRe.MatchString(strings.TrimSpace(termTitle)) {
 		status = "working"
@@ -187,11 +195,19 @@ func classifyCustomScreen(screen string) string {
 		}
 	}
 	bottom := nonEmpty
-	if len(bottom) > 6 {
-		bottom = bottom[len(bottom)-6:]
+	if len(bottom) > 8 {
+		bottom = bottom[len(bottom)-8:]
 	}
 	bottomJoined := strings.Join(bottom, "\n")
-	if customIdleChromeRe.MatchString(bottomJoined) && !strings.Contains(strings.ToLower(bottomJoined), "esc to cancel") {
+	if customBottomWorkingRe.MatchString(bottomJoined) {
+		return "working"
+	}
+	chromeLines := nonEmpty
+	if len(chromeLines) > 6 {
+		chromeLines = chromeLines[len(chromeLines)-6:]
+	}
+	chromeJoined := strings.Join(chromeLines, "\n")
+	if customIdleChromeRe.MatchString(chromeJoined) && !strings.Contains(strings.ToLower(chromeJoined), "esc to cancel") {
 		return "idle"
 	}
 	if customAskHintRe.MatchString(tail) && len(customChoiceRe.FindAllString(tail, 4)) >= 2 {

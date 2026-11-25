@@ -300,6 +300,10 @@ func (e *Engine) StopRouter(ctx context.Context, thread string) (bool, error) {
 	if err := e.fleet.SendKeys(ctx, paneID, "esc"); err != nil {
 		return false, err
 	}
+	e.mu.Lock()
+	e.routerWorkingAt = time.Time{}
+	e.routerIdleSince = time.Time{}
+	e.mu.Unlock()
 	scope := RouterQueueScope(thread)
 	items, _ := e.store.ListQueuedPrompts(ctx, scope)
 	paused := len(items) > 0
@@ -387,7 +391,11 @@ func (e *Engine) isRouterWorking(ctx context.Context) bool {
 	}
 	for _, a := range agents {
 		if a.Name != nil && *a.Name == model.RouterName {
-			return a.AgentStatus == "working"
+			kind := ""
+			if a.Agent != nil {
+				kind = *a.Agent
+			}
+			return e.stabilizeRouterStatus(a.PaneID, kind, a.AgentStatus, time.Now()) == "working"
 		}
 	}
 	return false

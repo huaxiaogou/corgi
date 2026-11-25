@@ -96,11 +96,20 @@ type Engine struct {
 	routerFresh      bool
 	routerLaunchAt   time.Time
 	routerAskedAt    time.Time
+	routerRepliedAt  time.Time
 	routerPrevStatus string
 	routerRetries    int
 	routerNudged     bool
 	routerUsage      model.ContextUsage
 	routerRun        *[2]string
+	routerIdleGrace  time.Duration
+	routerLastAlive  bool
+	routerLastPane   string
+	routerLastKind   string
+	routerLastStatus string
+	routerLastSeenAt time.Time
+	routerWorkingAt  time.Time
+	routerIdleSince  time.Time
 	handover         *handoverState
 	dream            *dreamRun
 	lastScreen       map[string]screenMark
@@ -484,6 +493,7 @@ func (e *Engine) Reply(ctx context.Context, thread, text, reID string, options [
 	e.mu.Lock()
 	limit := e.settings.ReplyChars
 	e.routerAskedAt = time.Time{}
+	e.routerRepliedAt = now
 	e.routerRetries = 0
 	e.routerNudged = false
 	sink := e.sink

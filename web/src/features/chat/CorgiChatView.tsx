@@ -71,6 +71,8 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const activeWorkers = (data?.workers ?? []).filter((w) => !w.ended);
   const lastEntry = liveEntries[liveEntries.length - 1];
   const router = data?.router;
+  const routerWorking = router?.status === "working";
+  const hasThreadContent = entries.length > 0 || pendingActions.length > 0 || routerWorking;
 
   const { containerRef, contentRef, onScroll, showJumpBottom, scrollToBottom, capturePrependAnchor } = useAutoScroll({
     resetKey: `${thread}:${focusSeq}`,
@@ -79,8 +81,6 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
       lastEntry?.id ?? "",
       lastEntry?.text.length ?? 0,
       pendingActions.map((a) => a.id).join(","),
-      router?.status ?? "",
-      router?.replied ? "1" : "0",
     ].join("|"),
     prependKey: olderEntries.length,
     hasContent: liveEntries.length > 0 || pendingActions.length > 0,
@@ -220,9 +220,10 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
       )}
 
       <div className="relative flex-1 flex flex-col min-h-0">
-        <div ref={containerRef} onScroll={onScroll} className="flex-1 overflow-y-auto scroll-chat px-5 py-6 min-h-0">
-          <div ref={contentRef} className="max-w-[740px] mx-auto space-y-5">
-          {canLoadMore && (
+        <div ref={containerRef} onScroll={onScroll} className="flex-1 overflow-y-auto scroll-chat px-5 pt-6 pb-2 min-h-0">
+          <div ref={contentRef} className="max-w-[740px] mx-auto">
+            <div className="space-y-5">
+            {canLoadMore && (
             <div className="text-center">
               <button type="button" disabled={loadingOlder} onClick={() => void loadEarlier()} className="px-3.5 py-1 rounded-full text-xs border border-strong text-secondary surface-hover cursor-pointer disabled:opacity-50">
                 {loadingOlder ? "加载中…" : "加载更早消息"}
@@ -304,12 +305,20 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
             </div>
           ))}
 
-          {router?.status === "working" && (
-            <div className="flex items-center gap-2.5 text-xs text-muted pt-1">
-              <StatusDot status="working" />
-              <span>{router.replied ? "已回复，在整理记忆…" : "Corgi 在想…"}</span>
             </div>
-          )}
+
+            {hasThreadContent && (
+              <div
+                aria-live="polite"
+                aria-hidden={!routerWorking}
+                className={`mt-3 h-6 flex items-center gap-2.5 text-xs text-muted transition-opacity duration-150 ${
+                  routerWorking ? "opacity-100" : "opacity-0 pointer-events-none select-none"
+                }`}
+              >
+                {routerWorking && <StatusDot status="working" />}
+                <span>{routerWorking ? (router?.replied ? "已回复，在整理记忆…" : "Corgi 在想…") : "\u00A0"}</span>
+              </div>
+            )}
           </div>
         </div>
         {showJumpBottom && (

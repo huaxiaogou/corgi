@@ -125,33 +125,60 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 		rv.Status = "dreaming"
 	}
 	askedAt := e.routerAskedAt
+	repliedAt := e.routerRepliedAt
 	routerRun := e.routerRun
 	sink := e.sink
 	e.mu.Unlock()
 
 	if e.fleet != nil {
-		if live, err := e.fleet.Agents(ctx); err == nil {
+		now := time.Now()
+		actx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		live, err := e.fleet.Agents(actx)
+		cancel()
+		if err == nil {
+			found := false
 			for _, a := range live {
 				if a.Name != nil && *a.Name == model.RouterName {
+					found = true
+					kind := rv.Kind
+					if a.Agent != nil && *a.Agent != "" {
+						kind = *a.Agent
+					}
 					rv.Alive = true
 					rv.PaneID = a.PaneID
-					rv.Status = a.AgentStatus
-					if a.Agent != nil && *a.Agent != "" {
-						rv.Kind = *a.Agent
-					}
+					rv.Kind = kind
+					rv.Status = e.stabilizeRouterStatus(a.PaneID, kind, a.AgentStatus, now)
 					if routerRun != nil {
 						rv.Model, rv.Effort = routerRun[0], routerRun[1]
 						rv.Pending = *routerRun != [2]string{st.RouterModel, st.RouterEffort} ||
 							agent.NormalizeKind(rv.Kind) != agent.NormalizeKind(st.RouterKind)
 					}
-					if rv.Status == "working" && !askedAt.IsZero() {
-						for i := len(entries) - 1; i >= 0 && !entries[i].At.Before(askedAt); i-- {
-							if r := entries[i].Role; r == "corgi" || r == "user" {
-								rv.Replied = r == "corgi"
-								break
-							}
-						}
-					}
+					break
+				}
+			}
+			if !found {
+				e.clearRouterLive()
+			}
+		} else if paneID, kind, status, ok := e.lastRouterView(now); ok {
+			// Preserve the last observed Router status across transient herdr poll errors.
+			rv.Alive = true
+			rv.PaneID = paneID
+			rv.Kind = kind
+			rv.Status = status
+			if routerRun != nil {
+				rv.Model, rv.Effort = routerRun[0], routerRun[1]
+				rv.Pending = *routerRun != [2]string{st.RouterModel, st.RouterEffort} ||
+					agent.NormalizeKind(rv.Kind) != agent.NormalizeKind(st.RouterKind)
+			}
+		}
+	}
+	if rv.Status == "working" {
+		if !repliedAt.IsZero() && (askedAt.IsZero() || !repliedAt.Before(askedAt)) {
+			rv.Replied = true
+		} else if !askedAt.IsZero() {
+			for i := len(entries) - 1; i >= 0 && !entries[i].At.Before(askedAt); i-- {
+				if r := entries[i].Role; r == "corgi" || r == "user" {
+					rv.Replied = r == "corgi"
 					break
 				}
 			}
@@ -186,4 +213,83 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 		WeComOnline:     sink.WeComOnline(),
 		Follow:          follow,
 	}
+}
+
+const (
+	defaultRouterIdleGrace = 3 * time.Second
+	routerErrorHoldWindow  = 10 * time.Second
+)
+
+func (e *Engine) routerGraceLocked() time.Duration {
+	if e.routerIdleGrace > 0 {
+		return e.routerIdleGrace
+	}
+	return defaultRouterIdleGrace
+}
+
+// stabilizeRouterStatus smooths brief working -> idle/unknown flickers between tool calls
+// or screen redraw frames so the UI indicator and turn-completion checks never thrash.
+func (e *Engine) stabilizeRouterStatus(paneID, kind, rawStatus string, now time.Time) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if paneID != "" && e.routerLastPane != "" && paneID != e.routerLastPane {
+		e.routerWorkingAt = time.Time{}
+		e.routerIdleSince = time.Time{}
+	}
+
+	eff := rawStatus
+	switch rawStatus {
+	case "working":
+		e.routerWorkingAt = now
+		e.routerIdleSince = time.Time{}
+	case "blocked":
+		e.routerWorkingAt = time.Time{}
+		e.routerIdleSince = time.Time{}
+	case "idle", "done", "unknown", "":
+		if !e.routerWorkingAt.IsZero() {
+			if e.routerIdleSince.IsZero() {
+				e.routerIdleSince = now
+			}
+			if now.Sub(e.routerIdleSince) < e.routerGraceLocked() {
+				eff = "working"
+			} else {
+				e.routerWorkingAt = time.Time{}
+				e.routerIdleSince = time.Time{}
+				e.routerRepliedAt = time.Time{}
+			}
+		}
+	default:
+		e.routerWorkingAt = time.Time{}
+		e.routerIdleSince = time.Time{}
+	}
+
+	e.routerLastAlive = true
+	if paneID != "" {
+		e.routerLastPane = paneID
+	}
+	if kind != "" {
+		e.routerLastKind = kind
+	}
+	e.routerLastStatus = eff
+	e.routerLastSeenAt = now
+	return eff
+}
+
+func (e *Engine) clearRouterLive() {
+	e.mu.Lock()
+	e.routerLastAlive = false
+	e.routerLastStatus = ""
+	e.routerWorkingAt = time.Time{}
+	e.routerIdleSince = time.Time{}
+	e.mu.Unlock()
+}
+
+func (e *Engine) lastRouterView(now time.Time) (paneID, kind, status string, ok bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.routerLastAlive || e.routerLastSeenAt.IsZero() || now.Sub(e.routerLastSeenAt) >= routerErrorHoldWindow {
+		return "", "", "", false
+	}
+	return e.routerLastPane, e.routerLastKind, e.routerLastStatus, true
 }
