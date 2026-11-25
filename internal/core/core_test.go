@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -85,6 +86,50 @@ func TestMemoryManagerGuardrails(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected notes/shop.md in %+v", files)
+	}
+}
+
+func TestWriteRouterDocsIncludesDefaultWorkerMachine(t *testing.T) {
+	mm := NewMemoryManager(t.TempDir())
+	st := model.Settings{
+		ReplyChars:    200,
+		WorkerMachine: "kiperjing-mb0-2",
+		WorkerKind:    "agy",
+		WorkerModel:   "gemini-4-neon",
+		WorkerEffort:  "xhigh",
+		WorkerCwd:     "~",
+	}
+	if err := mm.WriteRouterDocs("/usr/local/bin/corgi", st); err != nil {
+		t.Fatalf("WriteRouterDocs failed: %v", err)
+	}
+	mm.MarkRouterDocsRead()
+	b, err := os.ReadFile(filepath.Join(mm.RouterDir(), "CORGI.md"))
+	if err != nil {
+		t.Fatalf("read CORGI.md: %v", err)
+	}
+	doc := string(b)
+	for _, want := range []string{
+		"machine kiperjing-mb0-2",
+		"kind agy",
+		"model gemini-4-neon",
+		"effort xhigh",
+		"cwd ~",
+		"default computer (`kiperjing-mb0-2`)",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("CORGI.md missing %q", want)
+		}
+	}
+
+	// Changing WorkerMachine should report changed=true so Router hot-reloads CORGI.md.
+	st.WorkerMachine = ""
+	changed, err := mm.WriteRouterDocsChanged("/usr/local/bin/corgi", st)
+	if err != nil || !changed {
+		t.Fatalf("expected changed=true after WorkerMachine update, got changed=%v err=%v", changed, err)
+	}
+	b2, _ := os.ReadFile(filepath.Join(mm.RouterDir(), "CORGI.md"))
+	if !strings.Contains(string(b2), "machine hub (local)") {
+		t.Fatalf("expected fallback 'machine hub (local)' when WorkerMachine is empty")
 	}
 }
 

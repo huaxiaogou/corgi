@@ -101,6 +101,77 @@ type stringList []string
 func (l *stringList) String() string     { return strings.Join(*l, ", ") }
 func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 
+type boolFlag interface {
+	IsBoolFlag() bool
+}
+
+func isAlphaPrefix(s string) bool {
+	if s == "" {
+		return false
+	}
+	c := s[0]
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// parseInterspersed parses flags anywhere in args (before or after positional arguments),
+// stopping flag extraction at "--". Only flags registered on fs (plus -h/--help) are
+// reordered once positional arguments begin, so hyphenated prose or markdown bullets
+// inside positional text are never misread as flags.
+func parseInterspersed(fs *flag.FlagSet, args []string) error {
+	var flags, pos []string
+	for i := 0; i < len(args); {
+		a := args[i]
+		if a == "--" {
+			pos = append(pos, args[i+1:]...)
+			break
+		}
+		if len(a) > 1 && a[0] == '-' {
+			raw := a[1:]
+			if strings.HasPrefix(raw, "-") {
+				raw = raw[1:]
+			}
+			name, _, hasEq := strings.Cut(raw, "=")
+			if f := fs.Lookup(name); f != nil {
+				flags = append(flags, a)
+				isBool := false
+				if bf, ok := f.Value.(boolFlag); ok && bf.IsBoolFlag() {
+					isBool = true
+				}
+				if hasEq || isBool {
+					i++
+				} else if i+1 < len(args) {
+					flags = append(flags, args[i+1])
+					i += 2
+				} else {
+					return fmt.Errorf("flag needs an argument: -%s", name)
+				}
+				continue
+			}
+			if !hasEq && (name == "h" || name == "help") {
+				flags = append(flags, a)
+				i++
+				continue
+			}
+			// Preserve Go's unknown-flag error for leading flag-like tokens, while allowing
+			// negative numbers or quoted markdown bullets ("- item") as positional text.
+			if len(pos) == 0 && name != "" && !strings.ContainsAny(name, " \t\r\n") && (strings.HasPrefix(a, "--") || isAlphaPrefix(name)) {
+				flags = append(flags, a)
+				i++
+				continue
+			}
+		}
+		pos = append(pos, a)
+		i++
+	}
+	reordered := make([]string, 0, len(flags)+len(pos)+1)
+	reordered = append(reordered, flags...)
+	if len(pos) > 0 {
+		reordered = append(reordered, "--")
+		reordered = append(reordered, pos...)
+	}
+	return fs.Parse(reordered)
+}
+
 func readTextArg(fs *flag.FlagSet) (string, error) {
 	t := strings.Join(fs.Args(), " ")
 	fi, err := os.Stdin.Stat()
@@ -132,7 +203,7 @@ func cmdReply(dir string, args []string) error {
 	check := fs.Bool("check", false, "mark as awaiting human review")
 	var opts stringList
 	fs.Var(&opts, "opt", "quick-choice option button (repeatable)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	text, err := readTextArg(fs)
@@ -151,7 +222,7 @@ func cmdReply(dir string, args []string) error {
 func cmdSay(dir string, args []string) error {
 	fs := flag.NewFlagSet("say", flag.ContinueOnError)
 	thread := fs.String("thread", model.MainThread, "thread id")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	text, err := readTextArg(fs)
@@ -180,7 +251,7 @@ func cmdSpawn(dir string, args []string) error {
 	resume := fs.String("resume", "", "stopped worker name to resume")
 	worktree := fs.Bool("worktree", false, "force isolated git worktree")
 	noWorktree := fs.Bool("no-worktree", false, "disable automatic git worktree isolation")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	task, err := readTextArg(fs)
@@ -213,7 +284,7 @@ func cmdSpawn(dir string, args []string) error {
 func cmdSend(dir string, args []string) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	thread := fs.String("thread", "", "thread id")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
@@ -231,7 +302,7 @@ func cmdSend(dir string, args []string) error {
 func cmdReport(dir string, args []string) error {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
 	worker := fs.String("worker", "", "worker name")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	text, err := readTextArg(fs)
@@ -250,7 +321,7 @@ func cmdReport(dir string, args []string) error {
 func cmdSubscribe(dir string, args []string) error {
 	fs := flag.NewFlagSet("subscribe", flag.ContinueOnError)
 	off := fs.Bool("off", false, "unsubscribe")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
@@ -345,7 +416,7 @@ func cmdTimer(dir string, args []string) error {
 		fs := flag.NewFlagSet("timer add", flag.ContinueOnError)
 		thread := fs.String("thread", model.MainThread, "thread id")
 		to := fs.String("to", "", "target worker (default router)")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseInterspersed(fs, args[1:]); err != nil {
 			return err
 		}
 		if fs.NArg() < 2 {
@@ -368,7 +439,7 @@ func cmdHook(dir string, args []string) error {
 	thread := fs.String("thread", "", "thread id")
 	from := fs.String("from", "cli", "sender identifier")
 	key := fs.String("id", "", "optional idempotency key")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
@@ -388,7 +459,7 @@ func cmdHook(dir string, args []string) error {
 func cmdPair(dir string, args []string) error {
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	computer := fs.Bool("computer", false, "generate code for joining another computer")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	kind := "browser"

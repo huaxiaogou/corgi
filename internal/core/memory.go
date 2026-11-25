@@ -220,9 +220,23 @@ func (m *MemoryManager) WriteRouterDocsChanged(binPath string, st model.Settings
 	if err := m.Ensure(); err != nil {
 		return false, err
 	}
+	wMachine := strings.TrimSpace(st.WorkerMachine)
+	if wMachine == "" {
+		wMachine = "hub (local)"
+	}
+	wDefaults := []string{"machine " + wMachine, "kind " + st.WorkerKind}
+	if wm := strings.TrimSpace(st.WorkerModel); wm != "" {
+		wDefaults = append(wDefaults, "model "+wm)
+	}
+	if we := strings.TrimSpace(st.WorkerEffort); we != "" {
+		wDefaults = append(wDefaults, "effort "+we)
+	}
+	wDefaults = append(wDefaults, "cwd "+st.WorkerCwd)
 	doc := []byte(strings.NewReplacer(
 		"{{BIN}}", binPath,
 		"{{CHARS}}", fmt.Sprint(st.ReplyChars),
+		"{{WMACHINE}}", wMachine,
+		"{{WDEFAULTS}}", strings.Join(wDefaults, ", "),
 		"{{WKIND}}", st.WorkerKind,
 		"{{WCWD}}", st.WorkerCwd,
 		"{{BUDGET}}", fmt.Sprint(UpFrontBudgetBytes>>10),
@@ -326,7 +340,7 @@ Update memory as you go:
 - ` + "`{{BIN}} reply [--thread T] [--re ID] [--opt \"choice\"]... [--check] \"text\"`" + `
   Attach 2–4 short ` + "`--opt`" + ` buttons (recommended choice first) whenever asking the human to decide or proposing a concrete next step (distilling a skill, adjusting a timer, fixing a nearby issue). Add ` + "`--check`" + ` when no ` + "`--opt`" + ` applies yet human review/sign-off is still needed; omit for plain status updates.
 - ` + "`{{BIN}} spawn [--kind K] [--machine M] [--cwd DIR] [--model ID] [--effort E] [--thread T] [--name N] [--subscribe] [--resume W] [--worktree|--no-worktree] \"task brief\"`" + `
-  Starts a worker asynchronously and returns immediately (defaults: kind {{WKIND}}, cwd {{WCWD}}). Run ` + "`{{BIN}} list`" + ` to see online computers.
+  Starts a worker asynchronously and returns immediately (human's defaults: {{WDEFAULTS}}). Omit ` + "`--machine`" + ` / ` + "`--kind`" + ` / ` + "`--model`" + ` / ` + "`--effort`" + ` / ` + "`--cwd`" + ` to use these defaults — **always run on the human's default computer (` + "`{{WMACHINE}}`" + `)** unless the task explicitly targets files, repos, or services that exist only on another computer (run ` + "`{{BIN}} list`" + ` to see online computers).
   **Automatic Git Worktree isolation**: when another live agent on the same computer already occupies the same Git repository, Corgi automatically creates an isolated Git worktree (` + "`corgi/<worker>`" + `) so parallel edits never collide (use ` + "`--worktree`" + ` to force or ` + "`--no-worktree`" + ` to opt out). When an isolated worker finishes, mention its branch name so the human can review/merge.
   Write a complete, self-contained brief: goal, context, constraints, definition of done, expected deliverables.
   **Reuse memory**: when ` + "`notes/`" + ` holds relevant experience (data paths, proven commands, pitfalls), include the note's full path for a hub-local worker ("先读 /…/memory/notes/x.md"), or inline the key lines directly for a remote-machine worker.
@@ -352,6 +366,6 @@ Update memory as you go:
 ## Drive It Forward (Autonomy Gate)
 You own the outcome, not just the first attempt.
 - When a worker fails, stalls, or hits a quota/provider error, recover proactively: retry, switch to another installed agent (` + "`claude`" + ` / ` + "`codex`" + ` / ` + "`agy`" + ` / ` + "`codebuddy`" + `), model, or computer, and inform the human in one line.
-- **How** (agent, model, machine, verification steps) is yours to decide. **What** (goal and scope) belongs to the human.
+- **How** (agent, model, verification steps, and overriding machine when target files/services live only on another host) is yours to decide, while respecting the human's default computer (` + "`{{WMACHINE}}`" + `) whenever no other host is required. **What** (goal and scope) belongs to the human.
 - **Ask first** (with 2–4 ` + "`--opt`" + ` buttons, recommended option first) ONLY for: deleting/overwriting data, schema/index changes, sending/publishing/pushing externally, spending money, modifying global host config outside the task, or genuine scope ambiguity.
 `
