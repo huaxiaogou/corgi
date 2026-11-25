@@ -50,19 +50,19 @@ type SpawnRequest struct {
 
 // SayRequest represents an incoming human message from Web, WeCom, or CLI.
 type SayRequest struct {
-	Thread    string `json:"thread"`
-	Channel   string `json:"channel"` // web | wecom | cli
-	From      string `json:"from"`
-	Text      string `json:"text"`
+	Thread        string `json:"thread"`
+	Channel       string `json:"channel"` // web | wecom | cli
+	From          string `json:"from"`
+	Text          string `json:"text"`
 	ReEntryID     string `json:"re"`
 	ActionID      string `json:"action_id,omitempty"`
 	PromptContext string `json:"-"`
 	QuoteText     string `json:"quote_text,omitempty"`
-	Machine   string `json:"machine,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Effort    string `json:"effort,omitempty"`
-	IdemKey   string `json:"idem_key,omitempty"`
+	Machine       string `json:"machine,omitempty"`
+	Kind          string `json:"kind,omitempty"`
+	Model         string `json:"model,omitempty"`
+	Effort        string `json:"effort,omitempty"`
+	IdemKey       string `json:"idem_key,omitempty"`
 }
 
 type screenMark struct {

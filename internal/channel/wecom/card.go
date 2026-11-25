@@ -11,17 +11,17 @@ import (
 )
 
 const (
-	cardMainTitleMaxRunes    = 26
-	cardMainDescMaxRunes     = 30
-	cardSubTitleMaxRunes     = 112
-	cardHorizValueMaxRunes   = 30
+	cardMainTitleMaxRunes      = 26
+	cardMainDescMaxRunes       = 30
+	cardSubTitleMaxRunes       = 112
+	cardHorizValueMaxRunes     = 30
 	cardButtonTextMaxRunes     = 10
 	cardButtonDirectMaxRunes   = 8
 	cardCompactButtonThreshold = 3
 	cardMaxButtons             = 6
-	cardQuoteTextMaxRunes    = 280
-	cardReplaceTextMaxRunes  = 16
-	cardTaskIDMaxBytes       = 128
+	cardQuoteTextMaxRunes      = 280
+	cardReplaceTextMaxRunes    = 16
+	cardTaskIDMaxBytes         = 128
 )
 
 // BuildActionCard constructs a WeCom button_interaction template_card for a pending Action.
