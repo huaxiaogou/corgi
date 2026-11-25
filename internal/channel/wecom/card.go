@@ -15,9 +15,10 @@ const (
 	cardMainDescMaxRunes     = 30
 	cardSubTitleMaxRunes     = 112
 	cardHorizValueMaxRunes   = 30
-	cardButtonTextMaxRunes   = 10
-	cardButtonDirectMaxRunes = 8
-	cardMaxButtons           = 6
+	cardButtonTextMaxRunes     = 10
+	cardButtonDirectMaxRunes   = 8
+	cardCompactButtonThreshold = 3
+	cardMaxButtons             = 6
 	cardQuoteTextMaxRunes    = 280
 	cardReplaceTextMaxRunes  = 16
 	cardTaskIDMaxBytes       = 128
@@ -35,7 +36,8 @@ func BuildActionCard(a *model.Action) map[string]any {
 		choices = choices[:cardMaxButtons]
 	}
 
-	expandOptions := shouldExpandOptions(choices)
+	compactButtons := shouldUseCompactButtons(choices)
+	expandOptions := compactButtons || shouldExpandOptions(choices)
 	buttons := make([]map[string]any, 0, len(choices))
 	var horiz []map[string]any
 	var longOptionLines []string
@@ -49,8 +51,12 @@ func BuildActionCard(a *model.Action) map[string]any {
 		if key == "" {
 			key = strconv.Itoa(i + 1)
 		}
+		btnText := formatButtonText(i+1, ch.Label, expandOptions)
+		if compactButtons {
+			btnText = formatCompactButtonText(i + 1)
+		}
 		buttons = append(buttons, map[string]any{
-			"text":  formatButtonText(i+1, ch.Label, expandOptions),
+			"text":  btnText,
 			"style": style,
 			"key":   a.ID + ":" + key,
 		})

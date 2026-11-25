@@ -243,11 +243,13 @@ func TestHandleWeComCardClickResolvesAndUpdatesCard(t *testing.T) {
 	}
 	srvConn := <-serverConnCh
 
-	// 1. Reply with long summary + long options triggers immediate WeCom template card push.
+	// 1. Reply with long summary + 3 choices triggers immediate WeCom template card push
+	// with full options in horizontal_content_list and compact buttons (选1/选2/选3).
 	longSummary := "登录接口并发刷新 token 存在竞态。建议先加分布式锁并补充并发回归测试，确认按哪种方案推进？"
 	opts := []string{
 		"先加分布式锁并补齐并发回归测试（推荐）",
 		"仅记录告警日志，暂不改动登录核心链路",
+		"暂不推进",
 	}
 	_, act, _, err := eng.Reply(ctx, model.MainThread, longSummary, "", opts, false)
 	if err != nil || act == nil {
@@ -262,6 +264,16 @@ func TestHandleWeComCardClickResolvesAndUpdatesCard(t *testing.T) {
 		}
 		if _, ok := tc["horizontal_content_list"]; !ok {
 			t.Fatalf("expected expanded options in horizontal_content_list, got %+v", tc)
+		}
+		rawBtns, _ := tc["button_list"].([]any)
+		if len(rawBtns) != 3 {
+			t.Fatalf("expected 3 compact buttons, got %+v", tc["button_list"])
+		}
+		b0, _ := rawBtns[0].(map[string]any)
+		b1, _ := rawBtns[1].(map[string]any)
+		b2, _ := rawBtns[2].(map[string]any)
+		if b0["text"] != "选1" || b1["text"] != "选2" || b2["text"] != "选3" {
+			t.Fatalf("expected compact buttons 选1/选2/选3, got %+v", rawBtns)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for pushed action card")
@@ -335,7 +347,7 @@ func TestHandleWeComCardClickResolvesAndUpdatesCard(t *testing.T) {
 	if len(snap.Actions) != 0 {
 		t.Fatalf("expected 0 pending actions in Snapshot after WeCom click, got %+v", snap.Actions)
 	}
-	if ra := snap.ResolvedActions[act.ID]; ra == nil || ra.Status != model.ActionResolved || ra.ResolvedBy != "wecom" || len(ra.Choices) != 2 {
+	if ra := snap.ResolvedActions[act.ID]; ra == nil || ra.Status != model.ActionResolved || ra.ResolvedBy != "wecom" || len(ra.Choices) != 3 {
 		t.Fatalf("expected Web Snapshot ResolvedActions[%s] synced with WeCom click, got %+v", act.ID, ra)
 	}
 

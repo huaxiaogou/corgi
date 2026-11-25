@@ -401,7 +401,27 @@ func TestBuildActionCardLayoutAndLimits(t *testing.T) {
 			wantQuote:      false,
 			wantHorizCount: 3,
 			wantBtnCount:   3,
-			wantFirstBtn:   "1. 先加分布式锁…",
+			wantFirstBtn:   "选1",
+		},
+		{
+			name: "patrol digest with 3 medium choices expands full options and uses compact buttons",
+			action: &model.Action{
+				ID:      "a555",
+				Kind:    model.ActionKindPatrolDigest,
+				Title:   "待定事项：太湖接入方案曾指出，若同事也使用 Corgi，需先定身份隔离与权限边界。你想按个人使用还是共享服务继续细化？",
+				Summary: "待定事项：太湖接入方案曾指出，若同事也使用 Corgi，需先定身份隔离与权限边界。你想按个人使用还是共享服务继续细化？",
+				Choices: []model.ActionChoice{
+					{Key: "1", Label: "个人手机先用"},
+					{Key: "2", Label: "按共享服务设计"},
+					{Key: "3", Label: "暂不推进"},
+				},
+			},
+			wantTitle:      "巡检摘要确认",
+			wantSubSubstr:  "你想按个人使用还是共享服务继续细化？",
+			wantQuote:      false,
+			wantHorizCount: 3,
+			wantBtnCount:   3,
+			wantFirstBtn:   "选1",
 		},
 		{
 			name: "very long summary and very long option spill cleanly into quote_area",
@@ -455,9 +475,9 @@ func TestBuildActionCardLayoutAndLimits(t *testing.T) {
 				},
 			},
 			wantTitle:      "选择目标环境",
-			wantHorizCount: 0,
+			wantHorizCount: 6,
 			wantBtnCount:   6,
-			wantFirstBtn:   "环境A",
+			wantFirstBtn:   "选1",
 		},
 	}
 
@@ -525,6 +545,72 @@ func TestBuildActionCardLayoutAndLimits(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCompactButtonsPreserveChoiceKeysAndClickMapping(t *testing.T) {
+	act := &model.Action{
+		ID:      "a555",
+		Kind:    model.ActionKindPatrolDigest,
+		Title:   "待定事项：太湖接入多用户策略确认",
+		Summary: "待定事项：太湖接入多用户策略确认，你想按哪种方案推进？",
+		Choices: []model.ActionChoice{
+			{Key: "1", Label: "个人手机先用"},
+			{Key: "2", Label: "按共享服务设计"},
+			{Key: "3", Label: "暂不推进"},
+		},
+	}
+
+	card := BuildActionCard(act)
+	horiz, _ := card["horizontal_content_list"].([]map[string]any)
+	wantHoriz := []struct{ k, v string }{
+		{"选项 1", "个人手机先用"},
+		{"选项 2", "按共享服务设计"},
+		{"选项 3", "暂不推进"},
+	}
+	if len(horiz) != len(wantHoriz) {
+		t.Fatalf("horizontal_content_list len = %d, want %d", len(horiz), len(wantHoriz))
+	}
+	for i, w := range wantHoriz {
+		if horiz[i]["keyname"] != w.k || horiz[i]["value"] != w.v {
+			t.Fatalf("horiz[%d] = %+v, want %+v", i, horiz[i], w)
+		}
+	}
+
+	btns, _ := card["button_list"].([]map[string]any)
+	wantBtns := []struct {
+		text  string
+		key   string
+		style int
+	}{
+		{"选1", "a555:1", 1},
+		{"选2", "a555:2", 2},
+		{"选3", "a555:3", 2},
+	}
+	if len(btns) != len(wantBtns) {
+		t.Fatalf("button_list len = %d, want %d", len(btns), len(wantBtns))
+	}
+	for i, w := range wantBtns {
+		if btns[i]["text"] != w.text || btns[i]["key"] != w.key || btns[i]["style"] != w.style {
+			t.Fatalf("button[%d] = %+v, want %+v", i, btns[i], w)
+		}
+	}
+
+	// Clicking button 2 ("选2" -> key "a555:2") still parses to ActionID="a555", ChoiceKey="2".
+	cbRaw := json.RawMessage(`{"chattype":"single","from":{"userid":"owner_01"},"event":{"eventtype":"template_card_event","template_card_event":{"task_id":"a555","event_key":"a555:2"}}}`)
+	ev, ok := ParseCardEventCallback("req-555", cbRaw)
+	if !ok || ev.ActionID != "a555" || ev.ChoiceKey != "2" {
+		t.Fatalf("ParseCardEventCallback mismatch: ev=%+v ok=%v", ev, ok)
+	}
+
+	// Resolved card renders the original full label ("按共享服务设计"), never the compact button label ("选2").
+	act.Status = model.ActionResolved
+	act.ResolvedBy = "wecom"
+	act.ChosenKey = "2"
+	act.ChosenLabel = "按共享服务设计"
+	resolvedCard := BuildResolvedActionCard(act, "a555")
+	if rt, _ := resolvedCard["replace_text"].(string); rt != "已选：按共享服务设计" {
+		t.Fatalf("resolved replace_text = %q, want 已选：按共享服务设计", rt)
 	}
 }
 

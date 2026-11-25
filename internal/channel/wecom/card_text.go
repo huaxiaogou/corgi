@@ -54,6 +54,14 @@ func shapeCardCopy(a *model.Action, choiceCount int) (title, desc, body, overflo
 	return title, desc, body, overflow
 }
 
+func shouldUseCompactButtons(choices []model.ActionChoice) bool {
+	return len(choices) >= cardCompactButtonThreshold
+}
+
+func formatCompactButtonText(num int) string {
+	return fmt.Sprintf("选%d", num)
+}
+
 func shouldExpandOptions(choices []model.ActionChoice) bool {
 	for _, ch := range choices {
 		if len([]rune(collapseSpaces(ch.Label))) > cardButtonDirectMaxRunes || strings.TrimSpace(ch.Detail) != "" {
