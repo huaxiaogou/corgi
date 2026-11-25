@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -457,40 +460,90 @@ func cleanAgyToolOutput(raw string) string {
 	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
-func (a *AgyAdapter) ReadContextUsage(transcriptPath string, _ int) model.ContextUsage {
+func (a *AgyAdapter) ReadContextUsage(transcriptPath string, defaultWindow int) model.ContextUsage {
 	if transcriptPath == "" {
 		return model.ContextUsage{}
 	}
+	// Primary source: conversation SQLite gen_metadata protobuf (contains exact model window).
 	// Path shape: <root>/brain/<convID>/.system_generated/logs/transcript[_full].jsonl
 	convDir := filepath.Dir(filepath.Dir(filepath.Dir(transcriptPath)))
 	convID := filepath.Base(convDir)
-	if convID == "" || convID == "." || convID == "/" {
-		return model.ContextUsage{}
-	}
-	root := filepath.Dir(filepath.Dir(convDir))
-	dbPath := filepath.Join(root, "conversations", convID+".db")
-	if _, err := os.Stat(dbPath); err != nil {
-		return model.ContextUsage{}
-	}
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(2000)")
-	if err != nil {
-		return model.ContextUsage{}
-	}
-	defer db.Close()
-	rows, err := db.Query(`SELECT data FROM gen_metadata ORDER BY rowid DESC LIMIT 8`)
-	if err != nil {
-		return model.ContextUsage{}
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var raw []byte
-		if rows.Scan(&raw) == nil {
-			if u, ok := parseAgyContextProto(raw); ok {
-				return u
+	if convID != "" && convID != "." && convID != "/" {
+		root := filepath.Dir(filepath.Dir(convDir))
+		dbPath := filepath.Join(root, "conversations", convID+".db")
+		if _, err := os.Stat(dbPath); err == nil {
+			// Use immutable=1 as fallback when WAL shm cannot be opened in read-only mode.
+			for _, dsn := range []string{
+				"file:" + dbPath + "?mode=ro&_pragma=busy_timeout(2000)",
+				"file:" + dbPath + "?immutable=1",
+			} {
+				if db, err := sql.Open("sqlite", dsn); err == nil {
+					if rows, qErr := db.Query(`SELECT data FROM gen_metadata ORDER BY rowid DESC LIMIT 8`); qErr == nil {
+						for rows.Next() {
+							var raw []byte
+							if rows.Scan(&raw) == nil {
+								if u, ok := parseAgyContextProto(raw); ok {
+									rows.Close()
+									db.Close()
+									return u
+								}
+							}
+						}
+						rows.Close()
+					}
+					db.Close()
+				}
 			}
 		}
 	}
-	return model.ContextUsage{}
+	// Reliable fallback: parse latest PLANNER_RESPONSE token counts directly from transcript.jsonl.
+	return readAgyTranscriptTokens(transcriptPath, defaultWindow)
+}
+
+func readAgyTranscriptTokens(transcriptPath string, defaultWindow int) model.ContextUsage {
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return model.ContextUsage{}
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return model.ContextUsage{}
+	}
+	const tail = 1 << 20
+	if fi.Size() > tail {
+		_, _ = f.Seek(fi.Size()-tail, io.SeekStart)
+	}
+	var last model.ContextUsage
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 8<<20)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if !bytes.Contains(line, []byte(`"input_tokens"`)) {
+			continue
+		}
+		var rec struct {
+			Type            string `json:"type"`
+			Model           string `json:"model"`
+			InputTokens     int    `json:"input_tokens"`
+			CacheReadTokens int    `json:"cache_read_tokens"`
+			OutputTokens    int    `json:"output_tokens"`
+		}
+		if json.Unmarshal(line, &rec) == nil && rec.Type == "PLANNER_RESPONSE" {
+			used := rec.InputTokens + rec.CacheReadTokens + rec.OutputTokens
+			if used > 0 {
+				win := defaultWindow
+				low := strings.ToLower(rec.Model)
+				if strings.Contains(low, "gemini") || strings.Contains(low, "opus-5") || strings.Contains(low, "1m") || used > 200000 {
+					win = 1000000
+				} else if win <= 0 {
+					win = 200000
+				}
+				last = model.ContextUsage{Used: used, Window: win}
+			}
+		}
+	}
+	return last
 }
 
 func parseAgyContextProto(b []byte) (model.ContextUsage, bool) {

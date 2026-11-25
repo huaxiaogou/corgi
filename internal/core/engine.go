@@ -356,6 +356,9 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 	if err := e.store.InsertEntry(ctx, entry); err != nil {
 		return nil, nil, err
 	}
+	if recent, _, err := e.store.ListEntries(ctx, "", 30); err == nil {
+		_ = e.memory.WriteMessages(recent)
+	}
 	e.touchThread(ctx, thread, channel, "")
 	e.mu.Lock()
 	sink := e.sink

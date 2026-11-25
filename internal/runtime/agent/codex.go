@@ -381,15 +381,21 @@ func (c *CodexAdapter) ReadContextUsage(transcriptPath string, _ int) model.Cont
 				Info *struct {
 					ModelWindow int `json:"model_context_window"`
 					LastUsage   *struct {
-						Total int `json:"total_tokens"`
+						Total  int `json:"total_tokens"`
+						Input  int `json:"input_tokens"`
+						Output int `json:"output_tokens"`
 					} `json:"last_token_usage"`
 				} `json:"info"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(line, &e) == nil && e.Payload.Info != nil && e.Payload.Info.LastUsage != nil {
-			if e.Payload.Info.LastUsage.Total > 0 && e.Payload.Info.ModelWindow > 0 {
+			used := e.Payload.Info.LastUsage.Total
+			if used <= 0 {
+				used = e.Payload.Info.LastUsage.Input + e.Payload.Info.LastUsage.Output
+			}
+			if used > 0 && e.Payload.Info.ModelWindow > 0 {
 				last = model.ContextUsage{
-					Used:   e.Payload.Info.LastUsage.Total,
+					Used:   used,
 					Window: e.Payload.Info.ModelWindow,
 				}
 			}

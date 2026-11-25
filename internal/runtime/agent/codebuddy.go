@@ -368,17 +368,29 @@ func (c *CodeBuddyAdapter) ReadContextUsage(transcriptPath string, defaultWindow
 	if fi.Size() > tail {
 		_, _ = f.Seek(fi.Size()-tail, io.SeekStart)
 	}
-	var last model.ContextUsage
+	var (
+		lastExplicit model.ContextUsage
+		lastMetric   model.ContextUsage
+		lastModel    string
+		stepIDs      = map[string]struct{}{}
+	)
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64<<10), 8<<20)
 	for sc.Scan() {
 		line := sc.Bytes()
-		if !bytes.Contains(line, []byte(`"usage"`)) {
+		if !bytes.Contains(line, []byte(`"turn-metrics"`)) &&
+			!bytes.Contains(line, []byte(`"providerData"`)) &&
+			!bytes.Contains(line, []byte(`"usage"`)) {
 			continue
 		}
 		var e struct {
-			ProviderData struct {
-				Usage *struct {
+			Type         string `json:"type"`
+			TokenDelta   int    `json:"tokenDelta"`
+			ProviderData *struct {
+				MessageID      string `json:"messageId"`
+				Model          string `json:"model"`
+				RequestModelID string `json:"requestModelId"`
+				Usage          *struct {
 					Total      int `json:"total_tokens"`
 					Input      int `json:"input_tokens"`
 					Output     int `json:"output_tokens"`
@@ -387,21 +399,66 @@ func (c *CodeBuddyAdapter) ReadContextUsage(transcriptPath string, defaultWindow
 				} `json:"usage"`
 			} `json:"providerData"`
 		}
-		if json.Unmarshal(line, &e) == nil && e.ProviderData.Usage != nil {
-			u := e.ProviderData.Usage
-			used := u.Total
-			if used <= 0 {
-				used = u.Input + u.Output
+		if json.Unmarshal(line, &e) != nil {
+			continue
+		}
+		if e.ProviderData != nil {
+			if m := strings.TrimSpace(e.ProviderData.RequestModelID); m != "" {
+				lastModel = m
+			} else if m := strings.TrimSpace(e.ProviderData.Model); m != "" {
+				lastModel = m
 			}
-			if used <= 0 {
-				used = u.Prompt + u.Completion
+			if e.ProviderData.MessageID != "" {
+				stepIDs[e.ProviderData.MessageID] = struct{}{}
 			}
-			if used > 0 {
-				last = model.ContextUsage{Used: used, Window: defaultWindow}
+			if u := e.ProviderData.Usage; u != nil {
+				used := u.Total
+				if used <= 0 {
+					used = u.Input + u.Output
+				}
+				if used <= 0 {
+					used = u.Prompt + u.Completion
+				}
+				if used > 0 {
+					win := codeBuddyWindowForModel(lastModel, defaultWindow, used)
+					lastExplicit = model.ContextUsage{Used: used, Window: win}
+				}
 			}
 		}
+		if e.Type == "turn-metrics" && e.TokenDelta > 0 {
+			steps := len(stepIDs)
+			if steps <= 0 {
+				steps = 1
+			}
+			estUsed := e.TokenDelta / steps
+			if estUsed > 0 {
+				win := codeBuddyWindowForModel(lastModel, defaultWindow, 0)
+				lastMetric = model.ContextUsage{Used: estUsed, Window: win}
+			}
+			clear(stepIDs)
+		}
 	}
-	return last
+	if lastExplicit.Used > 0 {
+		return lastExplicit
+	}
+	return lastMetric
+}
+
+func codeBuddyWindowForModel(modelName string, fallback, used int) int {
+	low := strings.ToLower(strings.TrimSpace(modelName))
+	switch {
+	case strings.Contains(low, "[1m]"),
+		strings.Contains(low, "gemini-4"),
+		strings.Contains(low, "opus-5"):
+		return 1000000
+	}
+	if fallback <= 0 {
+		fallback = 200000
+	}
+	if used > fallback*2 {
+		return 1000000
+	}
+	return fallback
 }
 
 func (c *CodeBuddyAdapter) LookupTitle(_, _, terminalTitle string) string {

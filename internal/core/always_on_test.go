@@ -424,6 +424,83 @@ func TestWorkerAutoSummarySpawnPreflightAndDocHotReload(t *testing.T) {
 	}
 }
 
+func TestCodeBuddyHandoverWithoutHerdrSessionAndSayPersistsMessagesMD(t *testing.T) {
+	dir := t.TempDir()
+	home := dir
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	var (
+		mu      sync.Mutex
+		prompts []string
+	)
+	cli := newFakeHerdrClient(func(method string, params map[string]any) (any, *herdr.Error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if method == "agent.prompt" {
+			prompts = append(prompts, params["text"].(string))
+		}
+		return map[string]any{"ok": true}, nil
+	})
+	fl := fleet.NewFleet(cli, "hub", home, "test", []string{"codebuddy"})
+	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, home, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// 1. Say persists user message immediately into memory/messages.md so Router restarts never lose it.
+	if _, _, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "这个方案是在哪跑的"}); err != nil {
+		t.Fatalf("Say: %v", err)
+	}
+	rawMsgs, err := os.ReadFile(filepath.Join(eng.memory.RouterDir(), "memory", "messages.md"))
+	if err != nil || !strings.Contains(string(rawMsgs), "这个方案是在哪跑的") {
+		t.Fatalf("expected Say to flush memory/messages.md, got err=%v content=%q", err, string(rawMsgs))
+	}
+
+	// 2. CodeBuddy Router with empty li.session still triggers handover at >=60% via turn-metrics & transcript UUID.
+	sessID := "01a211cb-d92c-7bcd-8eda-a1d84c15e871"
+	cbProj := filepath.Join(home, ".codebuddy", "projects", "router")
+	if err := os.MkdirAll(cbProj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cbLines := strings.Join([]string{
+		`{"type":"session-meta","cwd":"` + eng.memory.RouterDir() + `"}`,
+		`{"type":"message","role":"assistant","providerData":{"messageId":"s1","requestModelId":"hy4std"}}`,
+		`{"type":"message","role":"assistant","providerData":{"messageId":"s2","requestModelId":"hy4std"}}`,
+		`{"type":"turn-metrics","durationMs":50000,"tokenDelta":280000}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(cbProj, sessID+".jsonl"), []byte(cbLines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eng.mu.Lock()
+	eng.routerLaunchAt = time.Now().Add(-10 * time.Minute)
+	eng.routerAskedAt = time.Time{}
+	eng.mu.Unlock()
+
+	live := map[string]liveInfo{
+		model.RouterName: {pane: "w9:p1", status: "idle", ready: true, kind: "codebuddy", session: ""},
+	}
+	eng.checkHandover(ctx, live, false)
+	if !eng.handingOver() {
+		t.Fatalf("expected CodeBuddy handover triggered even with empty li.session (usage=%+v)", eng.routerUsage)
+	}
+	eng.mu.Lock()
+	gotSess := eng.handover.session
+	eng.mu.Unlock()
+	if gotSess != sessID {
+		t.Fatalf("expected session ID extracted from transcript filename %q, got %q", sessID, gotSess)
+	}
+	mu.Lock()
+	if len(prompts) == 0 || !strings.Contains(prompts[0], "[corgi] Handover.") {
+		t.Fatalf("expected handover prompt sent, got %v", prompts)
+	}
+	mu.Unlock()
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

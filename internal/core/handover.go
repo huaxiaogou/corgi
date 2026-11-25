@@ -48,7 +48,11 @@ func (e *Engine) claudeContextWindow(routerModel string) int {
 	if m == "" {
 		m = strings.TrimSpace(os.Getenv("ANTHROPIC_MODEL"))
 	}
-	if strings.Contains(strings.ToLower(m), "[1m]") {
+	low := strings.ToLower(m)
+	if strings.Contains(low, "[1m]") ||
+		strings.Contains(low, "opus-5") ||
+		strings.Contains(low, "opus-4-6") ||
+		strings.Contains(low, "sonnet-4-6") {
 		return 1000000
 	}
 	return 200000
@@ -76,9 +80,13 @@ func (e *Engine) checkHandover(ctx context.Context, live map[string]liveInfo, ha
 	if kind == "" {
 		kind = agent.NormalizeKind(e.Settings().RouterKind)
 	}
-	var usage model.ContextUsage
+	var (
+		usage          model.ContextUsage
+		transcriptPath string
+	)
 	if ad, err := e.agents.Get(kind); err == nil {
 		if path := ad.LocateTranscript(e.home, e.memory.RouterDir(), li.session, launched); path != "" {
+			transcriptPath = path
 			usage = ad.ReadContextUsage(path, e.claudeContextWindow(routerModel))
 		}
 	}
@@ -105,9 +113,16 @@ func (e *Engine) checkHandover(ctx context.Context, live map[string]liveInfo, ha
 		return
 	}
 
-	// Only hand over cleanly between conversations.
+	// Derive session ID from transcript filename when herdr does not populate agent_session (e.g. codebuddy).
+	sessionID := li.session
+	if sessionID == "" && transcriptPath != "" {
+		sessionID = extractSessionID("path", transcriptPath)
+	}
+
+	// Only hand over cleanly between conversations. Never block rotation on empty sessionID,
+	// because preventing context-window bloat is strictly more important than history archiving.
 	if rotateAt <= 0 || paused || !idle || hasQueued || !askedAt.IsZero() ||
-		usage.Pct() < rotateAt || time.Since(launched) < 5*time.Minute || li.session == "" {
+		usage.Pct() < rotateAt || time.Since(launched) < 5*time.Minute {
 		return
 	}
 
@@ -127,7 +142,7 @@ This turn is for memory files alone: edit them, then stop.`, usage.Pct(), UpFron
 	}
 
 	e.mu.Lock()
-	e.handover = &handoverState{at: time.Now(), kind: kind, session: li.session, pct: usage.Pct()}
+	e.handover = &handoverState{at: time.Now(), kind: kind, session: sessionID, pct: usage.Pct()}
 	e.mu.Unlock()
 
 	e.addEvent(ctx, model.MainThread,

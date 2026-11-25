@@ -480,20 +480,23 @@ func MoveKeys(ap model.Approval, targetIdx int) []string {
 	return verticalMoveKeys(activeIdx, targetIdx)
 }
 
-// ProgressHash hashes a terminal screen after stripping spinner lines and elapsed-time/token digits
-// so Watchdog accurately detects a hung turn whose spinner timer keeps ticking.
+// ProgressHash hashes a terminal screen after stripping animated spinner glyphs,
+// spinner/status lines, and elapsed-time/token digits so Watchdog reliably detects
+// a hung turn even while CLI spinners and elapsed-second counters keep ticking.
 func ProgressHash(screen string) string {
 	var b strings.Builder
 	for _, l := range strings.Split(screen, "\n") {
-		low := strings.ToLower(l)
+		low := strings.ToLower(strings.TrimSpace(l))
 		if strings.Contains(low, "esc to interrupt") ||
 			strings.Contains(low, "esc to cancel") ||
 			strings.Contains(low, "task running for a while") ||
-			(strings.Contains(low, "streaming") && strings.Contains(low, "tokens")) {
+			strings.Contains(low, "ctrl+o to expand") ||
+			(strings.Contains(low, "streaming") && strings.Contains(low, "tokens")) ||
+			isAnimatedStatusLine(l) {
 			continue
 		}
 		b.WriteString(strings.Map(func(r rune) rune {
-			if unicode.IsDigit(r) {
+			if unicode.IsDigit(r) || isSpinnerRune(r) {
 				return -1
 			}
 			return r
@@ -502,6 +505,39 @@ func ProgressHash(screen string) string {
 	}
 	sum := sha1.Sum([]byte(b.String()))
 	return fmt.Sprintf("%x", sum[:8])
+}
+
+func isSpinnerRune(r rune) bool {
+	if r >= 0x2800 && r <= 0x28ff { // Braille spinner animation frames
+		return true
+	}
+	switch r {
+	case '✢', '✳', '✶', '✻', '✽', '✹', '◐', '◓', '◑', '◒', '◴', '◷', '◶', '◵':
+		return true
+	}
+	return false
+}
+
+func isAnimatedStatusLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	first := rune(0)
+	for _, r := range trimmed {
+		first = r
+		break
+	}
+	if !isSpinnerRune(first) {
+		return false
+	}
+	low := strings.ToLower(trimmed)
+	for _, kw := range []string{"thinking", "pondering", "working", "streaming", "brewing", "churning", "running", "connecting", "retrying", "waiting"} {
+		if strings.Contains(low, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 // ActivityLine extracts the current working step and spinner metadata from the bottom of an agent terminal.

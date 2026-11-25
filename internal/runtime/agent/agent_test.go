@@ -575,3 +575,65 @@ func TestAgyFamilyGroupingAndModelEffortMapping(t *testing.T) {
 		t.Fatalf("unexpected gpt-6.1-sol efforts: %v", eff)
 	}
 }
+
+func TestAllAdaptersReadContextUsageAndProgressHash(t *testing.T) {
+	dir := t.TempDir()
+
+	// 1. CodeBuddy: turn-metrics tokenDelta divided by distinct providerData.messageId steps.
+	cbFile := filepath.Join(dir, "cb.jsonl")
+	cbContent := strings.Join([]string{
+		`{"type":"message","role":"assistant","providerData":{"messageId":"m1","requestModelId":"hy4std"}}`,
+		`{"type":"function_call","providerData":{"messageId":"m1","requestModelId":"hy4std"}}`,
+		`{"type":"message","role":"assistant","providerData":{"messageId":"m2","requestModelId":"hy4std"}}`,
+		`{"type":"message","role":"assistant","providerData":{"messageId":"m3","requestModelId":"hy4std"}}`,
+		`{"type":"message","role":"assistant","providerData":{"messageId":"m4","requestModelId":"hy4std"}}`,
+		`{"type":"turn-metrics","durationMs":93690,"tokenDelta":600000}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(cbFile, []byte(cbContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cbU := (&CodeBuddyAdapter{}).ReadContextUsage(cbFile, 200000)
+	if cbU.Used != 150000 || cbU.Window != 200000 || cbU.Pct() != 75 {
+		t.Fatalf("unexpected CodeBuddy usage: %+v (pct=%d)", cbU, cbU.Pct())
+	}
+
+	// 2. Agy: transcript.jsonl PLANNER_RESPONSE fallback when conversation SQLite DB is absent.
+	agyFile := filepath.Join(dir, "transcript.jsonl")
+	agyContent := `{"type":"PLANNER_RESPONSE","model":"gemini-4-neon-xhigh","input_tokens":3000,"cache_read_tokens":496000,"output_tokens":1000}` + "\n"
+	if err := os.WriteFile(agyFile, []byte(agyContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agyU := (&AgyAdapter{}).ReadContextUsage(agyFile, 200000)
+	if agyU.Used != 500000 || agyU.Window != 1000000 || agyU.Pct() != 50 {
+		t.Fatalf("unexpected Agy fallback usage: %+v (pct=%d)", agyU, agyU.Pct())
+	}
+
+	// 3. Claude: 1M-window model (claude-opus-5-5) should not show >100% against a 200k default.
+	clFile := filepath.Join(dir, "claude.jsonl")
+	clContent := `{"type":"assistant","isSidechain":false,"message":{"model":"claude-opus-5-5","usage":{"input_tokens":200,"cache_read_input_tokens":298800,"cache_creation_input_tokens":500,"output_tokens":500}}}` + "\n"
+	if err := os.WriteFile(clFile, []byte(clContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clU := (&ClaudeAdapter{}).ReadContextUsage(clFile, 200000)
+	if clU.Used != 300000 || clU.Window != 1000000 || clU.Pct() != 30 {
+		t.Fatalf("unexpected Claude 1M usage: %+v (pct=%d)", clU, clU.Pct())
+	}
+
+	// 4. Codex: fallback to input_tokens + output_tokens when total_tokens is absent.
+	cxFile := filepath.Join(dir, "codex.jsonl")
+	cxContent := `{"type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":400000,"last_token_usage":{"input_tokens":239000,"output_tokens":1000}}}}` + "\n"
+	if err := os.WriteFile(cxFile, []byte(cxContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cxU := (&CodexAdapter{}).ReadContextUsage(cxFile, 200000)
+	if cxU.Used != 240000 || cxU.Window != 400000 || cxU.Pct() != 60 {
+		t.Fatalf("unexpected Codex usage: %+v (pct=%d)", cxU, cxU.Pct())
+	}
+
+	// 5. ProgressHash strips animated Braille / asterisk spinners and status lines.
+	h1 := ProgressHash("● Bash(corgi list)\n⠋ Thinking… (12s)\n> ")
+	h2 := ProgressHash("● Bash(corgi list)\n⠸ Pondering… (142s)\n> ")
+	if h1 != h2 {
+		t.Fatalf("ProgressHash should ignore animated spinner frames and verbs: %q != %q", h1, h2)
+	}
+}

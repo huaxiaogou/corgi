@@ -122,9 +122,16 @@ func (e *Engine) handleRouterLifecycle(ctx context.Context, live map[string]live
 		return
 	}
 
-	// 2. Router Watchdog: nudge once if screen hasn't changed for StallMinutes while working.
+	// 2. Router Watchdog: Router is a lightweight coordinator (<10s/turn), so cap its stall
+	// threshold at 4 minutes. First strike sends Esc + wait + nudge; second strike restarts Router cleanly.
 	if li.status == "working" && st.StallMinutes > 0 {
 		stallDur := time.Duration(st.StallMinutes) * time.Minute
+		if stallDur > 4*time.Minute {
+			stallDur = 4 * time.Minute
+		}
+		if stallDur < 2*time.Minute {
+			stallDur = 2 * time.Minute
+		}
 		rr, err := e.fleet.Read(ctx, li.pane, "detection", "text", 0)
 		if err != nil {
 			return
@@ -139,18 +146,33 @@ func (e *Engine) handleRouterLifecycle(ctx context.Context, live map[string]live
 			return
 		}
 		shouldNudge := !nudged && !mk.told && now.Sub(mk.since) >= stallDur
+		shouldRestart := nudged && now.Sub(mk.since) >= stallDur
 		if shouldNudge {
 			mk.told = true
+			mk.since = now // reset clock for 2nd-strike escalation
 			e.lastScreen[model.RouterName] = mk
 			e.routerNudged = true
+		} else if shouldRestart {
+			delete(e.lastScreen, model.RouterName)
+			e.routerNudged = false
 		}
 		e.mu.Unlock()
 
 		if shouldNudge {
 			_ = e.fleet.SendKeys(ctx, li.pane, "esc")
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(800 * time.Millisecond):
+			}
 			_ = e.fleet.Prompt(ctx, model.RouterName,
 				"[corgi watchdog] Your previous turn appeared stalled. Resume handling pending events or inform the human briefly.")
 			e.addEvent(ctx, model.MainThread, "Corgi 大脑似乎卡住了，已尝试自动轻推恢复", "", "info")
+			e.notifyChanged()
+		} else if shouldRestart {
+			e.logger.Warn("router remained stalled after watchdog nudge, restarting router")
+			_ = e.RestartRouter(ctx)
+			e.addEvent(ctx, model.MainThread, "Corgi 大脑持续无响应，已自动重启至全新会话恢复", "", "info")
 			e.notifyChanged()
 		}
 	}

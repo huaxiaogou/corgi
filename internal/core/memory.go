@@ -88,20 +88,24 @@ func (m *MemoryManager) Ensure() error {
 	return nil
 }
 
-// WriteMessages refreshes memory/messages.md with Corgi's last 10 replies.
+// WriteMessages refreshes memory/messages.md with the last 16 human & Corgi dialogue turns.
 func (m *MemoryManager) WriteMessages(entries []*model.Entry) error {
 	var lines []string
-	for i := len(entries) - 1; i >= 0 && len(lines) < 10; i-- {
+	for i := len(entries) - 1; i >= 0 && len(lines) < 16; i-- {
 		e := entries[i]
-		if e.Role == "corgi" {
-			lines = append(lines, fmt.Sprintf("- %s [%s] %s",
+		switch e.Role {
+		case "corgi":
+			lines = append(lines, fmt.Sprintf("- %s [%s] Corgi: %s",
+				e.At.Format("01-02 15:04"), e.Thread, oneLineClip(e.Text, 240)))
+		case "user":
+			lines = append(lines, fmt.Sprintf("- %s [%s] 主人: %s",
 				e.At.Format("01-02 15:04"), e.Thread, oneLineClip(e.Text, 240)))
 		}
 	}
 	for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
 		lines[i], lines[j] = lines[j], lines[i]
 	}
-	body := "# Corgi 近期回复（系统自动维护，从旧到新）\n\n" + strings.Join(lines, "\n") + "\n"
+	body := "# 近期对话记录（系统自动维护，从旧到新）\n\n" + strings.Join(lines, "\n") + "\n"
 	return os.WriteFile(filepath.Join(m.MemDir(), "messages.md"), []byte(body), 0o600)
 }
 

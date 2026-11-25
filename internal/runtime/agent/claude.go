@@ -377,6 +377,7 @@ func (c *ClaudeAdapter) ReadContextUsage(transcriptPath string, claudeWindow int
 		var e struct {
 			IsSidechain bool `json:"isSidechain"`
 			Message     struct {
+				Model string `json:"model"`
 				Usage *struct {
 					In     int `json:"input_tokens"`
 					Read   int `json:"cache_read_input_tokens"`
@@ -389,11 +390,29 @@ func (c *ClaudeAdapter) ReadContextUsage(transcriptPath string, claudeWindow int
 			u := e.Message.Usage
 			total := u.In + u.Read + u.Create + u.Out
 			if total > 0 {
-				last = model.ContextUsage{Used: total, Window: claudeWindow}
+				win := claudeWindowForModel(e.Message.Model, claudeWindow, total)
+				last = model.ContextUsage{Used: total, Window: win}
 			}
 		}
 	}
 	return last
+}
+
+func claudeWindowForModel(modelName string, fallback, used int) int {
+	low := strings.ToLower(strings.TrimSpace(modelName))
+	if strings.Contains(low, "[1m]") ||
+		strings.Contains(low, "opus-5") ||
+		strings.Contains(low, "opus-4-6") ||
+		strings.Contains(low, "sonnet-4-6") {
+		return 1000000
+	}
+	if fallback <= 0 {
+		fallback = 200000
+	}
+	if used > fallback {
+		return 1000000
+	}
+	return fallback
 }
 
 func (c *ClaudeAdapter) LookupTitle(_, _, terminalTitle string) string {
