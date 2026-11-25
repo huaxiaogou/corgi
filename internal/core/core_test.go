@@ -115,6 +115,7 @@ func TestWriteRouterDocsIncludesDefaultWorkerMachine(t *testing.T) {
 		"effort xhigh",
 		"cwd ~",
 		"default computer (`kiperjing-mb0-2`)",
+		"NEVER** pass bare `--check` without `--opt`",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Fatalf("CORGI.md missing %q", want)
@@ -272,5 +273,228 @@ func TestAdoptUnmanagedAgentsRegistersManagedWorker(t *testing.T) {
 	snap := eng.Snapshot(ctx, model.MainThread)
 	if len(snap.Workers) != 1 || snap.Workers[0].Name != name {
 		t.Fatalf("expected adopted worker in SuperView snapshot: %+v", snap.Workers)
+	}
+}
+
+func TestReplyWithMetaBareCheckGuardrail(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"claude"})
+	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// Seed an existing patrol digest so we verify bare --digest does not wipe it.
+	_, existingDigest, _, err := eng.ReplyWithMeta(ctx, ReplyRequest{
+		Thread:  model.MainThread,
+		Text:    "已有巡检简报",
+		Options: []string{"处理", "稍后"},
+		Digest:  true,
+	})
+	if err != nil || existingDigest == nil {
+		t.Fatalf("seed digest failed: act=%v err=%v", existingDigest, err)
+	}
+
+	cases := []struct {
+		name         string
+		req          ReplyRequest
+		wantAction   bool
+		wantKind     string
+		wantChoices  []string
+		wantWarnSubs []string
+		wantCheck    bool
+	}{
+		{
+			name: "bare check on open A/B question degrades to plain reply",
+			req: ReplyRequest{
+				Thread: model.MainThread,
+				Text:   "如果同事也安装 Corgi，Hub 是共享服务还是各自部署。你更想讨论哪种？",
+				Check:  true,
+			},
+			wantAction:   false,
+			wantWarnSubs: []string{"--check", "--opt"},
+			wantCheck:    false,
+		},
+		{
+			name: "bare check on plain status ack degrades to plain reply",
+			req: ReplyRequest{
+				Thread: model.MainThread,
+				Text:   "收到，已开始推进实现与验证。",
+				Check:  true,
+			},
+			wantAction:   false,
+			wantWarnSubs: []string{"--check", "--opt"},
+			wantCheck:    false,
+		},
+		{
+			name: "bare digest without options degrades without fabricating 已确认",
+			req: ReplyRequest{
+				Thread: model.MainThread,
+				Text:   "早报：今天有两项待办。",
+				Digest: true,
+			},
+			wantAction:   false,
+			wantWarnSubs: []string{"--digest", "--opt"},
+			wantCheck:    false,
+		},
+		{
+			name: "explicit options with check creates router_choice cleanly",
+			req: ReplyRequest{
+				Thread:  model.MainThread,
+				Text:    "Hub 架构你倾向哪种？",
+				Options: []string{"共享服务（推荐）", "各自部署"},
+				Check:   true,
+			},
+			wantAction:  true,
+			wantKind:    model.ActionKindRouterChoice,
+			wantChoices: []string{"共享服务（推荐）", "各自部署"},
+			wantCheck:   true,
+		},
+		{
+			name: "single explicit opt creates router_choice with exact label",
+			req: ReplyRequest{
+				Thread:  model.MainThread,
+				Text:    "请确认这份发布清单。",
+				Options: []string{"已确认清单"},
+			},
+			wantAction:  true,
+			wantKind:    model.ActionKindRouterChoice,
+			wantChoices: []string{"已确认清单"},
+			wantCheck:   false,
+		},
+		{
+			name: "long reply with bare check preserves both warnings",
+			req: ReplyRequest{
+				Thread: model.MainThread,
+				Text:   strings.Repeat("这是一段较长的回复内容，用来触发字数提示。", 15),
+				Check:  true,
+			},
+			wantAction:   false,
+			wantWarnSubs: []string{"--check", "--opt", "usual budget"},
+			wantCheck:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entry, act, warn, err := eng.ReplyWithMeta(ctx, tc.req)
+			if err != nil {
+				t.Fatalf("ReplyWithMeta err: %v", err)
+			}
+			if entry == nil {
+				t.Fatal("expected non-nil entry")
+			}
+			if entry.Check != tc.wantCheck {
+				t.Fatalf("entry.Check = %v, want %v", entry.Check, tc.wantCheck)
+			}
+			if tc.wantAction {
+				if act == nil || entry.ActionID != act.ID {
+					t.Fatalf("expected action linked to entry, got act=%+v entry.ActionID=%q", act, entry.ActionID)
+				}
+				if act.Kind != tc.wantKind {
+					t.Fatalf("act.Kind = %q, want %q", act.Kind, tc.wantKind)
+				}
+				gotLabels := make([]string, len(act.Choices))
+				for i, c := range act.Choices {
+					gotLabels[i] = c.Label
+				}
+				if strings.Join(gotLabels, "|") != strings.Join(tc.wantChoices, "|") {
+					t.Fatalf("choices = %v, want %v", gotLabels, tc.wantChoices)
+				}
+			} else {
+				if act != nil || entry.ActionID != "" {
+					t.Fatalf("expected no action for bare flag, got act=%+v entry.ActionID=%q", act, entry.ActionID)
+				}
+			}
+			if len(tc.wantWarnSubs) == 0 && warn != "" {
+				t.Fatalf("expected empty warning, got %q", warn)
+			}
+			for _, sub := range tc.wantWarnSubs {
+				if !strings.Contains(warn, sub) {
+					t.Fatalf("warning %q missing %q", warn, sub)
+				}
+			}
+		})
+	}
+
+	// Ensure seeded digest remained pending (bare --digest did not expire it).
+	gotSeed, err := st.GetAction(ctx, existingDigest.ID)
+	if err != nil || gotSeed.Status != model.ActionPending {
+		t.Fatalf("expected seeded digest to stay pending, got %+v err=%v", gotSeed, err)
+	}
+}
+
+func TestLegacyRouterCheckCompatibilityAndShowAction(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"claude"})
+	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	legacy1 := &model.Action{
+		ID:        "a366",
+		Kind:      model.ActionKindRouterCheck,
+		Thread:    model.MainThread,
+		EntryID:   "e365",
+		Title:     "历史 router_check 标题…",
+		Summary:   "历史 router_check 标题完整正文",
+		Choices:   []model.ActionChoice{{Key: "1", Label: "已确认"}},
+		Status:    model.ActionPending,
+		CreatedAt: time.Now(),
+	}
+	legacy2 := &model.Action{
+		ID:        "a367",
+		Kind:      model.ActionKindRouterCheck,
+		Thread:    model.MainThread,
+		EntryID:   "e366",
+		Title:     "另一条历史待确认",
+		Summary:   "另一条历史待确认",
+		Choices:   []model.ActionChoice{{Key: "1", Label: "已确认"}},
+		Status:    model.ActionPending,
+		CreatedAt: time.Now(),
+	}
+	if err := st.InsertAction(ctx, legacy1); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertAction(ctx, legacy2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Show supports expanding Action IDs for Chain of Recall / debugging.
+	obj, err := eng.Show(ctx, "a366")
+	if err != nil {
+		t.Fatalf("Show(a366) err: %v", err)
+	}
+	shown, ok := obj.(*model.Action)
+	if !ok || shown.ID != "a366" || shown.Kind != model.ActionKindRouterCheck {
+		t.Fatalf("Show(a366) = %#v, want *model.Action a366", obj)
+	}
+
+	// Legacy router_check actions can still be resolved and dismissed atomically.
+	res, err := eng.ResolveAction(ctx, "a366", "web", "1")
+	if err != nil || res.Status != model.ActionResolved || res.ChosenLabel != "已确认" {
+		t.Fatalf("ResolveAction(legacy router_check) failed: res=%+v err=%v", res, err)
+	}
+	if _, err := eng.ResolveAction(ctx, "a366", "wecom", "1"); !errors.Is(err, store.ErrActionAlreadyResolved) {
+		t.Fatalf("expected ErrActionAlreadyResolved on double resolve, got %v", err)
+	}
+	dis, err := eng.DismissAction(ctx, "a367")
+	if err != nil || dis.Status != model.ActionExpired || dis.ResolvedBy != "dismiss" {
+		t.Fatalf("DismissAction(legacy router_check) failed: dis=%+v err=%v", dis, err)
 	}
 }

@@ -161,8 +161,27 @@ func TestWebhookAuthGitHubGenericAndDismissHTTP(t *testing.T) {
 		t.Fatalf("unexpected triggers response: code=%d body=%s", trRec.Code, trRec.Body.String())
 	}
 
-	// 4. Dismiss action endpoint is atomic (200 then 409).
-	_, act, _, err := srv.Engine.Reply(context.Background(), model.MainThread, "请验收文档", "", nil, true)
+	// 4. Dismiss action endpoint is atomic (200 then 409), and bare --check without options degrades to plain reply + warning.
+	bareReq := httptest.NewRequest(http.MethodPost, "/api/super/reply", bytes.NewBufferString(`{"thread":"chat:main","text":"共享服务还是各自部署。你更想讨论哪种？","check":true}`))
+	bareReq.Header.Set("Authorization", "Bearer "+master)
+	bareReq.Header.Set("Content-Type", "application/json")
+	bareRec := httptest.NewRecorder()
+	h.ServeHTTP(bareRec, bareReq)
+	if bareRec.Code != http.StatusOK {
+		t.Fatalf("bare check reply want 200, got %d body=%s", bareRec.Code, bareRec.Body.String())
+	}
+	var bareOut map[string]any
+	if err := json.Unmarshal(bareRec.Body.Bytes(), &bareOut); err != nil {
+		t.Fatalf("decode bare check reply: %v", err)
+	}
+	if _, hasAct := bareOut["action"]; hasAct {
+		t.Fatalf("bare check reply must not create an action card, got %+v", bareOut)
+	}
+	if warnStr, _ := bareOut["warning"].(string); !strings.Contains(warnStr, "--opt") {
+		t.Fatalf("bare check reply expected --opt warning, got %+v", bareOut)
+	}
+
+	_, act, _, err := srv.Engine.Reply(context.Background(), model.MainThread, "请验收文档", "", []string{"验收通过", "需补充"}, false)
 	if err != nil || act == nil {
 		t.Fatal(err)
 	}

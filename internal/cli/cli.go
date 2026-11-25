@@ -201,7 +201,7 @@ func cmdReply(dir string, args []string) error {
 	fs := flag.NewFlagSet("reply", flag.ContinueOnError)
 	thread := fs.String("thread", model.MainThread, "thread id")
 	re := fs.String("re", "", "entry or trigger id this replies to")
-	check := fs.Bool("check", false, "mark as awaiting human review")
+	check := fs.Bool("check", false, "deprecated without --opt; attach --opt choices to create a decision card")
 	digest := fs.Bool("digest", false, "mark as consolidated patrol/morning digest (replaces prior digest card)")
 	worker := fs.String("worker", "", "optional related worker name")
 	category := fs.String("category", "", "optional action category (worktree | decision | stale)")

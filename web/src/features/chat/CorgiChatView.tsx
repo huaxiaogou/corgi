@@ -21,6 +21,7 @@ function actionCategoryTag(a: Action): { key: string; label: string } {
   if (a.kind === "worker_dialog" || a.category === "blocked") return { key: "blocked", label: "终端阻塞" };
   if (a.category === "worktree") return { key: "worktree", label: "未合分支" };
   if (a.kind === "patrol_digest") return { key: "digest", label: "巡检简报" };
+  if (a.kind === "router_check") return { key: "check", label: "待确认" };
   return { key: "decision", label: "待拍板" };
 }
 
@@ -271,6 +272,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                     { key: "worktree", label: "未合分支", count: pendingActions.filter((a) => actionCategoryTag(a).key === "worktree").length },
                     { key: "digest", label: "巡检简报", count: pendingActions.filter((a) => actionCategoryTag(a).key === "digest").length },
                     { key: "decision", label: "待拍板", count: pendingActions.filter((a) => actionCategoryTag(a).key === "decision").length },
+                    { key: "check", label: "待确认", count: pendingActions.filter((a) => actionCategoryTag(a).key === "check").length },
                   ]
                     .filter((f) => f.key === "all" || f.count > 0)
                     .map((f) => (

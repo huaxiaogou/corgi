@@ -10,6 +10,19 @@ interface Props {
   onOpenWorker?: (workerName: string) => void;
 }
 
+function collapseWhitespace(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+function isClippedTitleOfSummary(title: string, summary: string): boolean {
+  const cleanSummary = collapseWhitespace(summary);
+  if (!cleanSummary) return false;
+  const cleanTitle = collapseWhitespace(title);
+  if (!cleanTitle || cleanTitle === cleanSummary) return true;
+  const prefix = cleanTitle.replace(/(?:\.\.\.|…)+$/, "").trim();
+  return prefix.length > 0 && cleanSummary.startsWith(prefix);
+}
+
 export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWorker }: Props) {
   const [busy, setBusy] = useState(false);
 
@@ -43,14 +56,23 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
     }
   };
 
+  const choices = action.choices ?? [];
+  const isRouterCheck = action.kind === "router_check";
+  const showRecommended = choices.length > 1 && !isRouterCheck;
+  const summaryCoversTitle = Boolean(action.summary) && isClippedTitleOfSummary(action.title, action.summary ?? "");
+
   const badgeLabel =
     action.kind === "patrol_digest"
       ? action.target_worker
         ? `巡检简报 · ${action.target_worker}`
         : "空闲巡检 / 晨间简报"
-      : action.target_worker
-        ? `${action.target_worker} 需要你确认`
-        : "需要你拍板";
+      : isRouterCheck
+        ? action.target_worker
+          ? `${action.target_worker} 待你确认`
+          : "待你确认"
+        : action.target_worker
+          ? `${action.target_worker} 需要你确认`
+          : "需要你拍板";
 
   return (
     <div className="card-floating rounded-2xl overflow-hidden">
@@ -71,9 +93,15 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
           )}
         </div>
 
-        <div className="text-[15px] font-semibold leading-snug text-primary">{action.title}</div>
-        {action.summary && action.summary !== action.title && (
-          <p className="text-[13px] leading-relaxed text-secondary whitespace-pre-line">{action.summary}</p>
+        {summaryCoversTitle ? (
+          <p className="text-[14.5px] font-medium leading-relaxed text-primary whitespace-pre-line">{action.summary}</p>
+        ) : (
+          <>
+            <div className="text-[15px] font-semibold leading-snug text-primary">{action.title}</div>
+            {action.summary && (
+              <p className="text-[13px] leading-relaxed text-secondary whitespace-pre-line">{action.summary}</p>
+            )}
+          </>
         )}
         {action.command && (
           <pre className="px-3.5 py-2.5 rounded-xl text-[12.5px] font-mono-code overflow-x-auto surface-rail border border-hairline">
@@ -83,7 +111,7 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
       </div>
 
       <div className="border-t border-hairline">
-        {(action.choices ?? []).map((ch, idx) => (
+        {choices.map((ch, idx) => (
           <button
             key={`${ch.key}-${idx}`}
             type="button"
@@ -92,10 +120,10 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
             className="w-full px-5 py-3 flex items-center gap-3 text-left text-[13.5px] border-b border-hairline surface-hover transition-colors cursor-pointer disabled:opacity-50"
           >
             <span className="w-5 h-5 rounded flex items-center justify-center font-mono-code text-[11px] border border-strong text-secondary shrink-0">
-              {ch.key || idx + 1}
+              {isRouterCheck && choices.length === 1 ? "✓" : ch.key || idx + 1}
             </span>
-            <span className={idx === 0 ? "font-medium text-primary" : "text-primary"}>{ch.label}</span>
-            {idx === 0 && <span className="ml-auto text-[11px] text-muted">推荐</span>}
+            <span className={idx === 0 && showRecommended ? "font-medium text-primary" : "text-primary"}>{ch.label}</span>
+            {idx === 0 && showRecommended && <span className="ml-auto text-[11px] text-muted">推荐</span>}
           </button>
         ))}
 

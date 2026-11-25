@@ -39,13 +39,16 @@ func (e *Engine) AddTimer(ctx context.Context, spec, text, thread, target, owner
 	return tm, nil
 }
 
-// Show expands any ID (trigger, entry, thread, or worker) for `corgi show` (Chain of Recall).
+// Show expands any ID (trigger, entry, action, thread, or worker) for `corgi show` (Chain of Recall).
 func (e *Engine) Show(ctx context.Context, id string) (any, error) {
 	if t, err := e.store.GetTrigger(ctx, id); err == nil {
 		return t, nil
 	}
 	if en, err := e.store.GetEntry(ctx, id); err == nil {
 		return en, nil
+	}
+	if act, err := e.store.GetAction(ctx, id); err == nil {
+		return act, nil
 	}
 	if w, err := e.store.GetWorker(ctx, id); err == nil {
 		trigs, _ := e.store.ListWorkerTriggers(ctx, w.Name, 15)

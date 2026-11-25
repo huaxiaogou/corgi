@@ -456,6 +456,7 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 		thread = model.MainThread
 	}
 	opts := cleanOptions(req.Options)
+	hasOpts := len(opts) > 0
 
 	var quote *model.Quote
 	if req.ReID != "" {
@@ -485,27 +486,22 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 		At:      now,
 		Re:      quote,
 		Options: opts,
-		Check:   req.Check,
+		Check:   req.Check && hasOpts,
 	}
 
 	var action *model.Action
-	if len(opts) > 0 || req.Check {
+	if hasOpts {
 		aid, _, err := e.store.NextID(ctx, "a")
 		if err != nil {
 			return nil, nil, "", err
 		}
-		kind := model.ActionKindRouterCheck
-		var choices []model.ActionChoice
-		if len(opts) > 0 {
-			kind = model.ActionKindRouterChoice
-			for i, label := range opts {
-				choices = append(choices, model.ActionChoice{
-					Key:   strconv.Itoa(i + 1),
-					Label: label,
-				})
-			}
-		} else {
-			choices = []model.ActionChoice{{Key: "1", Label: "已确认"}}
+		kind := model.ActionKindRouterChoice
+		choices := make([]model.ActionChoice, 0, len(opts))
+		for i, label := range opts {
+			choices = append(choices, model.ActionChoice{
+				Key:   strconv.Itoa(i + 1),
+				Label: label,
+			})
 		}
 		if req.Digest {
 			kind = model.ActionKindPatrolDigest
@@ -513,13 +509,7 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 		}
 		cat := strings.TrimSpace(req.Category)
 		if cat == "" {
-			if req.Digest {
-				cat = "decision"
-			} else if len(opts) > 0 {
-				cat = "decision"
-			} else {
-				cat = "decision"
-			}
+			cat = "decision"
 		}
 		action = &model.Action{
 			ID:           aid,
@@ -556,10 +546,20 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 	sink := e.sink
 	e.mu.Unlock()
 
-	var warn string
-	if limit > 0 && len([]rune(text)) > limit {
-		warn = fmt.Sprintf("reply is %d chars (usual budget ≤%d; ok if detail or list was requested)", len([]rune(text)), limit)
+	var warns []string
+	if !hasOpts && (req.Check || req.Digest) {
+		flagName := "--check"
+		if req.Check && req.Digest {
+			flagName = "--check/--digest"
+		} else if req.Digest {
+			flagName = "--digest"
+		}
+		warns = append(warns, fmt.Sprintf("ignored %s without --opt (sent as plain reply; pass 2-4 --opt buttons for choices or an explicit --opt for confirmation)", flagName))
 	}
+	if limit > 0 && len([]rune(text)) > limit {
+		warns = append(warns, fmt.Sprintf("reply is %d chars (usual budget ≤%d; ok if detail or list was requested)", len([]rune(text)), limit))
+	}
+	warn := strings.Join(warns, "; ")
 	sink.OnReply(ctx, entry, action)
 	sink.OnStateChanged()
 	return entry, action, warn, nil

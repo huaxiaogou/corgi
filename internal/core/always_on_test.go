@@ -284,9 +284,9 @@ func TestResilienceBareShellRouterRetryAndDismiss(t *testing.T) {
 	mu.Unlock()
 
 	// 3. DismissAction atomic transition + FollowView in Snapshot.
-	_, act, _, err := eng.Reply(ctx, model.MainThread, "请确认报告", "", nil, true)
+	_, act, _, err := eng.Reply(ctx, model.MainThread, "请确认报告", "", []string{"确认通过", "退回修改"}, false)
 	if err != nil || act == nil {
-		t.Fatalf("Reply(--check): %v", err)
+		t.Fatalf("Reply(--opt): %v", err)
 	}
 	dismissed, err := eng.DismissAction(ctx, act.ID)
 	if err != nil || dismissed.Status != model.ActionExpired || dismissed.ResolvedBy != "dismiss" {
