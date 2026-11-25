@@ -563,6 +563,10 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 		}
 	}
 	_ = e.store.ExpireWorkerActions(ctx, wk.Name)
+	if wk.PaneID != "" {
+		_ = e.store.DeleteQueuedPromptsByScope(ctx, wk.PaneID)
+		e.setQueuePaused(wk.PaneID, false)
+	}
 	if wk.Session != "" {
 		eid, _, _ := e.store.NextID(ctx, "h")
 		_ = e.store.SaveEndedSession(ctx, &model.EndedSession{

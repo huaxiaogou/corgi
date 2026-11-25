@@ -184,8 +184,31 @@ func (c *ClaudeAdapter) ParseTranscriptLine(line []byte, imgDir string) ([]*mode
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
+		Attachment *struct {
+			Type   string          `json:"type"`
+			Prompt json.RawMessage `json:"prompt"`
+			Origin *struct {
+				Kind string `json:"kind"`
+				Name string `json:"name"`
+			} `json:"origin"`
+		} `json:"attachment"`
 	}
 	if json.Unmarshal(line, &rec) != nil || rec.IsSidechain {
+		return nil, false
+	}
+	// Mid-turn user messages sent while Claude Code is working are recorded as
+	// attachment/queued_command once Claude picks them up, rather than type=="user".
+	if rec.Type == "attachment" && rec.Attachment != nil && rec.Attachment.Type == "queued_command" {
+		originKind := ""
+		if rec.Attachment.Origin != nil {
+			originKind = strings.TrimSpace(rec.Attachment.Origin.Kind)
+		}
+		if originKind != "" && originKind != "human" {
+			return nil, false
+		}
+		if txt := extractClaudeQueuedPrompt(rec.Attachment.Prompt, imgDir); txt != "" {
+			return []*model.Message{{Kind: "user", Text: txt}}, true
+		}
 		return nil, false
 	}
 	if rec.Type != "user" && rec.Type != "assistant" {
@@ -260,6 +283,44 @@ func (c *ClaudeAdapter) ParseTranscriptLine(line []byte, imgDir string) ([]*mode
 		out = append([]*model.Message{{Kind: rec.Type, Text: strings.Join(textParts, "\n")}}, out...)
 	}
 	return out, len(out) > 0
+}
+
+func extractClaudeQueuedPrompt(raw json.RawMessage, imgDir string) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		return strings.TrimSpace(plain)
+	}
+	var blocks []struct {
+		Type   string `json:"type"`
+		Text   string `json:"text"`
+		Source struct {
+			Type      string `json:"type"`
+			MediaType string `json:"media_type"`
+			Data      string `json:"data"`
+		} `json:"source"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			if t := strings.TrimSpace(b.Text); t != "" {
+				parts = append(parts, t)
+			}
+		case "image":
+			if b.Source.Type == "base64" {
+				if p := ExtractImage(b.Source.MediaType, b.Source.Data, imgDir); p != "" {
+					parts = append(parts, p)
+				}
+			}
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
 func parseClaudeAsk(raw json.RawMessage) *model.Message {

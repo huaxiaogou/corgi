@@ -473,8 +473,8 @@ func (c *Client) Prompt(ctx context.Context, target, text string) error {
 		return err
 	}
 	switch info.Agent.Status {
-	case "idle", "done":
-	case "working", "blocked":
+	case "idle", "done", "working":
+	case "blocked":
 		return &Error{Code: "agent_blocked", Message: "agent is " + info.Agent.Status}
 	default:
 		return err

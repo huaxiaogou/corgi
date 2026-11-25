@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
-import { ArrowUp, Paperclip, X } from "lucide-react";
+import { ArrowUp, Paperclip, Square, X } from "lucide-react";
 import { api, uploadFile } from "../../lib/api";
 import { getSupportedEfforts } from "../../lib/models";
 import type { Entry, Machine, ModelCatalog } from "../../types/api";
@@ -10,12 +10,28 @@ const IMG_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
 interface Props {
   machines: Machine[];
   replyTo: Entry | null;
+  working?: boolean;
+  stopping?: boolean;
+  queuedCount?: number;
+  embedded?: boolean;
+  onStop?: () => void;
   onClearReply: () => void;
   onSend: (payload: { text: string; machine: string; kind: string; model: string; effort: string }) => Promise<void>;
   onToast: (msg: string) => void;
 }
 
-export function ComposerBar({ machines, replyTo, onClearReply, onSend, onToast }: Props) {
+export function ComposerBar({
+  machines,
+  replyTo,
+  working = false,
+  stopping = false,
+  queuedCount = 0,
+  embedded = false,
+  onStop,
+  onClearReply,
+  onSend,
+  onToast,
+}: Props) {
   const [text, setText] = useState("");
   const [machine, setMachine] = useState("");
   const [kind, setKind] = useState("");
@@ -98,8 +114,7 @@ export function ComposerBar({ machines, replyTo, onClearReply, onSend, onToast }
 
   const machineQuery = machine && machine !== "local" ? `&machine=${encodeURIComponent(machine)}` : "";
 
-  return (
-    <div className="px-5 pb-4 pt-2 shrink-0">
+  const form = (
       <form
         onSubmit={(e) => void submit(e)}
         onDragOver={(e) => {
@@ -165,7 +180,7 @@ export function ComposerBar({ machines, replyTo, onClearReply, onSend, onToast }
               void submit(e);
             }
           }}
-          placeholder="告诉 Corgi 你要做什么（支持粘贴、拖入图片或文件）…"
+          placeholder={working || queuedCount > 0 ? "告诉 Corgi 你要做什么（运行中自动排队）…" : "告诉 Corgi 你要做什么（支持粘贴、拖入图片或文件）…"}
           className="w-full resize-none bg-transparent text-[14px] outline-none"
         />
 
@@ -223,11 +238,30 @@ export function ComposerBar({ machines, replyTo, onClearReply, onSend, onToast }
               </select>
             )}
           </div>
-          <button type="submit" className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer hover:opacity-85 shrink-0" title="发送">
-            <ArrowUp className="w-4 h-4" strokeWidth={2} />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {working && onStop && (
+              <button
+                type="button"
+                disabled={stopping}
+                onClick={onStop}
+                title="停止当前步骤 (Esc)"
+                className="w-8 h-8 rounded-full border border-strong surface-rail text-primary flex items-center justify-center surface-hover cursor-pointer disabled:opacity-50"
+              >
+                <Square className="w-3 h-3 fill-current" />
+              </button>
+            )}
+            <button
+              type="submit"
+              className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer hover:opacity-85 shrink-0"
+              title={working || queuedCount > 0 ? "加入待发送队列" : "发送"}
+            >
+              <ArrowUp className="w-4 h-4" strokeWidth={2} />
+            </button>
+          </div>
         </div>
       </form>
-    </div>
   );
+
+  if (embedded) return form;
+  return <div className="px-5 pb-4 pt-2 shrink-0">{form}</div>;
 }

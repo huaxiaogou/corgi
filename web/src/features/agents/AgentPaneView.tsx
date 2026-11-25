@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent } from "react";
-import { ArrowDown, ArrowUp, Keyboard, Paperclip, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Keyboard, Paperclip, Square, Trash2, X } from "lucide-react";
+import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { TerminalScreen } from "../../components/TerminalScreen";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { api, uploadFile } from "../../lib/api";
-import type { AgentView, Approval, ChatMessage, MsgPatch } from "../../types/api";
+import type { AgentView, Approval, ChatMessage, MsgPatch, QueuedPrompt } from "../../types/api";
 import { AgentChatThread, type PendingPrompt } from "./AgentChatThread";
 
 interface Props {
   pane: AgentView;
+  focusSeq?: number;
+  queuedPrompts?: QueuedPrompt[];
+  queuePaused?: boolean;
   onClosed: () => void;
   onOpenFile?: (path: string) => void;
   onToast: (msg: string) => void;
@@ -71,12 +75,18 @@ function reconcilePendingPrompts(
   return changed ? next : pending;
 }
 
-export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
+export function AgentPaneView({ pane, focusSeq = 0, queuedPrompts = [], queuePaused = false, onClosed, onOpenFile, onToast }: Props) {
   const [mode, setMode] = useState<"chat" | "screen" | "log">(pane.is_agent ? "chat" : "screen");
   const [olderMsgs, setOlderMsgs] = useState<ChatMessage[]>([]);
   const [liveMsgs, setLiveMsgs] = useState<ChatMessage[]>([]);
   const [liveBase, setLiveBase] = useState(0);
+  const [resetSeq, setResetSeq] = useState(0);
+  const [patchSeq, setPatchSeq] = useState(0);
   const [pendingPrompts, setPendingPrompts] = useState<PendingPrompt[]>([]);
+  const [optimisticQueued, setOptimisticQueued] = useState<QueuedPrompt[]>([]);
+  const [removedQueueIds, setRemovedQueueIds] = useState<string[]>([]);
+  const [queueBusyId, setQueueBusyId] = useState("");
+  const [stopping, setStopping] = useState(false);
   const [earlierCursor, setEarlierCursor] = useState(0);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [logText, setLogText] = useState("");
@@ -90,14 +100,52 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
   const [showKeys, setShowKeys] = useState(false);
   const baseRef = useRef(0);
   const pendingSeqRef = useRef(0);
+  const prevServerQueueRef = useRef<QueuedPrompt[]>(queuedPrompts);
+  const localHandledIdsRef = useRef<Set<string>>(new Set());
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setMode(pane.is_agent ? "chat" : "screen");
     setShowKeys(false);
     setPendingPrompts([]);
+    setOptimisticQueued([]);
+    setRemovedQueueIds([]);
+    prevServerQueueRef.current = queuedPrompts;
+    localHandledIdsRef.current.clear();
     void api("/api/seen", { pane: pane.pane_id });
   }, [pane.pane_id, pane.is_agent]);
+
+  const serverQueueSig = queuedPrompts.map((q) => q.id).join(",");
+
+  useEffect(() => {
+    const curIds = new Set(queuedPrompts.map((q) => q.id));
+    // Detect prompts automatically drained by Hub on idle and show them as pending until transcript catches up.
+    const prev = prevServerQueueRef.current;
+    for (const item of prev) {
+      if (!curIds.has(item.id) && !localHandledIdsRef.current.has(item.id)) {
+        const pid = `d-${++pendingSeqRef.current}`;
+        const afterAbsIdx = baseRef.current + liveMsgs.length;
+        setPendingPrompts((p) => [...p, { id: pid, text: item.text, afterAbsIdx, sending: false }]);
+      }
+    }
+    prevServerQueueRef.current = queuedPrompts;
+    setOptimisticQueued((list) => {
+      const next = list.filter((q) => !curIds.has(q.id));
+      return next.length === list.length ? list : next;
+    });
+    setRemovedQueueIds((ids) => {
+      const next = ids.filter((id) => curIds.has(id));
+      return next.length === ids.length ? ids : next;
+    });
+    for (const id of Array.from(localHandledIdsRef.current)) {
+      if (!curIds.has(id)) localHandledIdsRef.current.delete(id);
+    }
+  }, [serverQueueSig]);
+
+  const effectiveQueue = [
+    ...queuedPrompts.filter((q) => !removedQueueIds.includes(q.id)),
+    ...optimisticQueued.filter((o) => !queuedPrompts.some((q) => q.id === o.id)),
+  ];
 
   useEffect(() => {
     setLogText("");
@@ -117,6 +165,7 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
       setOlderMsgs([]);
       setLiveMsgs([]);
       setEarlierCursor(0);
+      setResetSeq((n) => n + 1);
     });
     es.addEventListener("patch", (ev) => {
       const p = JSON.parse((ev as MessageEvent).data) as MsgPatch;
@@ -129,14 +178,22 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
       });
       setLiveBase(p.base);
       setEarlierCursor((cur) => (cur > 0 ? cur : p.earlier ?? 0));
+      setPatchSeq((n) => n + 1);
     });
     es.addEventListener("messages", (ev) => {
       baseRef.current = 0;
       setLiveBase(0);
       setLiveMsgs((JSON.parse((ev as MessageEvent).data) as { messages?: ChatMessage[] }).messages ?? []);
+      setPatchSeq((n) => n + 1);
     });
-    es.addEventListener("log", (ev) => setLogText((JSON.parse((ev as MessageEvent).data) as { text?: string }).text ?? ""));
-    es.addEventListener("frame", (ev) => setLogText((JSON.parse((ev as MessageEvent).data) as { text?: string }).text ?? ""));
+    es.addEventListener("log", (ev) => {
+      setLogText((JSON.parse((ev as MessageEvent).data) as { text?: string }).text ?? "");
+      setPatchSeq((n) => n + 1);
+    });
+    es.addEventListener("frame", (ev) => {
+      setLogText((JSON.parse((ev as MessageEvent).data) as { text?: string }).text ?? "");
+      setPatchSeq((n) => n + 1);
+    });
     es.addEventListener("live", (ev) => {
       const p = JSON.parse((ev as MessageEvent).data) as { status?: string; approval?: Approval; tail?: string; meta?: string; context?: number };
       setLiveStatus(p.status ?? pane.status);
@@ -156,11 +213,13 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
   const scrollHasContent =
     mode === "log"
       ? logText.length > 0
-      : liveMsgs.length > 0 || pendingPrompts.length > 0 || Boolean(approval) || liveStatus === "working" || logText.length > 0;
+      : liveMsgs.length > 0 || pendingPrompts.length > 0 || Boolean(approval);
   const scrollContentKey =
     mode === "log"
-      ? `log:${logText.length}`
+      ? `log:${patchSeq}:${logText.length}`
       : [
+          liveBase,
+          patchSeq,
           liveMsgs.length,
           pendingPrompts.length,
           lastLive?.kind ?? "",
@@ -171,11 +230,10 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
           liveTail,
           approval?.title ?? "",
           approval?.choices.length ?? 0,
-          logText.length,
         ].join("|");
 
-  const { containerRef, onScroll, showJumpBottom, scrollToBottom, capturePrependAnchor } = useAutoScroll({
-    resetKey: `${pane.pane_id}:${mode}`,
+  const { containerRef, contentRef, onScroll, showJumpBottom, scrollToBottom, capturePrependAnchor } = useAutoScroll({
+    resetKey: `${pane.pane_id}:${mode}:${resetSeq}:${focusSeq}`,
     contentKey: scrollContentKey,
     prependKey: olderMsgs.length,
     hasContent: scrollHasContent,
@@ -226,13 +284,47 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
   const submitPromptText = async (rawText: string) => {
     const enc = encodeURIComponent(pane.pane_id);
     if (pane.is_agent && mode === "chat") {
+      const shouldQueue = liveStatus === "working" || effectiveQueue.length > 0;
+      if (shouldQueue) {
+        const tmpId = `tmp-${++pendingSeqRef.current}`;
+        const tmpItem: QueuedPrompt = { id: tmpId, pane_id: pane.pane_id, text: rawText, created_at: new Date().toISOString() };
+        setOptimisticQueued((prev) => [...prev, tmpItem]);
+        try {
+          const res = await api<{ ok: boolean; queued?: boolean; item?: QueuedPrompt }>(`/api/agents/${enc}/prompt`, {
+            prompt: rawText,
+            mode: "queue",
+          });
+          setOptimisticQueued((prev) => {
+            const without = prev.filter((x) => x.id !== tmpId);
+            return res.queued && res.item ? [...without, res.item] : without;
+          });
+          if (!res.queued) {
+            const pid = `p-${++pendingSeqRef.current}`;
+            setPendingPrompts((prev) => [...prev, { id: pid, text: rawText, afterAbsIdx: baseRef.current + liveMsgs.length, sending: false }]);
+            scrollToBottom(true);
+          }
+        } catch (err) {
+          setOptimisticQueued((prev) => prev.filter((x) => x.id !== tmpId));
+          throw err;
+        }
+        return;
+      }
+
       const id = `p-${++pendingSeqRef.current}`;
       const afterAbsIdx = baseRef.current + liveMsgs.length;
       setPendingPrompts((prev) => [...prev, { id, text: rawText, afterAbsIdx, sending: true }]);
       scrollToBottom(true);
       try {
-        await api(`/api/agents/${enc}/prompt`, { prompt: rawText });
-        setPendingPrompts((prev) => prev.map((item) => (item.id === id ? { ...item, sending: false } : item)));
+        const res = await api<{ ok: boolean; queued?: boolean; item?: QueuedPrompt }>(`/api/agents/${enc}/prompt`, {
+          prompt: rawText,
+          mode: "auto",
+        });
+        if (res.queued && res.item) {
+          setPendingPrompts((prev) => prev.filter((item) => item.id !== id));
+          setOptimisticQueued((prev) => [...prev, res.item!]);
+        } else {
+          setPendingPrompts((prev) => prev.map((item) => (item.id === id ? { ...item, sending: false } : item)));
+        }
       } catch (err) {
         setPendingPrompts((prev) => prev.filter((item) => item.id !== id));
         throw err;
@@ -241,6 +333,70 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
     }
     await api(`/api/panes/${enc}/text`, { text: rawText, enter: true });
     scrollToBottom(true);
+  };
+
+  const steerQueued = async (item: QueuedPrompt) => {
+    if (item.id.startsWith("tmp-")) return;
+    const enc = encodeURIComponent(pane.pane_id);
+    const pid = `s-${++pendingSeqRef.current}`;
+    const afterAbsIdx = baseRef.current + liveMsgs.length;
+    setQueueBusyId(item.id);
+    localHandledIdsRef.current.add(item.id);
+    setRemovedQueueIds((prev) => [...prev, item.id]);
+    setPendingPrompts((prev) => [...prev, { id: pid, text: item.text, afterAbsIdx, sending: true, steered: true }]);
+    scrollToBottom(true);
+    try {
+      await api(`/api/panes/${enc}/queue/${encodeURIComponent(item.id)}/steer`, {});
+      setPendingPrompts((prev) => prev.map((p) => (p.id === pid ? { ...p, sending: false } : p)));
+    } catch (err) {
+      localHandledIdsRef.current.delete(item.id);
+      setRemovedQueueIds((prev) => prev.filter((x) => x !== item.id));
+      setPendingPrompts((prev) => prev.filter((p) => p.id !== pid));
+      onToast(err instanceof Error ? err.message : "引导发送失败");
+    } finally {
+      setQueueBusyId("");
+    }
+  };
+
+  const cancelQueued = async (item: QueuedPrompt) => {
+    if (item.id.startsWith("tmp-")) {
+      setOptimisticQueued((prev) => prev.filter((x) => x.id !== item.id));
+      return;
+    }
+    const enc = encodeURIComponent(pane.pane_id);
+    setQueueBusyId(item.id);
+    localHandledIdsRef.current.add(item.id);
+    setRemovedQueueIds((prev) => [...prev, item.id]);
+    try {
+      await api(`/api/panes/${enc}/queue/${encodeURIComponent(item.id)}/cancel`, {});
+    } catch (err) {
+      localHandledIdsRef.current.delete(item.id);
+      setRemovedQueueIds((prev) => prev.filter((x) => x !== item.id));
+      onToast(err instanceof Error ? err.message : "取消排队失败");
+    } finally {
+      setQueueBusyId("");
+    }
+  };
+
+  const resumeQueue = async () => {
+    try {
+      await api(`/api/panes/${encodeURIComponent(pane.pane_id)}/queue/resume`, {});
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "恢复队列失败");
+    }
+  };
+
+  const stopCurrentStep = async () => {
+    if (stopping) return;
+    setStopping(true);
+    try {
+      const res = await api<{ ok: boolean; paused?: boolean }>(`/api/panes/${encodeURIComponent(pane.pane_id)}/stop`, {});
+      onToast(res.paused ? "已停止当前步骤（待发队列已暂停保留）" : "已停止当前步骤 (Esc)");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "停止失败");
+    } finally {
+      setStopping(false);
+    }
   };
 
   const sendInput = async (e: FormEvent) => {
@@ -281,7 +437,7 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
 
   return (
     <div
-      className="flex-1 flex flex-col min-h-0"
+      className="flex-1 flex flex-col min-h-0 overflow-hidden"
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e: DragEvent) => {
         e.preventDefault();
@@ -317,32 +473,36 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
       </header>
 
       <div className="relative flex-1 flex flex-col min-h-0">
-        <div ref={containerRef} onScroll={onScroll} className="flex-1 overflow-y-auto px-5 py-5 min-h-0">
+        <div ref={containerRef} onScroll={onScroll} className="flex-1 overflow-y-auto scroll-chat px-5 py-5 min-h-0">
           {mode === "screen" ? (
             <div className="h-full max-w-[960px] mx-auto">
               <TerminalScreen frame={logText} onKey={(k) => void sendKey(k)} onText={(t) => void api(`/api/panes/${encodeURIComponent(pane.pane_id)}/text`, { text: t, enter: false })} onToast={onToast} />
             </div>
           ) : mode === "chat" ? (
-            <AgentChatThread
-              messages={messages}
-              pendingPrompts={pendingPrompts}
-              earlierCursor={earlierCursor}
-              loadingEarlier={loadingEarlier}
-              approval={approval}
-              liveStatus={liveStatus}
-              liveTail={liveTail}
-              liveMeta={liveMeta}
-              setupHint={setupHint}
-              isAgent={pane.is_agent}
-              onLoadEarlier={() => void loadEarlier()}
-              onPickAskOption={(opt) => void submitPromptText(opt)}
-              onAnswerApproval={(c, i) => void answerApproval(c, i)}
-              onCancelApproval={() => void sendKey("esc")}
-              onSwitchToScreen={() => switchMode("screen")}
-              onOpenFile={onOpenFile}
-            />
+            <div ref={contentRef}>
+              <AgentChatThread
+                messages={messages}
+                pendingPrompts={pendingPrompts}
+                earlierCursor={earlierCursor}
+                loadingEarlier={loadingEarlier}
+                approval={approval}
+                liveStatus={liveStatus}
+                liveTail={liveTail}
+                liveMeta={liveMeta}
+                setupHint={setupHint}
+                isAgent={pane.is_agent}
+                onLoadEarlier={() => void loadEarlier()}
+                onPickAskOption={(opt) => void submitPromptText(opt)}
+                onAnswerApproval={(c, i) => void answerApproval(c, i)}
+                onCancelApproval={() => void sendKey("esc")}
+                onSwitchToScreen={() => switchMode("screen")}
+                onOpenFile={onOpenFile}
+              />
+            </div>
           ) : (
-            <pre className="max-w-[900px] mx-auto text-xs font-mono-code leading-relaxed whitespace-pre-wrap text-secondary">{logText || "等待终端输出…"}</pre>
+            <div ref={contentRef}>
+              <pre className="max-w-[900px] mx-auto text-xs font-mono-code leading-relaxed whitespace-pre-wrap text-secondary">{logText || "等待终端输出…"}</pre>
+            </div>
           )}
         </div>
         {mode !== "screen" && showJumpBottom && (
@@ -358,6 +518,16 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
       </div>
 
       <div className="px-5 pb-4 pt-2 shrink-0 space-y-2">
+        {pane.is_agent && mode === "chat" && (
+          <PromptQueueTray
+            items={effectiveQueue}
+            paused={queuePaused}
+            busyId={queueBusyId}
+            onSteer={(it) => void steerQueued(it)}
+            onCancel={(it) => void cancelQueued(it)}
+            onResume={() => void resumeQueue()}
+          />
+        )}
         {keysVisible && (
           <div className="max-w-[740px] mx-auto flex items-center gap-1.5 overflow-x-auto text-xs">
             {["esc", "ctrl+c", "tab", "up", "down", "enter"].map((k) => (
@@ -398,10 +568,27 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
                 }
               }}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={pane.is_agent && mode === "chat" ? `给 ${pane.kind} 发消息（支持粘贴或拖入文件）…` : "输入终端命令…"}
+              placeholder={
+                pane.is_agent && mode === "chat"
+                  ? liveStatus === "working" || effectiveQueue.length > 0
+                    ? `给 ${pane.kind} 发消息（运行中自动排队）…`
+                    : `给 ${pane.kind} 发消息（支持粘贴或拖入文件）…`
+                  : "输入终端命令…"
+              }
               className="flex-1 bg-transparent text-[14px] outline-none"
             />
-            <button type="submit" className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer shrink-0">
+            {pane.is_agent && mode === "chat" && liveStatus === "working" && (
+              <button
+                type="button"
+                disabled={stopping}
+                onClick={() => void stopCurrentStep()}
+                title="停止当前步骤 (Esc)"
+                className="w-8 h-8 rounded-full border border-strong surface-rail text-primary flex items-center justify-center surface-hover cursor-pointer shrink-0 disabled:opacity-50"
+              >
+                <Square className="w-3 h-3 fill-current" />
+              </button>
+            )}
+            <button type="submit" title={pane.is_agent && mode === "chat" && (liveStatus === "working" || effectiveQueue.length > 0) ? "加入待发送队列" : "发送"} className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer shrink-0">
               <ArrowUp className="w-4 h-4" />
             </button>
           </div>

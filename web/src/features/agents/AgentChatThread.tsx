@@ -8,6 +8,7 @@ export interface PendingPrompt {
   text: string;
   afterAbsIdx: number;
   sending?: boolean;
+  steered?: boolean;
 }
 
 interface Props {
@@ -151,7 +152,13 @@ export function AgentChatThread({
             {p.text}
           </div>
           <span className="text-[11px] text-muted pr-1">
-            {p.sending ? "发送中…" : liveStatus === "working" ? "已发送 · 等待 Agent 接手…" : "已发送 · 等待响应…"}
+            {p.sending
+              ? "发送中…"
+              : p.steered
+                ? "已引导 · 等待 Agent 接手…"
+                : liveStatus === "working"
+                  ? "已发送 · 等待 Agent 接手…"
+                  : "已发送 · 等待响应…"}
           </span>
         </div>
       ))}

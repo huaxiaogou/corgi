@@ -168,18 +168,22 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 		}
 	}
 
+	queuedChat, chatQueuePaused := e.ChatQueueSnapshot(ctx, thread)
+
 	return model.SuperView{
-		Router:       rv,
-		Entries:      entries,
-		Earlier:      earlier,
-		Actions:      actions,
-		Pinned:       pinned,
-		Workers:      activeWorkers,
-		Threads:      threads,
-		Queued:       len(queued),
-		QueuedRouter: qRouter,
-		Paused:       st.Paused,
-		WeComOnline:  sink.WeComOnline(),
-		Follow:       follow,
+		Router:          rv,
+		Entries:         entries,
+		Earlier:         earlier,
+		Actions:         actions,
+		Pinned:          pinned,
+		Workers:         activeWorkers,
+		Threads:         threads,
+		Queued:          len(queued),
+		QueuedRouter:    qRouter,
+		QueuedChat:      queuedChat,
+		ChatQueuePaused: chatQueuePaused,
+		Paused:          st.Paused,
+		WeComOnline:     sink.WeComOnline(),
+		Follow:          follow,
 	}
 }

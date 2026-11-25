@@ -28,6 +28,8 @@ func (e *Engine) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-e.wakeCh:
+			e.tick(ctx)
 		case <-tick.C:
 			e.tick(ctx)
 		}
@@ -106,8 +108,10 @@ func (e *Engine) tick(parent context.Context) {
 		return
 	}
 
-	// 5. Route and deliver queued triggers.
+	// 5. Drain idle main-chat queue, route/deliver triggers, and drain idle single-agent queues.
+	e.drainRouterPrompts(ctx, live)
 	e.deliverQueued(ctx, live)
+	e.drainPanePrompts(ctx, rawAgents)
 
 	// 6. Watchdog for stalled workers.
 	e.checkStalls(ctx, live, now)
@@ -445,7 +449,7 @@ func (e *Engine) deliverQueued(ctx context.Context, live map[string]liveInfo) {
 func filterHumanTriggers(list []*model.Trigger) []*model.Trigger {
 	var out []*model.Trigger
 	for _, t := range list {
-		if t.Source == "chat" || t.Source == "wecom" {
+		if t.Steer || t.Source == "wecom" {
 			out = append(out, t)
 		}
 	}

@@ -92,13 +92,31 @@ type AgentView struct {
 	Run            *[2]string `json:"run,omitempty"`
 }
 
+// QueuedPrompt is one durable human prompt waiting for a busy agent pane or main Corgi chat thread.
+type QueuedPrompt struct {
+	ID        string    `json:"id"`
+	Seq       int64     `json:"seq,omitempty"`
+	Scope     string    `json:"scope"` // pane_id (for single agent) or "router:<thread>" (for main Corgi chat)
+	PaneID    string    `json:"pane_id,omitempty"`
+	Thread    string    `json:"thread,omitempty"`
+	Text      string    `json:"text"`
+	ReEntryID string    `json:"re,omitempty"`
+	Machine   string    `json:"machine,omitempty"`
+	Kind      string    `json:"kind,omitempty"`
+	Model     string    `json:"model,omitempty"`
+	Effort    string    `json:"effort,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // PaneState is the aggregated fleet pane snapshot pushed over SSE.
 type PaneState struct {
-	OK       bool        `json:"ok"`
-	Error    string      `json:"error,omitempty"`
-	Agents   []AgentView `json:"agents"`
-	Shells   []AgentView `json:"shells"`
-	Machines []Machine   `json:"machines"`
+	OK            bool                       `json:"ok"`
+	Error         string                     `json:"error,omitempty"`
+	Agents        []AgentView                `json:"agents"`
+	Shells        []AgentView                `json:"shells"`
+	Machines      []Machine                  `json:"machines"`
+	QueuedPrompts map[string][]*QueuedPrompt `json:"queued_prompts,omitempty"`
+	PausedQueues  map[string]bool            `json:"paused_queues,omitempty"`
 }
 
 // ModelOpt describes one selectable model exposed by an agent CLI.
@@ -215,16 +233,18 @@ type FollowView struct {
 
 // SuperView is the snapshot of Super-Agent state sent to Web clients.
 type SuperView struct {
-	Router       RouterView  `json:"router"`
-	Entries      []*Entry    `json:"entries"`
-	Earlier      bool        `json:"earlier,omitempty"`
-	Actions      []*Action   `json:"actions"`
-	Pinned       []*Entry    `json:"pinned"`
-	Workers      []*Worker   `json:"workers"`
-	Threads      []*Thread   `json:"threads"`
-	Queued       int         `json:"queued"`
-	QueuedRouter int         `json:"queued_router"`
-	Paused       bool        `json:"paused"`
-	WeComOnline  bool        `json:"wecom_online"`
-	Follow       *FollowView `json:"follow,omitempty"`
+	Router          RouterView      `json:"router"`
+	Entries         []*Entry        `json:"entries"`
+	Earlier         bool            `json:"earlier,omitempty"`
+	Actions         []*Action       `json:"actions"`
+	Pinned          []*Entry        `json:"pinned"`
+	Workers         []*Worker       `json:"workers"`
+	Threads         []*Thread       `json:"threads"`
+	Queued          int             `json:"queued"`
+	QueuedRouter    int             `json:"queued_router"`
+	QueuedChat      []*QueuedPrompt `json:"queued_chat,omitempty"`
+	ChatQueuePaused bool            `json:"chat_queue_paused,omitempty"`
+	Paused          bool            `json:"paused"`
+	WeComOnline     bool            `json:"wecom_online"`
+	Follow          *FollowView     `json:"follow,omitempty"`
 }

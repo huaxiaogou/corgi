@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowDown, Pin, X } from "lucide-react";
 import { CorgiButtMark, CorgiMark, StatusDot } from "../../components/CorgiMark";
 import { DecisionCard } from "../../components/DecisionCard";
 import { MarkdownText } from "../../components/MarkdownText";
+import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { api } from "../../lib/api";
-import type { Entry, Machine, Settings, SuperView } from "../../types/api";
+import type { Entry, Machine, QueuedPrompt, Settings, SuperView } from "../../types/api";
 import { ChatHeader } from "./ChatHeader";
 import { ComposerBar } from "./ComposerBar";
 
@@ -13,12 +14,13 @@ interface Props {
   data: SuperView | null;
   machines: Machine[];
   thread: string;
+  focusSeq?: number;
   onSelectWorker: (paneId: string) => void;
   onOpenFile: (path: string, machine?: string) => void;
   onToast: (msg: string) => void;
 }
 
-export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFile, onToast }: Props) {
+export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWorker, onOpenFile, onToast }: Props) {
   const [replyTo, setReplyTo] = useState<Entry | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQ, setSearchQ] = useState("");
@@ -27,11 +29,38 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
   const [olderEntries, setOlderEntries] = useState<Entry[]>([]);
   const [moreOlder, setMoreOlder] = useState<boolean | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [optimisticQueued, setOptimisticQueued] = useState<QueuedPrompt[]>([]);
+  const [removedQueueIds, setRemovedQueueIds] = useState<string[]>([]);
+  const [queueBusyId, setQueueBusyId] = useState("");
+  const [stopping, setStopping] = useState(false);
+  const tmpSeqRef = useRef(0);
+
+  const serverQueuedChat = data?.queued_chat ?? [];
+  const serverQueueSig = serverQueuedChat.map((q) => q.id).join(",");
 
   useEffect(() => {
     setOlderEntries([]);
     setMoreOlder(null);
+    setOptimisticQueued([]);
+    setRemovedQueueIds([]);
   }, [thread]);
+
+  useEffect(() => {
+    const curIds = new Set(serverQueuedChat.map((q) => q.id));
+    setOptimisticQueued((list) => {
+      const next = list.filter((q) => !curIds.has(q.id));
+      return next.length === list.length ? list : next;
+    });
+    setRemovedQueueIds((ids) => {
+      const next = ids.filter((id) => curIds.has(id));
+      return next.length === ids.length ? ids : next;
+    });
+  }, [serverQueueSig]);
+
+  const effectiveQueue = [
+    ...serverQueuedChat.filter((q) => !removedQueueIds.includes(q.id)),
+    ...optimisticQueued.filter((o) => !serverQueuedChat.some((q) => q.id === o.id)),
+  ];
 
   const liveEntries = (data?.entries ?? []).filter((e) => !thread || e.thread === thread);
   const liveIds = new Set(liveEntries.map((e) => e.id));
@@ -43,8 +72,8 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
   const lastEntry = liveEntries[liveEntries.length - 1];
   const router = data?.router;
 
-  const { containerRef, onScroll, showJumpBottom, scrollToBottom, capturePrependAnchor } = useAutoScroll({
-    resetKey: thread,
+  const { containerRef, contentRef, onScroll, showJumpBottom, scrollToBottom, capturePrependAnchor } = useAutoScroll({
+    resetKey: `${thread}:${focusSeq}`,
     contentKey: [
       liveEntries.length,
       lastEntry?.id ?? "",
@@ -54,7 +83,7 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
       router?.replied ? "1" : "0",
     ].join("|"),
     prependKey: olderEntries.length,
-    hasContent: liveEntries.length > 0 || pendingActions.length > 0 || router?.status === "working",
+    hasContent: liveEntries.length > 0 || pendingActions.length > 0,
   });
 
   const loadEarlier = async () => {
@@ -108,7 +137,7 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
   const headerTitle = thread === "chat:main" ? "Corgi" : isWeComGroup ? `企微群 · ${thread.replace(/^wecom:/, "")}` : thread;
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
       <ChatHeader
         title={headerTitle}
         isWeComGroup={isWeComGroup}
@@ -190,8 +219,8 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
       )}
 
       <div className="relative flex-1 flex flex-col min-h-0">
-        <div ref={containerRef} onScroll={onScroll} className="flex-1 overflow-y-auto px-5 py-6 min-h-0">
-          <div className="max-w-[740px] mx-auto space-y-5">
+        <div ref={containerRef} onScroll={onScroll} className="flex-1 overflow-y-auto scroll-chat px-5 py-6 min-h-0">
+          <div ref={contentRef} className="max-w-[740px] mx-auto space-y-5">
           {canLoadMore && (
             <div className="text-center">
               <button type="button" disabled={loadingOlder} onClick={() => void loadEarlier()} className="px-3.5 py-1 rounded-full text-xs border border-strong text-secondary surface-hover cursor-pointer disabled:opacity-50">
@@ -294,22 +323,109 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
         )}
       </div>
 
-      <ComposerBar
-        machines={machines}
-        replyTo={replyTo}
-        onClearReply={() => setReplyTo(null)}
-        onToast={onToast}
-        onSend={async ({ text, machine, kind, model, effort }) => {
-          const reId = replyTo?.id ?? "";
-          setReplyTo(null);
-          try {
-            await api("/api/super/say", { thread, text, re: reId, machine, kind, model, effort });
-            scrollToBottom();
-          } catch (err) {
-            onToast(err instanceof Error ? err.message : "发送失败");
-          }
-        }}
-      />
+      <div className="px-5 pb-4 pt-2 shrink-0 space-y-2">
+        <PromptQueueTray
+          items={effectiveQueue}
+          paused={Boolean(data?.chat_queue_paused)}
+          busyId={queueBusyId}
+          onSteer={async (item) => {
+            if (item.id.startsWith("tmp-")) return;
+            setQueueBusyId(item.id);
+            setRemovedQueueIds((prev) => [...prev, item.id]);
+            try {
+              await api(`/api/super/queue/${encodeURIComponent(item.id)}/steer`, { thread });
+              scrollToBottom(true);
+            } catch (err) {
+              setRemovedQueueIds((prev) => prev.filter((x) => x !== item.id));
+              onToast(err instanceof Error ? err.message : "引导发送失败");
+            } finally {
+              setQueueBusyId("");
+            }
+          }}
+          onCancel={async (item) => {
+            if (item.id.startsWith("tmp-")) {
+              setOptimisticQueued((prev) => prev.filter((x) => x.id !== item.id));
+              return;
+            }
+            setQueueBusyId(item.id);
+            setRemovedQueueIds((prev) => [...prev, item.id]);
+            try {
+              await api(`/api/super/queue/${encodeURIComponent(item.id)}/cancel`, { thread });
+            } catch (err) {
+              setRemovedQueueIds((prev) => prev.filter((x) => x !== item.id));
+              onToast(err instanceof Error ? err.message : "取消排队失败");
+            } finally {
+              setQueueBusyId("");
+            }
+          }}
+          onResume={async () => {
+            try {
+              await api("/api/super/queue/resume", { thread });
+            } catch (err) {
+              onToast(err instanceof Error ? err.message : "恢复队列失败");
+            }
+          }}
+        />
+        <ComposerBar
+          embedded
+          machines={machines}
+          replyTo={replyTo}
+          working={router?.status === "working"}
+          stopping={stopping}
+          queuedCount={effectiveQueue.length}
+          onStop={async () => {
+            if (stopping) return;
+            setStopping(true);
+            try {
+              const res = await api<{ ok: boolean; paused?: boolean }>("/api/super/router/stop", { thread });
+              onToast(res.paused ? "已停止当前步骤（待发队列已暂停保留）" : "已停止当前步骤 (Esc)");
+            } catch (err) {
+              onToast(err instanceof Error ? err.message : "停止失败");
+            } finally {
+              setStopping(false);
+            }
+          }}
+          onClearReply={() => setReplyTo(null)}
+          onToast={onToast}
+          onSend={async ({ text, machine, kind, model, effort }) => {
+            const reId = replyTo?.id ?? "";
+            setReplyTo(null);
+            const shouldQueue = router?.status === "working" || effectiveQueue.length > 0;
+            const tmpId = shouldQueue ? `tmp-${++tmpSeqRef.current}` : "";
+            if (tmpId) {
+              setOptimisticQueued((prev) => [...prev, { id: tmpId, thread, text, created_at: new Date().toISOString() }]);
+            }
+            try {
+              const res = await api<{ ok: boolean; queued?: boolean; item?: QueuedPrompt }>("/api/super/say", {
+                thread,
+                text,
+                re: reId,
+                machine,
+                kind,
+                model,
+                effort,
+                mode: shouldQueue ? "queue" : "auto",
+              });
+              if (tmpId) {
+                setOptimisticQueued((prev) => {
+                  const without = prev.filter((x) => x.id !== tmpId);
+                  return res.queued && res.item ? [...without, res.item] : without;
+                });
+              } else if (res.queued && res.item) {
+                setOptimisticQueued((prev) => [...prev, res.item!]);
+              }
+              if (!res.queued) {
+                scrollToBottom(true);
+              }
+            } catch (err) {
+              if (tmpId) {
+                setOptimisticQueued((prev) => prev.filter((x) => x.id !== tmpId));
+              }
+              onToast(err instanceof Error ? err.message : "发送失败");
+            }
+          }}
+        />
+      </div>
     </div>
   );
 }

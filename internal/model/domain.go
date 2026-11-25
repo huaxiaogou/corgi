@@ -67,6 +67,7 @@ type Trigger struct {
 	Targets []string  `json:"targets,omitempty"`
 	IdemKey string    `json:"idem_key,omitempty"`
 	Ref     string    `json:"ref,omitempty"`
+	Steer   bool      `json:"steer,omitempty"`
 }
 
 // Thread groups triggers and worker subscriptions for a conversation or WeCom group topic.

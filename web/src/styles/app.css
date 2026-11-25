@@ -35,6 +35,9 @@ html, body, #root {
   border: 1px solid var(--line-2);
   box-shadow: var(--shadow-composer);
 }
+.scroll-chat {
+  overflow-anchor: none;
+}
 
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 999px; }

@@ -13,7 +13,13 @@ import { onWebBuildChange } from "./lib/api";
 
 export function App() {
   const [route, setRoute] = useState<AppRoute>({ view: "corgi", thread: "chat:main" });
+  const [navSeq, setNavSeq] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
+
+  const selectRoute = (next: AppRoute) => {
+    setRoute(next);
+    setNavSeq((n) => n + 1);
+  };
   const [launchOpen, setLaunchOpen] = useState(false);
   const [fileTarget, setFileTarget] = useState<{ path: string; machine?: string } | null>(null);
   const [toastMsg, setToastMsg] = useState("");
@@ -92,7 +98,7 @@ export function App() {
           machines={machines}
           connected={connected}
           dark={dark}
-          onSelect={setRoute}
+          onSelect={selectRoute}
           onOpenLauncher={() => setLaunchOpen(true)}
           onToggleTheme={toggleTheme}
           onToast={toast}
@@ -110,7 +116,7 @@ export function App() {
                 machines={machines}
                 connected={connected}
                 dark={dark}
-                onSelect={setRoute}
+                onSelect={selectRoute}
                 onOpenLauncher={() => setLaunchOpen(true)}
                 onToggleTheme={toggleTheme}
                 onCloseMobile={() => setDrawerOpen(false)}
@@ -120,14 +126,15 @@ export function App() {
           </div>
         )}
 
-        <main className="flex-1 flex min-w-0 min-h-0">
+        <main className="flex-1 flex min-w-0 min-h-0 overflow-hidden">
           {route.view === "corgi" && (
             <CorgiChatView
               key={route.thread}
               data={superView}
               machines={machines}
               thread={route.thread}
-              onSelectWorker={(paneId) => setRoute({ view: "agent", paneId })}
+              focusSeq={navSeq}
+              onSelectWorker={(paneId) => selectRoute({ view: "agent", paneId })}
               onOpenFile={(p, m) => setFileTarget({ path: p, machine: m })}
               onToast={toast}
             />
@@ -136,7 +143,10 @@ export function App() {
             <AgentPaneView
               key={selectedPane.pane_id}
               pane={selectedPane}
-              onClosed={() => setRoute({ view: "corgi", thread: "chat:main" })}
+              focusSeq={navSeq}
+              queuedPrompts={paneState?.queued_prompts?.[selectedPane.pane_id] ?? []}
+              queuePaused={Boolean(paneState?.paused_queues?.[selectedPane.pane_id])}
+              onClosed={() => selectRoute({ view: "corgi", thread: "chat:main" })}
               onOpenFile={(p) => setFileTarget({ path: p, machine: selectedPane.machine })}
               onToast={toast}
             />
@@ -150,7 +160,7 @@ export function App() {
         open={launchOpen}
         machines={machines}
         onClose={() => setLaunchOpen(false)}
-        onLaunched={(paneId) => setRoute({ view: "agent", paneId })}
+        onLaunched={(paneId) => selectRoute({ view: "agent", paneId })}
         onToast={toast}
       />
 

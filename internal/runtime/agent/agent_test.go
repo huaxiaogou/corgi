@@ -281,6 +281,21 @@ func TestAgyParseTranscriptLines(t *testing.T) {
 	}
 }
 
+func TestClaudeParseQueuedCommandTranscriptLine(t *testing.T) {
+	c := &ClaudeAdapter{}
+	msgs, ok := c.ParseTranscriptLine([]byte(`{"type":"attachment","attachment":{"type":"queued_command","prompt":"先跑一遍单测","origin":{"kind":"human"}}}`), "")
+	if !ok || len(msgs) != 1 || msgs[0].Kind != "user" || msgs[0].Text != "先跑一遍单测" {
+		t.Fatalf("expected human string queued_command parsed as user msg, got ok=%v msgs=%+v", ok, msgs)
+	}
+	msgs, ok = c.ParseTranscriptLine([]byte(`{"type":"attachment","attachment":{"type":"queued_command","prompt":[{"type":"text","text":"改用方案B"}],"origin":{"kind":"human"}}}`), "")
+	if !ok || len(msgs) != 1 || msgs[0].Kind != "user" || msgs[0].Text != "改用方案B" {
+		t.Fatalf("expected human block-array queued_command parsed, got ok=%v msgs=%+v", ok, msgs)
+	}
+	if msgs, ok := c.ParseTranscriptLine([]byte(`{"type":"attachment","attachment":{"type":"queued_command","prompt":"bg done","origin":{"kind":"task-notification"}}}`), ""); ok || len(msgs) != 0 {
+		t.Fatalf("expected non-human queued_command ignored, got ok=%v msgs=%+v", ok, msgs)
+	}
+}
+
 func TestCodeBuddyPreTrustWorkspaceIdempotent(t *testing.T) {
 	home := t.TempDir()
 	ws := filepath.Join(home, "corgi")

@@ -97,6 +97,21 @@ export interface FollowView {
   next_text: string;
 }
 
+export interface QueuedPrompt {
+  id: string;
+  seq?: number;
+  scope?: string;
+  pane_id?: string;
+  thread?: string;
+  text: string;
+  re?: string;
+  machine?: string;
+  kind?: string;
+  model?: string;
+  effort?: string;
+  created_at: string;
+}
+
 export interface SuperView {
   router: RouterView;
   entries: Entry[];
@@ -107,6 +122,8 @@ export interface SuperView {
   threads: Thread[];
   queued: number;
   queued_router: number;
+  queued_chat?: QueuedPrompt[];
+  chat_queue_paused?: boolean;
   paused: boolean;
   wecom_online: boolean;
   follow?: FollowView;
@@ -145,6 +162,8 @@ export interface PaneState {
   agents: AgentView[];
   shells: AgentView[];
   machines: Machine[];
+  queued_prompts?: Record<string, QueuedPrompt[]>;
+  paused_queues?: Record<string, boolean>;
 }
 
 export interface ModelCatalog {

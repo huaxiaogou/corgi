@@ -18,6 +18,7 @@ import (
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
 	"github.com/kiperjing/corgi/internal/runtime/herdr"
+	"github.com/kiperjing/corgi/internal/store"
 )
 
 var agentNameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
@@ -113,6 +114,9 @@ func (s *Server) buildPaneState(ctx context.Context) model.PaneState {
 	}
 	sortViews(st.Agents)
 	sortViews(st.Shells)
+	if s.Engine != nil {
+		st.QueuedPrompts, st.PausedQueues = s.Engine.PaneQueuesSnapshot(ctx)
+	}
 	return st
 }
 
@@ -269,16 +273,89 @@ func (s *Server) handleLaunchAgent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePromptAgent(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Prompt string `json:"prompt"`
+		Mode   string `json:"mode"` // auto | queue | steer
 	}
 	if !decodeJSON(w, r, &body) || strings.TrimSpace(body.Prompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "prompt is required"})
+		return
+	}
+	if s.Engine != nil {
+		queued, item, err := s.Engine.SubmitPanePrompt(r.Context(), r.PathValue("target"), body.Prompt, body.Mode)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		res := map[string]any{"ok": true, "queued": queued}
+		if item != nil {
+			res["item"] = item
+		}
+		writeJSON(w, http.StatusOK, res)
 		return
 	}
 	if err := s.Fleet.Prompt(r.Context(), r.PathValue("target"), body.Prompt); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "queued": false})
+}
+
+func (s *Server) handleSteerPaneQueue(w http.ResponseWriter, r *http.Request) {
+	if s.Engine == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "hub engine unavailable"})
+		return
+	}
+	item, err := s.Engine.SteerPanePrompt(r.Context(), r.PathValue("id"), r.PathValue("qid"))
+	if err != nil {
+		code := http.StatusBadGateway
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item})
+}
+
+func (s *Server) handleCancelPaneQueue(w http.ResponseWriter, r *http.Request) {
+	if s.Engine == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "hub engine unavailable"})
+		return
+	}
+	if err := s.Engine.CancelQueuedPrompt(r.Context(), r.PathValue("id"), r.PathValue("qid")); err != nil {
+		code := http.StatusInternalServerError
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleResumePaneQueue(w http.ResponseWriter, r *http.Request) {
+	if s.Engine == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "hub engine unavailable"})
+		return
+	}
+	s.Engine.ResumeQueue(r.PathValue("id"))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleStopPane(w http.ResponseWriter, r *http.Request) {
+	if s.Engine != nil {
+		paused, err := s.Engine.StopPane(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "paused": paused})
+		return
+	}
+	if err := s.Fleet.SendKeys(r.Context(), r.PathValue("id"), "esc"); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "paused": false})
 }
 
 func (s *Server) handleSendText(w http.ResponseWriter, r *http.Request) {

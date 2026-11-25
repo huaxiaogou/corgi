@@ -21,7 +21,10 @@ func (s *Server) handleSuperSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSuperSay(w http.ResponseWriter, r *http.Request) {
-	var req core.SayRequest
+	var req struct {
+		core.SayRequest
+		Mode string `json:"mode"` // auto | queue | steer
+	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -31,16 +34,85 @@ func (s *Server) handleSuperSay(w http.ResponseWriter, r *http.Request) {
 	if req.From == "" {
 		req.From = "you"
 	}
-	entry, trig, err := s.Engine.Say(r.Context(), req)
+	queued, item, entry, trig, err := s.Engine.SubmitChatSay(r.Context(), req.SayRequest, req.Mode)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	res := map[string]any{"entry": entry.ID}
+	res := map[string]any{"ok": true, "queued": queued}
+	if item != nil {
+		res["item"] = item
+	}
+	if entry != nil {
+		res["entry"] = entry.ID
+	}
 	if trig != nil {
 		res["trigger"] = trig.ID
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleSteerChatQueue(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Thread string `json:"thread"`
+	}
+	_ = decodeJSON(w, r, &body)
+	entry, trig, err := s.Engine.SteerChatPrompt(r.Context(), body.Thread, r.PathValue("qid"))
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
+		return
+	}
+	res := map[string]any{"ok": true}
+	if entry != nil {
+		res["entry"] = entry.ID
+	}
+	if trig != nil {
+		res["trigger"] = trig.ID
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleCancelChatQueue(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Thread string `json:"thread"`
+	}
+	_ = decodeJSON(w, r, &body)
+	scope := core.RouterQueueScope(body.Thread)
+	if err := s.Engine.CancelQueuedPrompt(r.Context(), scope, r.PathValue("qid")); err != nil {
+		code := http.StatusInternalServerError
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleResumeChatQueue(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Thread string `json:"thread"`
+	}
+	_ = decodeJSON(w, r, &body)
+	s.Engine.ResumeQueue(core.RouterQueueScope(body.Thread))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleStopRouter(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Thread string `json:"thread"`
+	}
+	_ = decodeJSON(w, r, &body)
+	paused, err := s.Engine.StopRouter(r.Context(), body.Thread)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "paused": paused})
 }
 
 func (s *Server) handleSuperReply(w http.ResponseWriter, r *http.Request) {

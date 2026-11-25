@@ -85,6 +85,10 @@ func (s *Server) Routes() http.Handler {
 	api("GET /api/history", s.handleListHistory)
 	api("POST /api/history/{id}/resume", s.handleResumeHistory)
 	api("POST /api/history/{id}/delete", s.handleDeleteHistory)
+	api("POST /api/panes/{id}/queue/{qid}/steer", s.handleSteerPaneQueue)
+	api("POST /api/panes/{id}/queue/{qid}/cancel", s.handleCancelPaneQueue)
+	api("POST /api/panes/{id}/queue/resume", s.handleResumePaneQueue)
+	api("POST /api/panes/{id}/stop", s.handleStopPane)
 	mux.HandleFunc("GET /api/node/connect", s.handleNodeConnect)
 
 	s.registerMachineRoutes(mux, func(h http.HandlerFunc) http.Handler {
@@ -154,6 +158,10 @@ func (s *Server) registerSuperRoutes(mux *http.ServeMux, api func(string, http.H
 	api("POST /api/super/dream", s.handleStartDream)
 	api("POST /api/super/seen", s.handleSuperSeen)
 	api("POST /api/super/router/restart", s.handleRestartRouter)
+	api("POST /api/super/router/stop", s.handleStopRouter)
+	api("POST /api/super/queue/{qid}/steer", s.handleSteerChatQueue)
+	api("POST /api/super/queue/{qid}/cancel", s.handleCancelChatQueue)
+	api("POST /api/super/queue/resume", s.handleResumeChatQueue)
 	mux.HandleFunc("POST /hooks/{source}", s.handleWebhook)
 }
 
@@ -384,6 +392,9 @@ func (s *Server) routed(h http.HandlerFunc) http.HandlerFunc {
 			r.Body = io.NopCloser(bytes.NewReader(body))
 		case strings.HasPrefix(r.URL.Path, "/api/workspaces/") && strings.HasSuffix(r.URL.Path, "/close") && s.Engine != nil:
 			// Keep workspace closure on Hub so Engine cleanly stops & archives any managed Worker on that workspace.
+			machine = ""
+		case strings.HasPrefix(r.URL.Path, "/api/agents/") && strings.HasSuffix(r.URL.Path, "/prompt") && s.Engine != nil:
+			// Keep prompt submission on Hub so Engine manages durable queueing & auto-drain across machines.
 			machine = ""
 		}
 		if machine == "" {

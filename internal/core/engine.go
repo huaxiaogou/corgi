@@ -108,6 +108,11 @@ type Engine struct {
 	idleCheckAt      map[string]time.Time
 	noAgent          map[string]time.Time
 	rereadTrigID     string
+
+	wakeCh        chan struct{}
+	queueMu       sync.Mutex
+	pausedQueues  map[string]bool
+	drainCooldown map[string]time.Time
 }
 
 // NewEngine constructs a Super-Agent Engine initialized from SQLite.
@@ -128,22 +133,25 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		logger = slog.Default()
 	}
 	return &Engine{
-		store:       st,
-		fleet:       fl,
-		agents:      reg,
-		memory:      mem,
-		sink:        NopSink{},
-		logger:      logger,
-		corgiDir:    corgiDir,
-		home:        home,
-		binPath:     binPath,
-		settings:    settings,
-		policies:    policies,
-		lastScreen:  map[string]screenMark{},
-		lastAnswer:  map[string]time.Time{},
-		lastTrust:   map[string]time.Time{},
-		idleCheckAt: map[string]time.Time{},
-		noAgent:     map[string]time.Time{},
+		store:         st,
+		fleet:         fl,
+		agents:        reg,
+		memory:        mem,
+		sink:          NopSink{},
+		logger:        logger,
+		corgiDir:      corgiDir,
+		home:          home,
+		binPath:       binPath,
+		settings:      settings,
+		policies:      policies,
+		lastScreen:    map[string]screenMark{},
+		lastAnswer:    map[string]time.Time{},
+		lastTrust:     map[string]time.Time{},
+		idleCheckAt:   map[string]time.Time{},
+		noAgent:       map[string]time.Time{},
+		wakeCh:        make(chan struct{}, 1),
+		pausedQueues:  map[string]bool{},
+		drainCooldown: map[string]time.Time{},
 	}, nil
 }
 
@@ -269,6 +277,10 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 // Say ingests a human message from Web, WeCom, or CLI.
 // If QuoteText contains "[#worker]" and that worker is active, it routes directly to the worker.
 func (e *Engine) Say(ctx context.Context, req SayRequest) (*model.Entry, *model.Trigger, error) {
+	return e.sayWithSteer(ctx, req, false)
+}
+
+func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (*model.Entry, *model.Trigger, error) {
 	text := strings.TrimSpace(req.Text)
 	if text == "" {
 		return nil, nil, fmt.Errorf("消息内容不能为空")
@@ -334,6 +346,10 @@ func (e *Engine) Say(ctx context.Context, req SayRequest) (*model.Entry, *model.
 	trig, err := e.Ingest(ctx, source, thread, req.From, promptText, req.IdemKey, directTarget, entry.ID)
 	if err != nil {
 		return nil, nil, err
+	}
+	if steer && trig != nil {
+		trig.Steer = true
+		_ = e.store.UpdateTrigger(ctx, trig)
 	}
 	if err := e.store.InsertEntry(ctx, entry); err != nil {
 		return nil, nil, err
