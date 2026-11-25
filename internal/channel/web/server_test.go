@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -416,5 +417,85 @@ func TestBuildPaneStateClassifiesCustomAgentsAndResolvesTitles(t *testing.T) {
 	}
 	if taihu.Topic != "Analyze corgi Taihu access plan" {
 		t.Fatalf("expected resolved topic for codebuddy pane, got %q", taihu.Topic)
+	}
+}
+
+func TestLaunchAgentRecoversFromTransientPaneBusy(t *testing.T) {
+	srv, master := newTestServer(t)
+	var (
+		startAttempts atomic.Int32
+		closeCalls    atomic.Int32
+	)
+	fakeH := herdr.NewClient(func(ctx context.Context) (net.Conn, error) {
+		c1, c2 := net.Pipe()
+		go func() {
+			defer c2.Close()
+			rd := bufio.NewReader(c2)
+			line, err := rd.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			var req struct {
+				ID     string         `json:"id"`
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+			}
+			if json.Unmarshal(line, &req) != nil {
+				return
+			}
+			resp := map[string]any{"id": req.ID, "result": map[string]any{}}
+			switch req.Method {
+			case "workspace.create":
+				resp["result"] = map[string]any{
+					"workspace": map[string]any{"workspace_id": "w11"},
+					"root_pane": map[string]any{"pane_id": "w11:p1"},
+				}
+			case "workspace.close":
+				closeCalls.Add(1)
+			case "agent.start":
+				if startAttempts.Add(1) <= 2 {
+					delete(resp, "result")
+					resp["error"] = map[string]any{
+						"code":    "agent_pane_busy",
+						"message": "agent target pane w11:p1 is not an available shell",
+					}
+				}
+			case "agent.list":
+				resp["result"] = map[string]any{"agents": []any{}}
+			case "pane.get":
+				resp["result"] = map[string]any{"pane": map[string]any{"pane_id": "w11:p1", "agent": nil}}
+			case "pane.process_info":
+				resp["result"] = map[string]any{"process_info": map[string]any{
+					"pane_id":                     "w11:p1",
+					"shell_pid":                   100,
+					"foreground_process_group_id": 100,
+					"foreground_processes": []any{
+						map[string]any{"pid": 101, "name": "bash"},
+						map[string]any{"pid": 100, "name": "zsh"},
+					},
+				}}
+			}
+			b, _ := json.Marshal(resp)
+			_, _ = c2.Write(append(b, '\n'))
+		}()
+		return c1, nil
+	})
+	srv.Fleet = fleet.NewFleet(fakeH, "hub", srv.Home, "test", []string{"claude"})
+	srv.Engine.SetFleet(srv.Fleet)
+
+	h := srv.Routes()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewBufferString(`{"kind":"claude","cwd":"~","name":"launch-retry-ok"}`))
+	req.Header.Set("Authorization", "Bearer "+master)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"pane_id":"w11:p1"`)) {
+		t.Fatalf("expected POST /api/agents to recover after transient agent_pane_busy, got code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := startAttempts.Load(); got != 3 {
+		t.Fatalf("expected 3 agent.start attempts, got %d", got)
+	}
+	if got := closeCalls.Load(); got != 0 {
+		t.Fatalf("expected workspace not closed after retry recovery, got %d closes", got)
 	}
 }

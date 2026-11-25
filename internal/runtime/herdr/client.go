@@ -35,13 +35,15 @@ type DialFunc func(ctx context.Context) (net.Conn, error)
 
 // Client speaks herdr's newline-delimited JSON socket API.
 type Client struct {
-	dial       DialFunc
-	home       string
-	seq        atomic.Uint64
-	customMu   sync.Mutex
-	customPath string
-	custom     map[string]model.Agent // fallback-launched agents (e.g. codebuddy when herdr lacks native kind)
-	revCache   map[string]paneRevStatus
+	dial               DialFunc
+	home               string
+	seq                atomic.Uint64
+	startRetryInterval time.Duration
+	startRetryTimeout  time.Duration
+	customMu           sync.Mutex
+	customPath         string
+	custom             map[string]model.Agent // fallback-launched agents (e.g. codebuddy when herdr lacks native kind)
+	revCache           map[string]paneRevStatus
 }
 
 // NewClient wraps an arbitrary dialer (used for remote yamux tunnel streams).
@@ -350,72 +352,18 @@ func (c *Client) CreateWorkspace(ctx context.Context, cwd, label string) (string
 		} `json:"root_pane"`
 	}
 	err := c.Call(ctx, "workspace.create", p, &r)
-	return r.Workspace.ID, r.RootPane.ID, err
+	if err != nil {
+		return "", "", err
+	}
+	if r.Workspace.ID == "" || r.RootPane.ID == "" {
+		return "", "", fmt.Errorf("herdr workspace.create returned empty workspace or pane id")
+	}
+	return r.Workspace.ID, r.RootPane.ID, nil
 }
 
 // CloseWorkspace closes a herdr workspace.
 func (c *Client) CloseWorkspace(ctx context.Context, workspaceID string) error {
 	return c.Call(ctx, "workspace.close", map[string]any{"workspace_id": workspaceID}, nil)
-}
-
-// StartAgent launches an agent inside paneID.
-// If herdr does not natively support kind (e.g. codebuddy on older herdr versions),
-// it falls back to launching the CLI command inside the pane and tracking it locally.
-func (c *Client) StartAgent(ctx context.Context, paneID, kind, name string, args []string) error {
-	p := map[string]any{
-		"name":       name,
-		"kind":       kind,
-		"pane_id":    paneID,
-		"timeout_ms": 60000,
-	}
-	if len(args) > 0 {
-		p["args"] = args
-	}
-	err := c.Call(ctx, "agent.start", p, nil)
-	if err == nil {
-		c.customMu.Lock()
-		_, had := c.custom[paneID]
-		delete(c.custom, paneID)
-		delete(c.revCache, paneID)
-		c.customMu.Unlock()
-		if had {
-			c.saveCustomSnapshot()
-		}
-		return nil
-	}
-	if !isUnsupportedKindErr(err) {
-		return err
-	}
-	bin := kind
-	if c.home != "" {
-		resolved := FindBin(kind, c.home)
-		if resolved == "" {
-			return err
-		}
-		bin = resolved
-	}
-	cmdLine := shellJoin(append([]string{bin}, args...))
-	if sendErr := c.SendText(ctx, paneID, cmdLine, true); sendErr != nil {
-		return err
-	}
-	c.waitCustomBoot(ctx, paneID)
-	n := name
-	k := kind
-	c.customMu.Lock()
-	if c.custom == nil {
-		c.custom = map[string]model.Agent{}
-	}
-	c.custom[paneID] = model.Agent{
-		PaneID:       paneID,
-		Agent:        &k,
-		DisplayAgent: &k,
-		Name:         &n,
-		AgentStatus:  "idle",
-		Ready:        true,
-	}
-	c.customMu.Unlock()
-	c.saveCustomSnapshot()
-	return nil
 }
 
 // Prompt sends a prompt to an agent by target (name or pane ID).
@@ -497,45 +445,6 @@ func (c *Client) lookupCustomPane(target string) string {
 		}
 	}
 	return ""
-}
-
-func isUnsupportedKindErr(err error) bool {
-	var he *Error
-	if !errors.As(err, &he) {
-		return false
-	}
-	if he.Code == "agent_not_ready" {
-		return false
-	}
-	low := strings.ToLower(he.Code + " " + he.Message)
-	return strings.Contains(low, "unsupported") ||
-		strings.Contains(low, "unknown agent") ||
-		strings.Contains(low, "unknown kind") ||
-		strings.Contains(low, "invalid kind")
-}
-
-func shellJoin(argv []string) string {
-	parts := make([]string, 0, len(argv))
-	for _, a := range argv {
-		if a == "" {
-			parts = append(parts, "''")
-			continue
-		}
-		safe := true
-		for _, r := range a {
-			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
-				r == '-' || r == '_' || r == '.' || r == '/' || r == ':' || r == '=' || r == '@') {
-				safe = false
-				break
-			}
-		}
-		if safe {
-			parts = append(parts, a)
-		} else {
-			parts = append(parts, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
-		}
-	}
-	return strings.Join(parts, " ")
 }
 
 // SendText pastes text into a pane, optionally pressing enter.

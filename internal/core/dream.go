@@ -217,7 +217,7 @@ func (e *Engine) launchDreamAsync(d *dreamRun, st model.Settings) {
 	}
 	args := ad.LaunchArgs(dreamModel, dreamEffort, !st.AskPermissions)
 
-	_, paneID, err := e.fleet.CreateWorkspace(bg, "", e.memory.RouterDir(), model.DreamLabel)
+	wsID, paneID, err := e.fleet.CreateWorkspace(bg, "", e.memory.RouterDir(), model.DreamLabel)
 	if err != nil {
 		fail(err)
 		return
@@ -225,6 +225,7 @@ func (e *Engine) launchDreamAsync(d *dreamRun, st model.Settings) {
 	if err := e.fleet.StartAgent(bg, paneID, kind, model.DreamName, args); err != nil {
 		var he *herdr.Error
 		if !(errors.As(err, &he) && he.Code == "agent_not_ready") {
+			_ = e.fleet.CloseWorkspace(bg, wsID)
 			fail(err)
 			return
 		}
