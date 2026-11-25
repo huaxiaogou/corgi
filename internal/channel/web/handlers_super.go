@@ -224,7 +224,11 @@ func (s *Server) handleSuperEarlier(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "more": more})
+	res := map[string]any{"entries": entries, "more": more}
+	if resolved := s.Engine.ResolvedActionsForEntries(r.Context(), entries); len(resolved) > 0 {
+		res["resolved_actions"] = resolved
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleSuperSearch(w http.ResponseWriter, r *http.Request) {

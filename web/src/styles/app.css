@@ -38,6 +38,11 @@ html, body, #root {
 .scroll-chat {
   overflow-anchor: none;
 }
+.entry-highlight {
+  background: var(--attn-soft);
+  box-shadow: 0 0 0 1px var(--attn);
+  border-radius: 12px;
+}
 
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 999px; }

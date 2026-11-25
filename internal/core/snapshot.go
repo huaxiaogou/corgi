@@ -85,10 +85,39 @@ func (e *Engine) MemorySnapshot(ctx context.Context, displayDir string) MemorySn
 	return snap
 }
 
+// ResolvedActionsForEntries loads non-pending Actions referenced by the given chat entries
+// so the Web UI can render quiet decision receipt cards with original question context.
+func (e *Engine) ResolvedActionsForEntries(ctx context.Context, entries []*model.Entry) map[string]*model.Action {
+	ids := make([]string, 0, len(entries))
+	for _, en := range entries {
+		if en != nil && en.ActionID != "" {
+			ids = append(ids, en.ActionID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	loaded, err := e.store.ListActionsByIDs(ctx, ids)
+	if err != nil || len(loaded) == 0 {
+		return nil
+	}
+	out := make(map[string]*model.Action, len(loaded))
+	for id, act := range loaded {
+		if act != nil && act.Status != model.ActionPending {
+			out[id] = act
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // Snapshot builds the SuperView pushed to Web/PWA clients.
 func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 	entries, earlier, _ := e.store.ListEntries(ctx, thread, 200)
 	actions, _ := e.store.ListPendingActions(ctx)
+	resolvedActions := e.ResolvedActionsForEntries(ctx, entries)
 	snoozed, _ := e.store.ListSnoozedActions(ctx)
 	pinned, _ := e.store.ListPinnedEntries(ctx, 50)
 	workers, _ := e.store.ListWorkers(ctx)
@@ -206,6 +235,7 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 		Entries:         entries,
 		Earlier:         earlier,
 		Actions:         actions,
+		ResolvedActions: resolvedActions,
 		SnoozedActions:  len(snoozed),
 		Pinned:          pinned,
 		Workers:         activeWorkers,

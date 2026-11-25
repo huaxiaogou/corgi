@@ -55,6 +55,7 @@ type SayRequest struct {
 	From      string `json:"from"`
 	Text      string `json:"text"`
 	ReEntryID string `json:"re"`
+	ActionID  string `json:"action_id,omitempty"`
 	QuoteText string `json:"quote_text,omitempty"`
 	Machine   string `json:"machine,omitempty"`
 	Kind      string `json:"kind,omitempty"`
@@ -328,7 +329,11 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 			if prev.Role == "user" {
 				who = "你"
 			}
-			quote = &model.Quote{Entry: prev.ID, Who: who, Text: oneLineClip(prev.Text, 120)}
+			qText := oneLineClip(prev.Text, 120)
+			if prev.Role == "user" && prev.ActionID != "" && prev.Re != nil && strings.TrimSpace(prev.Re.Text) != "" {
+				qText = oneLineClip("拍板「"+prev.Text+"」｜原问："+prev.Re.Text, 140)
+			}
+			quote = &model.Quote{Entry: prev.ID, Who: who, Text: qText}
 		}
 	} else if req.QuoteText != "" {
 		quote = &model.Quote{Who: "引用", Text: oneLineClip(req.QuoteText, 120)}
@@ -339,14 +344,15 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 		return nil, nil, err
 	}
 	entry := &model.Entry{
-		ID:      eid,
-		Seq:     eseq,
-		Role:    "user",
-		Thread:  thread,
-		Channel: channel,
-		Text:    text,
-		At:      time.Now(),
-		Re:      quote,
+		ID:       eid,
+		Seq:      eseq,
+		Role:     "user",
+		Thread:   thread,
+		Channel:  channel,
+		Text:     text,
+		At:       time.Now(),
+		Re:       quote,
+		ActionID: strings.TrimSpace(req.ActionID),
 	}
 
 	// Build prompt payload enriched with one-off dispatch overrides or quote context.
@@ -661,13 +667,17 @@ func (e *Engine) rotatePctLocked() int {
 }
 
 func (e *Engine) addEvent(ctx context.Context, thread, text, ref, tone string) {
+	e.addEventWithAction(ctx, thread, text, ref, tone, "")
+}
+
+func (e *Engine) addEventWithAction(ctx context.Context, thread, text, ref, tone, actionID string) {
 	id, seq, err := e.store.NextID(ctx, "e")
 	if err != nil {
 		return
 	}
 	_ = e.store.InsertEntry(ctx, &model.Entry{
 		ID: id, Seq: seq, Role: "event", Thread: orStr(thread, model.MainThread),
-		Channel: "system", Text: text, At: time.Now(), Ref: ref, Tone: tone,
+		Channel: "system", Text: text, At: time.Now(), Ref: ref, Tone: tone, ActionID: strings.TrimSpace(actionID),
 	})
 }
 

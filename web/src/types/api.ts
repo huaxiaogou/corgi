@@ -126,6 +126,7 @@ export interface SuperView {
   entries: Entry[];
   earlier?: boolean;
   actions: Action[];
+  resolved_actions?: Record<string, Action>;
   snoozed_actions?: number;
   pinned: Entry[];
   workers: Worker[];

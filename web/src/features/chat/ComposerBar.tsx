@@ -41,6 +41,13 @@ export function ComposerBar({
   const [attachments, setAttachments] = useState<{ name: string; path: string }[]>([]);
   const [dragging, setDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (replyTo) {
+      textareaRef.current?.focus();
+    }
+  }, [replyTo?.id]);
 
   const selectedMachine = machines.find((m) => (m.id || "local") === machine || (machine === "" && m.local));
   const availableKinds =
@@ -127,7 +134,9 @@ export function ComposerBar({
       >
         {replyTo && (
           <div className="flex items-center justify-between text-xs px-2.5 py-1 rounded-lg surface-rail text-secondary">
-            <span className="truncate">引用：{replyTo.text}</span>
+            <span className="truncate">
+              {replyTo.role === "user" && replyTo.action_id ? `补充说明（已选：${replyTo.text}）` : `引用：${replyTo.text}`}
+            </span>
             <button type="button" onClick={onClearReply} className="cursor-pointer ml-2">
               <X className="w-3.5 h-3.5" />
             </button>
@@ -165,6 +174,7 @@ export function ComposerBar({
         )}
 
         <textarea
+          ref={textareaRef}
           rows={1}
           value={text}
           onChange={(e) => setText(e.target.value)}

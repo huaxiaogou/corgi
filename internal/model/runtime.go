@@ -238,19 +238,20 @@ type FollowView struct {
 
 // SuperView is the snapshot of Super-Agent state sent to Web clients.
 type SuperView struct {
-	Router          RouterView      `json:"router"`
-	Entries         []*Entry        `json:"entries"`
-	Earlier         bool            `json:"earlier,omitempty"`
-	Actions         []*Action       `json:"actions"`
-	SnoozedActions  int             `json:"snoozed_actions,omitempty"`
-	Pinned          []*Entry        `json:"pinned"`
-	Workers         []*Worker       `json:"workers"`
-	Threads         []*Thread       `json:"threads"`
-	Queued          int             `json:"queued"`
-	QueuedRouter    int             `json:"queued_router"`
-	QueuedChat      []*QueuedPrompt `json:"queued_chat,omitempty"`
-	ChatQueuePaused bool            `json:"chat_queue_paused,omitempty"`
-	Paused          bool            `json:"paused"`
-	WeComOnline     bool            `json:"wecom_online"`
-	Follow          *FollowView     `json:"follow,omitempty"`
+	Router          RouterView         `json:"router"`
+	Entries         []*Entry           `json:"entries"`
+	Earlier         bool               `json:"earlier,omitempty"`
+	Actions         []*Action          `json:"actions"`
+	ResolvedActions map[string]*Action `json:"resolved_actions,omitempty"`
+	SnoozedActions  int                `json:"snoozed_actions,omitempty"`
+	Pinned          []*Entry           `json:"pinned"`
+	Workers         []*Worker          `json:"workers"`
+	Threads         []*Thread          `json:"threads"`
+	Queued          int                `json:"queued"`
+	QueuedRouter    int                `json:"queued_router"`
+	QueuedChat      []*QueuedPrompt    `json:"queued_chat,omitempty"`
+	ChatQueuePaused bool               `json:"chat_queue_paused,omitempty"`
+	Paused          bool               `json:"paused"`
+	WeComOnline     bool               `json:"wecom_online"`
+	Follow          *FollowView        `json:"follow,omitempty"`
 }

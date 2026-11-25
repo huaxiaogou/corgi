@@ -680,7 +680,7 @@ func (e *Engine) ResolveAction(ctx context.Context, actionID, resolvedBy, choice
 		e.mu.Lock()
 		e.lastAnswer[resolved.PaneID] = time.Now()
 		e.mu.Unlock()
-		e.addEvent(ctx, resolved.Thread, fmt.Sprintf("已为 %s 选择：%s（via %s）", resolved.TargetWorker, chosenLabel, resolvedBy), resolved.TargetWorker, "info")
+		e.addEventWithAction(ctx, resolved.Thread, fmt.Sprintf("已为 %s 选择：%s（via %s）", resolved.TargetWorker, chosenLabel, resolvedBy), resolved.TargetWorker, "info", resolved.ID)
 	case model.ActionKindRouterChoice, model.ActionKindRouterCheck, model.ActionKindPatrolDigest:
 		_, _, _ = e.Say(ctx, SayRequest{
 			Thread:    resolved.Thread,
@@ -688,6 +688,7 @@ func (e *Engine) ResolveAction(ctx context.Context, actionID, resolvedBy, choice
 			From:      resolvedBy,
 			Text:      chosenLabel,
 			ReEntryID: resolved.EntryID,
+			ActionID:  resolved.ID,
 		})
 	}
 

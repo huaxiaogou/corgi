@@ -322,10 +322,21 @@ func TestHandleWeComCardClickResolvesAndUpdatesCard(t *testing.T) {
 	for _, e := range entries {
 		if e.Role == "user" && e.Channel == "wecom" && e.Text == opts[1] {
 			userReplies++
+			if e.ActionID != act.ID || e.Re == nil || e.Re.Entry != act.EntryID {
+				t.Fatalf("wecom choice entry missing receipt linkage (action_id=%q re=%+v, want action=%q entry=%q)",
+					e.ActionID, e.Re, act.ID, act.EntryID)
+			}
 		}
 	}
 	if userReplies != 1 {
 		t.Fatalf("expected 1 recorded user reply entry for choice, got %d (entries=%+v)", userReplies, entries)
+	}
+	snap := eng.Snapshot(ctx, model.MainThread)
+	if len(snap.Actions) != 0 {
+		t.Fatalf("expected 0 pending actions in Snapshot after WeCom click, got %+v", snap.Actions)
+	}
+	if ra := snap.ResolvedActions[act.ID]; ra == nil || ra.Status != model.ActionResolved || ra.ResolvedBy != "wecom" || len(ra.Choices) != 2 {
+		t.Fatalf("expected Web Snapshot ResolvedActions[%s] synced with WeCom click, got %+v", act.ID, ra)
 	}
 
 	// 3. Re-clicking an already-resolved card still refreshes the stale card in-place without double-recording.

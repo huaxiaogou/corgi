@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowDown, Pin, X } from "lucide-react";
 import { CorgiButtMark, CorgiMark, StatusDot } from "../../components/CorgiMark";
 import { DecisionCard } from "../../components/DecisionCard";
+import { DecisionReceiptCard } from "../../components/DecisionReceiptCard";
 import { MarkdownText } from "../../components/MarkdownText";
 import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
@@ -45,23 +46,36 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const [inboxFilter, setInboxFilter] = useState("all");
   const [inboxSearch, setInboxSearch] = useState("");
   const [olderEntries, setOlderEntries] = useState<Entry[]>([]);
+  const [olderResolvedActions, setOlderResolvedActions] = useState<Record<string, Action>>({});
   const [moreOlder, setMoreOlder] = useState<boolean | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [highlightedEntryId, setHighlightedEntryId] = useState("");
   const [optimisticQueued, setOptimisticQueued] = useState<QueuedPrompt[]>([]);
   const [removedQueueIds, setRemovedQueueIds] = useState<string[]>([]);
   const [queueBusyId, setQueueBusyId] = useState("");
   const [stopping, setStopping] = useState(false);
   const tmpSeqRef = useRef(0);
+  const highlightTimerRef = useRef<number | null>(null);
 
   const serverQueuedChat = data?.queued_chat ?? [];
   const serverQueueSig = serverQueuedChat.map((q) => q.id).join(",");
 
   useEffect(() => {
     setOlderEntries([]);
+    setOlderResolvedActions({});
     setMoreOlder(null);
+    setHighlightedEntryId("");
     setOptimisticQueued([]);
     setRemovedQueueIds([]);
   }, [thread]);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const curIds = new Set(serverQueuedChat.map((q) => q.id));
@@ -83,6 +97,16 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const liveEntries = (data?.entries ?? []).filter((e) => !thread || e.thread === thread);
   const liveIds = new Set(liveEntries.map((e) => e.id));
   const entries = [...olderEntries.filter((e) => !liveIds.has(e.id)), ...liveEntries];
+  const resolvedActions: Record<string, Action> = {
+    ...olderResolvedActions,
+    ...(data?.resolved_actions ?? {}),
+  };
+  const entryActionById = new Map<string, string>();
+  for (const en of entries) {
+    if (en.role === "corgi" && en.action_id) {
+      entryActionById.set(en.id, en.action_id);
+    }
+  }
   const canLoadMore = moreOlder ?? Boolean(data?.earlier);
   const pinnedList = (data?.pinned ?? []).filter((e) => !thread || e.thread === thread);
   const pendingActions = (data?.actions ?? [])
@@ -116,17 +140,41 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
     hasContent: liveEntries.length > 0 || pendingActions.length > 0,
   });
 
+  const jumpToEntry = (entryId: string) => {
+    const el = document.getElementById(`entry-${entryId}`);
+    if (!el) {
+      onToast("原消息位于更早历史中，可点击顶部「加载更早消息」查看");
+      return;
+    }
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHighlightedEntryId(entryId);
+    if (highlightTimerRef.current !== null) {
+      window.clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = window.setTimeout(() => {
+      setHighlightedEntryId((cur) => (cur === entryId ? "" : cur));
+    }, 1600);
+  };
+
+  const openWorkerByName = (name: string) => {
+    const wk = data?.workers.find((w) => w.name === name);
+    if (wk?.pane_id) onSelectWorker(wk.pane_id);
+  };
+
   const loadEarlier = async () => {
     if (loadingOlder || entries.length === 0) return;
     setLoadingOlder(true);
     try {
-      const res = await api<{ entries: Entry[]; more: boolean }>(
+      const res = await api<{ entries: Entry[]; more: boolean; resolved_actions?: Record<string, Action> }>(
         `/api/super/earlier?thread=${encodeURIComponent(thread)}&before=${entries[0].seq}&limit=80`
       );
       const incoming = res.entries ?? [];
       if (incoming.length > 0) {
         capturePrependAnchor();
         setOlderEntries((prev) => [...incoming, ...prev]);
+      }
+      if (res.resolved_actions) {
+        setOlderResolvedActions((prev) => ({ ...res.resolved_actions, ...prev }));
       }
       setMoreOlder(Boolean(res.more));
     } catch (err) {
@@ -404,10 +452,32 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
             </div>
           )}
 
-          {entries.map((entry) => {
+          {entries.map((entry, idx) => {
+            const hlClass = highlightedEntryId === entry.id ? "entry-highlight px-2 py-1.5 -mx-2 transition-colors" : "transition-colors";
             if (entry.role === "event") {
+              const eventAction = entry.action_id ? resolvedActions[entry.action_id] : undefined;
+              if (eventAction && (eventAction.status === "resolved" || eventAction.status === "snoozed")) {
+                const statusNote =
+                  eventAction.kind === "worker_dialog"
+                    ? eventAction.chosen_key?.toLowerCase() === "esc"
+                      ? "已向终端发送取消键 (Esc)"
+                      : `已将确认发送至 ${eventAction.target_worker || "终端"}`
+                    : undefined;
+                return (
+                  <div key={entry.id} id={`entry-${entry.id}`} className={`pl-0 sm:pl-10 ${hlClass}`}>
+                    <DecisionReceiptCard
+                      action={eventAction}
+                      at={entry.at}
+                      originEntryId={eventAction.entry_id}
+                      statusNote={statusNote}
+                      onJumpToEntry={jumpToEntry}
+                      onOpenWorker={openWorkerByName}
+                    />
+                  </div>
+                );
+              }
               return (
-                <div key={entry.id} className="flex items-center gap-2.5 text-xs text-muted">
+                <div key={entry.id} id={`entry-${entry.id}`} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
                   <StatusDot status={entry.tone === "blocked" ? "blocked" : entry.tone === "done" ? "done" : "idle"} />
                   <span className="font-mono-code text-[11px]">{new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                   <span>{entry.text}</span>
@@ -415,8 +485,49 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
               );
             }
             if (entry.role === "user") {
+              const directAct = entry.action_id ? resolvedActions[entry.action_id] : undefined;
+              const legacyActId = !directAct && entry.re?.entry ? entryActionById.get(entry.re.entry) : undefined;
+              const legacyAct = legacyActId ? resolvedActions[legacyActId] : undefined;
+              const receiptAction =
+                directAct?.status === "resolved"
+                  ? directAct
+                  : legacyAct?.status === "resolved" && legacyAct.chosen_label === entry.text
+                    ? legacyAct
+                    : undefined;
+              if (receiptAction) {
+                const hasFollowingReply = entries.slice(idx + 1, idx + 5).some((n) => n.role === "corgi");
+                const isLatestUserEntry = idx === entries.length - 1;
+                const statusNote = hasFollowingReply
+                  ? "Corgi 已响应"
+                  : isLatestUserEntry && routerWorking
+                    ? "Corgi 正在处理…"
+                    : "已同步至对话";
+                return (
+                  <div key={entry.id} id={`entry-${entry.id}`} className={`pl-0 sm:pl-10 ${hlClass}`}>
+                    <DecisionReceiptCard
+                      action={receiptAction}
+                      at={entry.at}
+                      originEntryId={entry.re?.entry || receiptAction.entry_id}
+                      statusNote={statusNote}
+                      onJumpToEntry={jumpToEntry}
+                      onFollowUp={() => setReplyTo(entry.action_id ? entry : { ...entry, action_id: receiptAction.id })}
+                      onOpenWorker={openWorkerByName}
+                    />
+                  </div>
+                );
+              }
               return (
-                <div key={entry.id} className="flex flex-col items-end gap-1">
+                <div key={entry.id} id={`entry-${entry.id}`} className={`flex flex-col items-end gap-1 ${hlClass}`}>
+                  {entry.re && (
+                    <button
+                      type="button"
+                      onClick={() => entry.re?.entry && jumpToEntry(entry.re.entry)}
+                      className={`max-w-[82%] text-left text-[11.5px] text-muted px-2.5 py-1 rounded-lg surface-rail border border-hairline truncate ${entry.re.entry ? "hover:text-primary cursor-pointer" : "cursor-default"}`}
+                      title={entry.re.text}
+                    >
+                      {entry.re.who}：{entry.re.text}
+                    </button>
+                  )}
                   <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-sm text-[14px] leading-relaxed pill-user whitespace-pre-wrap">{entry.text}</div>
                   <span className="text-[11px] text-muted pr-1">
                     {entry.channel === "wecom" ? "企业微信 · " : ""}
@@ -426,12 +537,16 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
               );
             }
             return (
-              <div key={entry.id} className="group flex items-start gap-3">
+              <div key={entry.id} id={`entry-${entry.id}`} className={`group flex items-start gap-3 ${hlClass}`}>
                 <div className="w-7 h-7 rounded-lg border border-hairline flex items-center justify-center shrink-0 mt-0.5">
                   <CorgiMark className="w-4 h-4" />
                 </div>
                 <div className="flex-1 min-w-0 space-y-1.5">
-                  {entry.re && <div className="text-xs text-muted pl-2.5 border-l-2 border-strong truncate">{entry.re.who}：{entry.re.text}</div>}
+                  {entry.re && (
+                    <div className="text-xs text-muted pl-2.5 border-l-2 border-strong truncate">
+                      {entry.re.who}：{entry.re.text}
+                    </div>
+                  )}
                   <div className="text-[14.5px]">
                     <MarkdownText text={entry.text} onOpenFile={(p) => onOpenFile(p)} />
                   </div>
@@ -465,10 +580,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                   await api(`/api/super/actions/${encodeURIComponent(id)}/dismiss`, {});
                   onToast("已忽略待办");
                 }}
-                onOpenWorker={(name) => {
-                  const wk = data?.workers.find((w) => w.name === name);
-                  if (wk?.pane_id) onSelectWorker(wk.pane_id);
-                }}
+                onOpenWorker={openWorkerByName}
               />
               {pendingActions.length > 1 && (
                 <div className="flex items-center justify-between px-4 py-2 rounded-xl border border-hairline surface-rail text-xs">

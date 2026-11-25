@@ -498,3 +498,149 @@ func TestLegacyRouterCheckCompatibilityAndShowAction(t *testing.T) {
 		t.Fatalf("DismissAction(legacy router_check) failed: dis=%+v err=%v", dis, err)
 	}
 }
+
+func TestDecisionReceiptLinkingFollowUpAndSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"claude"})
+	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// 1. Before selection: pending action appears in Actions and NOT in ResolvedActions.
+	qEntry, act, _, err := eng.Reply(ctx, model.MainThread, "两个需求可以并行推进，你希望怎么安排？", "", []string{
+		"先分别出两份方案",
+		"先只做一个，另一个排队",
+		"直接写代码，不出方案",
+	}, false)
+	if err != nil || qEntry == nil || act == nil {
+		t.Fatalf("Reply failed: entry=%v act=%v err=%v", qEntry, act, err)
+	}
+	snapBefore := eng.Snapshot(ctx, model.MainThread)
+	if len(snapBefore.Actions) != 1 || snapBefore.Actions[0].ID != act.ID {
+		t.Fatalf("expected 1 pending action before click, got %+v", snapBefore.Actions)
+	}
+	if len(snapBefore.ResolvedActions) != 0 {
+		t.Fatalf("pending action must not appear in ResolvedActions, got %+v", snapBefore.ResolvedActions)
+	}
+
+	// 2. Interleaved unrelated message between question and click (cross-message resolution).
+	if _, _, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "插一句：先看下日志路径"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := eng.Reply(ctx, model.MainThread, "日志在 /tmp/demo.log。", "", nil, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Resolve action from Web -> user entry carries ActionID + Re.Entry; Snapshot exposes ResolvedActions with all choices.
+	resolved, err := eng.ResolveAction(ctx, act.ID, "web", "1")
+	if err != nil || resolved.Status != model.ActionResolved || resolved.ChosenLabel != "先分别出两份方案" {
+		t.Fatalf("ResolveAction failed: res=%+v err=%v", resolved, err)
+	}
+	if _, err := eng.ResolveAction(ctx, act.ID, "wecom", "2"); !errors.Is(err, store.ErrActionAlreadyResolved) {
+		t.Fatalf("expected ErrActionAlreadyResolved on duplicate click, got %v", err)
+	}
+
+	snapAfter := eng.Snapshot(ctx, model.MainThread)
+	if len(snapAfter.Actions) != 0 {
+		t.Fatalf("expected 0 pending actions after resolve, got %+v", snapAfter.Actions)
+	}
+	ra := snapAfter.ResolvedActions[act.ID]
+	if ra == nil || ra.Status != model.ActionResolved || ra.ResolvedBy != "web" || len(ra.Choices) != 3 || ra.EntryID != qEntry.ID {
+		t.Fatalf("unexpected ResolvedActions[%s]: %+v", act.ID, ra)
+	}
+	var receiptEntries []*model.Entry
+	for _, en := range snapAfter.Entries {
+		if en.Role == "user" && en.ActionID == act.ID {
+			receiptEntries = append(receiptEntries, en)
+		}
+	}
+	if len(receiptEntries) != 1 {
+		t.Fatalf("expected exactly 1 receipt user entry (no duplicate on double click), got %d", len(receiptEntries))
+	}
+	receiptEntry := receiptEntries[0]
+	if receiptEntry.Text != "先分别出两份方案" || receiptEntry.Re == nil || receiptEntry.Re.Entry != qEntry.ID {
+		t.Fatalf("receipt entry missing origin quote link: %+v", receiptEntry)
+	}
+
+	// 4. Follow-up supplement replying to the receipt entry carries BOTH chosen answer and original question.
+	fuEntry, fuTrig, err := eng.Say(ctx, SayRequest{
+		Thread:    model.MainThread,
+		Channel:   "web",
+		From:      "you",
+		Text:      "补充：两份方案都限制在只读调研",
+		ReEntryID: receiptEntry.ID,
+	})
+	if err != nil || fuEntry == nil || fuTrig == nil {
+		t.Fatalf("follow-up Say failed: entry=%v trig=%v err=%v", fuEntry, fuTrig, err)
+	}
+	if fuEntry.Re == nil || fuEntry.Re.Entry != receiptEntry.ID ||
+		!strings.Contains(fuEntry.Re.Text, "先分别出两份方案") ||
+		!strings.Contains(fuEntry.Re.Text, "两个需求可以并行推进") {
+		t.Fatalf("follow-up quote should preserve both choice and question, got %+v", fuEntry.Re)
+	}
+	if !strings.Contains(fuTrig.Text, "先分别出两份方案") || !strings.Contains(fuTrig.Text, "两个需求可以并行推进") {
+		t.Fatalf("follow-up trigger missing decision context: %q", fuTrig.Text)
+	}
+
+	// 5. Worker dialog approval & snooze events also attach ActionID and surface in ResolvedActions.
+	dialogAct := &model.Action{
+		ID:           "a-dlg-1",
+		Kind:         model.ActionKindWorkerDialog,
+		Thread:       model.MainThread,
+		TargetWorker: "agy-85",
+		Title:        "推送主干标签",
+		Summary:      "批准执行 git push",
+		Command:      "git push origin main",
+		Choices: []model.ActionChoice{
+			{Key: "1", Label: "允许本次"},
+			{Key: "2", Label: "始终允许"},
+		},
+		Status:    model.ActionPending,
+		CreatedAt: time.Now(),
+	}
+	if err := st.InsertAction(ctx, dialogAct); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.ResolveAction(ctx, dialogAct.ID, "web", "1"); err != nil {
+		t.Fatalf("resolve worker dialog failed: %v", err)
+	}
+
+	_, snoozeAct, _, err := eng.Reply(ctx, model.MainThread, "明天再看的巡检事项", "", []string{"现在处理", "留着"}, false)
+	if err != nil || snoozeAct == nil {
+		t.Fatalf("Reply for snooze failed: %v", err)
+	}
+	if _, err := eng.SnoozeAction(ctx, snoozeAct.ID, time.Now().Add(12*time.Hour)); err != nil {
+		t.Fatalf("SnoozeAction failed: %v", err)
+	}
+
+	snapFinal := eng.Snapshot(ctx, model.MainThread)
+	if len(snapFinal.Actions) != 0 {
+		t.Fatalf("expected 0 pending actions after dialog resolve & snooze, got %+v", snapFinal.Actions)
+	}
+	if got := snapFinal.ResolvedActions[dialogAct.ID]; got == nil || got.Status != model.ActionResolved || got.Command != "git push origin main" {
+		t.Fatalf("expected resolved worker dialog in ResolvedActions, got %+v", got)
+	}
+	if got := snapFinal.ResolvedActions[snoozeAct.ID]; got == nil || got.Status != model.ActionSnoozed {
+		t.Fatalf("expected snoozed action in ResolvedActions, got %+v", got)
+	}
+	hasDialogEvent, hasSnoozeEvent := false, false
+	for _, en := range snapFinal.Entries {
+		if en.Role == "event" && en.ActionID == dialogAct.ID {
+			hasDialogEvent = true
+		}
+		if en.Role == "event" && en.ActionID == snoozeAct.ID {
+			hasSnoozeEvent = true
+		}
+	}
+	if !hasDialogEvent || !hasSnoozeEvent {
+		t.Fatalf("expected event entries linked to action_id: dialog=%v snooze=%v", hasDialogEvent, hasSnoozeEvent)
+	}
+}

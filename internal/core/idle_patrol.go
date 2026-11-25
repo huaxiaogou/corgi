@@ -428,7 +428,7 @@ func (e *Engine) SnoozeAction(ctx context.Context, actionID string, until time.T
 			_ = e.store.UpsertWorker(ctx, wk)
 		}
 	}
-	e.addEvent(ctx, act.Thread, fmt.Sprintf("已暂缓待办，将于 %s 再次提醒", until.Format("01-02 15:04")), act.TargetWorker, "info")
+	e.addEventWithAction(ctx, act.Thread, fmt.Sprintf("已暂缓待办，将于 %s 再次提醒", until.Format("01-02 15:04")), act.TargetWorker, "info", act.ID)
 	e.mu.Lock()
 	sink := e.sink
 	e.mu.Unlock()

@@ -170,6 +170,46 @@ func (s *Store) GetAction(ctx context.Context, id string) (*model.Action, error)
 	return &a, nil
 }
 
+// ListActionsByIDs loads a map of Actions keyed by ID in a single parameterized query.
+func (s *Store) ListActionsByIDs(ctx context.Context, ids []string) (map[string]*model.Action, error) {
+	out := map[string]*model.Action{}
+	seen := make(map[string]struct{}, len(ids))
+	args := make([]any, 0, len(ids))
+	placeholders := make([]string, 0, len(ids))
+	for _, rawID := range ids {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		args = append(args, id)
+		placeholders = append(placeholders, "?")
+	}
+	if len(args) == 0 {
+		return out, nil
+	}
+	query := `SELECT data FROM actions WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list actions by ids: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var a model.Action
+		if json.Unmarshal([]byte(raw), &a) == nil && a.ID != "" {
+			out[a.ID] = &a
+		}
+	}
+	return out, rows.Err()
+}
+
 // ListPendingActions returns all unresolved actions (oldest first).
 func (s *Store) ListPendingActions(ctx context.Context) ([]*model.Action, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT data FROM actions WHERE status = ? ORDER BY created_at ASC`, model.ActionPending)

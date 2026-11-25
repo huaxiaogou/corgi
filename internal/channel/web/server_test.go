@@ -560,3 +560,70 @@ func TestSnoozeActionAndKeepWorkerEndpoints(t *testing.T) {
 		t.Fatalf("expected 0 pending & 1 snoozed in snapshot, got actions=%d snoozed=%d", len(snap.Actions), snap.SnoozedActions)
 	}
 }
+
+func TestSuperSnapshotAndEarlierIncludeResolvedActions(t *testing.T) {
+	srv, master := newTestServer(t)
+	h := srv.Routes()
+	ctx := context.Background()
+
+	qEntry, act, _, err := srv.Engine.Reply(ctx, model.MainThread, "确认本次发布策略？", "", []string{"灰度发布", "全量发布"}, false)
+	if err != nil || qEntry == nil || act == nil {
+		t.Fatalf("Reply failed: %v", err)
+	}
+
+	// Resolve via HTTP endpoint, verify 200 then 409 on duplicate click.
+	postResolve := func(choice string) int {
+		body, _ := json.Marshal(map[string]string{"choice": choice, "by": "web"})
+		r := httptest.NewRequest(http.MethodPost, "/api/super/actions/"+act.ID+"/resolve", bytes.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+master)
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := postResolve("1"); code != http.StatusOK {
+		t.Fatalf("first resolve want 200, got %d", code)
+	}
+	if code := postResolve("2"); code != http.StatusConflict {
+		t.Fatalf("duplicate resolve want 409, got %d", code)
+	}
+
+	// GET /api/super returns resolved_actions and linked user receipt entry.
+	snapReq := httptest.NewRequest(http.MethodGet, "/api/super?thread=chat:main", nil)
+	snapReq.Header.Set("Authorization", "Bearer "+master)
+	snapRec := httptest.NewRecorder()
+	h.ServeHTTP(snapRec, snapReq)
+	if snapRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/super want 200, got %d", snapRec.Code)
+	}
+	var view model.SuperView
+	if err := json.Unmarshal(snapRec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode SuperView: %v", err)
+	}
+	if len(view.Actions) != 0 {
+		t.Fatalf("expected 0 pending actions, got %d", len(view.Actions))
+	}
+	ra := view.ResolvedActions[act.ID]
+	if ra == nil || ra.Status != model.ActionResolved || ra.ChosenLabel != "灰度发布" || ra.EntryID != qEntry.ID {
+		t.Fatalf("SuperView resolved_actions[%s] mismatch: %+v", act.ID, ra)
+	}
+
+	// GET /api/super/earlier also returns resolved_actions for paginated history.
+	earReq := httptest.NewRequest(http.MethodGet, "/api/super/earlier?thread=chat:main&before=999999&limit=20", nil)
+	earReq.Header.Set("Authorization", "Bearer "+master)
+	earRec := httptest.NewRecorder()
+	h.ServeHTTP(earRec, earReq)
+	if earRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/super/earlier want 200, got %d", earRec.Code)
+	}
+	var earBody struct {
+		Entries         []*model.Entry           `json:"entries"`
+		ResolvedActions map[string]*model.Action `json:"resolved_actions"`
+	}
+	if err := json.Unmarshal(earRec.Body.Bytes(), &earBody); err != nil {
+		t.Fatalf("decode earlier response: %v", err)
+	}
+	if earBody.ResolvedActions[act.ID] == nil || earBody.ResolvedActions[act.ID].ChosenLabel != "灰度发布" {
+		t.Fatalf("expected resolved_actions in /api/super/earlier, got %+v", earBody.ResolvedActions)
+	}
+}
