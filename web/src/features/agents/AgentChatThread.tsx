@@ -3,8 +3,16 @@ import { StatusDot } from "../../components/CorgiMark";
 import { MarkdownText } from "../../components/MarkdownText";
 import type { Approval, ChatMessage } from "../../types/api";
 
+export interface PendingPrompt {
+  id: string;
+  text: string;
+  afterAbsIdx: number;
+  sending?: boolean;
+}
+
 interface Props {
   messages: ChatMessage[];
+  pendingPrompts?: PendingPrompt[];
   earlierCursor: number;
   loadingEarlier: boolean;
   approval: Approval | null;
@@ -23,6 +31,7 @@ interface Props {
 
 export function AgentChatThread({
   messages,
+  pendingPrompts = [],
   earlierCursor,
   loadingEarlier,
   approval,
@@ -38,7 +47,7 @@ export function AgentChatThread({
   onSwitchToScreen,
   onOpenFile,
 }: Props) {
-  if (messages.length === 0 && !approval && liveStatus !== "working") {
+  if (messages.length === 0 && pendingPrompts.length === 0 && !approval && liveStatus !== "working") {
     return (
       <div className="max-w-[740px] mx-auto py-16 text-center space-y-3">
         <p className="text-sm text-secondary">
@@ -135,6 +144,17 @@ export function AgentChatThread({
           {liveMeta && <span className="font-mono-code text-[11px] text-muted shrink-0">{liveMeta}</span>}
         </div>
       )}
+
+      {pendingPrompts.map((p) => (
+        <div key={p.id} className="flex flex-col items-end gap-1">
+          <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-sm text-[14px] pill-user opacity-80 whitespace-pre-wrap">
+            {p.text}
+          </div>
+          <span className="text-[11px] text-muted pr-1">
+            {p.sending ? "发送中…" : liveStatus === "working" ? "已发送 · 等待 Agent 接手…" : "已发送 · 等待响应…"}
+          </span>
+        </div>
+      ))}
 
       {approval && approval.choices.length > 0 && (
         <div className="card-floating rounded-2xl overflow-hidden">

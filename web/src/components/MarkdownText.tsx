@@ -6,7 +6,16 @@ interface Props {
 }
 
 const INLINE_RE =
-  /(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|\[image:[^\]]+\]|(?:~\/|\/[\w.-]+\/)[\w./-]+\.(?:md|go|ts|tsx|js|json|sql|py|sh|yaml|yml|html|htm|png|jpg|jpeg|webp))/g;
+  /(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]]+\]\((?:https?|file):\/\/[^)\s]+\)|\[image:[^\]]+\]|(?:~\/|\/[\w.-]+\/)[\w./-]+\.(?:tsx|ts|jsx|js|mjs|cjs|json|yaml|yml|html|htm|jpeg|jpg|png|webp|svg|css|scss|md|go|py|sh|sql|rs|rb|java|kt|cpp|hpp|cc|hh|toml|ini|txt|log|csv|c|h)(?![A-Za-z0-9_]))/g;
+
+function fileHrefToPath(href: string): string {
+  const withoutScheme = href.replace(/^file:\/\/(?:localhost)?/i, "").replace(/#.*$/, "");
+  try {
+    return decodeURIComponent(withoutScheme);
+  } catch {
+    return withoutScheme;
+  }
+}
 
 function renderInline(line: string, onOpenFile?: (path: string) => void): ReactNode[] {
   const parts = line.split(INLINE_RE);
@@ -15,7 +24,7 @@ function renderInline(line: string, onOpenFile?: (path: string) => void): ReactN
     if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
       return (
         <strong key={idx} className="font-semibold text-primary">
-          {part.slice(2, -2)}
+          {renderInline(part.slice(2, -2), onOpenFile)}
         </strong>
       );
     }
@@ -48,6 +57,27 @@ function renderInline(line: string, onOpenFile?: (path: string) => void): ReactN
       const sep = part.indexOf("](");
       const label = part.slice(1, sep);
       const href = part.slice(sep + 2, -1);
+      if (/^file:\/\//i.test(href)) {
+        const filePath = fileHrefToPath(href);
+        if (onOpenFile) {
+          return (
+            <button
+              key={idx}
+              type="button"
+              onClick={() => onOpenFile(filePath)}
+              title={filePath}
+              className="font-mono-code text-[12.5px] px-1.5 py-0.5 rounded surface-rail hover:underline cursor-pointer mx-0.5"
+            >
+              {label}
+            </button>
+          );
+        }
+        return (
+          <code key={idx} title={filePath} className="font-mono-code text-[12.5px] px-1.5 py-0.5 rounded surface-rail border border-hairline">
+            {label}
+          </code>
+        );
+      }
       return (
         <a key={idx} href={href} target="_blank" rel="noreferrer" className="underline underline-offset-2 text-primary">
           {label}

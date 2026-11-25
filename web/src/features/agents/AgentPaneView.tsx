@@ -4,7 +4,7 @@ import { TerminalScreen } from "../../components/TerminalScreen";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { api, uploadFile } from "../../lib/api";
 import type { AgentView, Approval, ChatMessage, MsgPatch } from "../../types/api";
-import { AgentChatThread } from "./AgentChatThread";
+import { AgentChatThread, type PendingPrompt } from "./AgentChatThread";
 
 interface Props {
   pane: AgentView;
@@ -31,10 +31,52 @@ function computeCursorMoveKeys(ap: Approval, targetIdx: number): string[] {
   return keys;
 }
 
+function reconcilePendingPrompts(
+  pending: PendingPrompt[],
+  liveMsgs: ChatMessage[],
+  liveBase: number
+): PendingPrompt[] {
+  if (pending.length === 0 || liveMsgs.length === 0) return pending;
+  const remainingUsers = new Map<number, string>();
+  for (let i = 0; i < liveMsgs.length; i++) {
+    const m = liveMsgs[i];
+    if (m.kind === "user" && m.text) {
+      remainingUsers.set(liveBase + i, m.text.trim());
+    }
+  }
+  if (remainingUsers.size === 0) return pending;
+
+  let changed = false;
+  const next: PendingPrompt[] = [];
+  for (const p of pending) {
+    const needle = p.text.trim();
+    let matched = false;
+    if (needle) {
+      for (const [absIdx, hay] of remainingUsers) {
+        if (absIdx < p.afterAbsIdx) continue;
+        const pos = hay.indexOf(needle);
+        if (pos !== -1) {
+          remainingUsers.set(absIdx, hay.slice(0, pos) + hay.slice(pos + needle.length));
+          matched = true;
+          break;
+        }
+      }
+    }
+    if (matched) {
+      changed = true;
+    } else {
+      next.push(p);
+    }
+  }
+  return changed ? next : pending;
+}
+
 export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
   const [mode, setMode] = useState<"chat" | "screen" | "log">(pane.is_agent ? "chat" : "screen");
   const [olderMsgs, setOlderMsgs] = useState<ChatMessage[]>([]);
   const [liveMsgs, setLiveMsgs] = useState<ChatMessage[]>([]);
+  const [liveBase, setLiveBase] = useState(0);
+  const [pendingPrompts, setPendingPrompts] = useState<PendingPrompt[]>([]);
   const [earlierCursor, setEarlierCursor] = useState(0);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [logText, setLogText] = useState("");
@@ -47,11 +89,13 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
   const [attachments, setAttachments] = useState<{ name: string; path: string }[]>([]);
   const [showKeys, setShowKeys] = useState(false);
   const baseRef = useRef(0);
+  const pendingSeqRef = useRef(0);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setMode(pane.is_agent ? "chat" : "screen");
     setShowKeys(false);
+    setPendingPrompts([]);
     void api("/api/seen", { pane: pane.pane_id });
   }, [pane.pane_id, pane.is_agent]);
 
@@ -59,6 +103,8 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
     setLogText("");
     setOlderMsgs([]);
     setLiveMsgs([]);
+    setLiveBase(0);
+    setPendingPrompts([]);
     setEarlierCursor(0);
     baseRef.current = 0;
     setApproval(null);
@@ -67,6 +113,7 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
     const es = new EventSource(url);
     es.addEventListener("reset", () => {
       baseRef.current = 0;
+      setLiveBase(0);
       setOlderMsgs([]);
       setLiveMsgs([]);
       setEarlierCursor(0);
@@ -80,9 +127,14 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
         const keepLen = Math.max(0, p.from - p.base);
         return [...trimmed.slice(0, keepLen), ...(p.msgs ?? [])];
       });
+      setLiveBase(p.base);
       setEarlierCursor((cur) => (cur > 0 ? cur : p.earlier ?? 0));
     });
-    es.addEventListener("messages", (ev) => setLiveMsgs((JSON.parse((ev as MessageEvent).data) as { messages?: ChatMessage[] }).messages ?? []));
+    es.addEventListener("messages", (ev) => {
+      baseRef.current = 0;
+      setLiveBase(0);
+      setLiveMsgs((JSON.parse((ev as MessageEvent).data) as { messages?: ChatMessage[] }).messages ?? []);
+    });
     es.addEventListener("log", (ev) => setLogText((JSON.parse((ev as MessageEvent).data) as { text?: string }).text ?? ""));
     es.addEventListener("frame", (ev) => setLogText((JSON.parse((ev as MessageEvent).data) as { text?: string }).text ?? ""));
     es.addEventListener("live", (ev) => {
@@ -96,16 +148,21 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
     return () => es.close();
   }, [pane.pane_id, mode]);
 
+  useEffect(() => {
+    setPendingPrompts((prev) => reconcilePendingPrompts(prev, liveMsgs, liveBase));
+  }, [liveMsgs, liveBase]);
+
   const lastLive = liveMsgs[liveMsgs.length - 1];
   const scrollHasContent =
     mode === "log"
       ? logText.length > 0
-      : liveMsgs.length > 0 || Boolean(approval) || liveStatus === "working" || logText.length > 0;
+      : liveMsgs.length > 0 || pendingPrompts.length > 0 || Boolean(approval) || liveStatus === "working" || logText.length > 0;
   const scrollContentKey =
     mode === "log"
       ? `log:${logText.length}`
       : [
           liveMsgs.length,
+          pendingPrompts.length,
           lastLive?.kind ?? "",
           lastLive?.text?.length ?? 0,
           lastLive?.input?.length ?? 0,
@@ -169,11 +226,21 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
   const submitPromptText = async (rawText: string) => {
     const enc = encodeURIComponent(pane.pane_id);
     if (pane.is_agent && mode === "chat") {
-      await api(`/api/agents/${enc}/prompt`, { prompt: rawText });
-    } else {
-      await api(`/api/panes/${enc}/text`, { text: rawText, enter: true });
+      const id = `p-${++pendingSeqRef.current}`;
+      const afterAbsIdx = baseRef.current + liveMsgs.length;
+      setPendingPrompts((prev) => [...prev, { id, text: rawText, afterAbsIdx, sending: true }]);
+      scrollToBottom(true);
+      try {
+        await api(`/api/agents/${enc}/prompt`, { prompt: rawText });
+        setPendingPrompts((prev) => prev.map((item) => (item.id === id ? { ...item, sending: false } : item)));
+      } catch (err) {
+        setPendingPrompts((prev) => prev.filter((item) => item.id !== id));
+        throw err;
+      }
+      return;
     }
-    scrollToBottom();
+    await api(`/api/panes/${enc}/text`, { text: rawText, enter: true });
+    scrollToBottom(true);
   };
 
   const sendInput = async (e: FormEvent) => {
@@ -258,6 +325,7 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
           ) : mode === "chat" ? (
             <AgentChatThread
               messages={messages}
+              pendingPrompts={pendingPrompts}
               earlierCursor={earlierCursor}
               loadingEarlier={loadingEarlier}
               approval={approval}
