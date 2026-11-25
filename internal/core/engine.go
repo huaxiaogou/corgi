@@ -158,6 +158,13 @@ func (e *Engine) SetSink(s ChannelSink) {
 	e.mu.Unlock()
 }
 
+// SetFleet updates the underlying fleet router (used by integration tests).
+func (e *Engine) SetFleet(fl *fleet.Fleet) {
+	e.mu.Lock()
+	e.fleet = fl
+	e.mu.Unlock()
+}
+
 // Memory exposes the layered memory manager.
 func (e *Engine) Memory() *MemoryManager { return e.memory }
 

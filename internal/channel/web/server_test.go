@@ -228,7 +228,8 @@ func TestHistoryResumeEndpoint(t *testing.T) {
 		}()
 		return c1, nil
 	})
-	srv.Fleet = fleet.NewFleet(fakeH, "hub", srv.Home, "test", []string{"codebuddy"})
+	srv.Fleet = fleet.NewFleet(fakeH, "hub", srv.Home, "test", []string{"codebuddy", "claude"})
+	srv.Engine.SetFleet(srv.Fleet)
 
 	if err := srv.Store.SaveEndedSession(context.Background(), &model.EndedSession{
 		ID: "h10", Kind: "codebuddy", Cwd: srv.Home, Name: "cb-old",
@@ -247,6 +248,21 @@ func TestHistoryResumeEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(gotArgs, " "), "--resume sess-xyz") {
 		t.Fatalf("expected --resume sess-xyz in launch args, got %v", gotArgs)
+	}
+	if wk, err := srv.Store.GetWorker(context.Background(), "cb-old"); err != nil || wk.Ended {
+		t.Fatalf("expected resumed history session registered as managed worker: wk=%+v err=%v", wk, err)
+	}
+
+	// Verify `+` launcher (POST /api/agents) also registers a managed worker and queues initial task brief.
+	reqLaunch := httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewBufferString(`{"kind":"claude","cwd":"~","name":"ui-task-1","prompt":"检查单测覆盖率"}`))
+	reqLaunch.Header.Set("Authorization", "Bearer "+master)
+	recLaunch := httptest.NewRecorder()
+	h.ServeHTTP(recLaunch, reqLaunch)
+	if recLaunch.Code != http.StatusOK {
+		t.Fatalf("POST /api/agents failed: code=%d body=%s", recLaunch.Code, recLaunch.Body.String())
+	}
+	if wk2, err := srv.Store.GetWorker(context.Background(), "ui-task-1"); err != nil || wk2.CreatedBy != "you" || wk2.Status != "starting" {
+		t.Fatalf("expected + launcher to register managed worker ui-task-1, got wk=%+v err=%v", wk2, err)
 	}
 }
 

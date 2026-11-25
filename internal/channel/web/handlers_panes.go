@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kiperjing/corgi/internal/core"
 	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
@@ -121,14 +122,15 @@ func (s *Server) handleGetState(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLaunchAgent(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Kind   string   `json:"kind"` // claude | codex | agy | codebuddy | shell
-		Name   string   `json:"name"`
-		Cwd    string   `json:"cwd"`
-		Label  string   `json:"label"`
-		Model  string   `json:"model"`
-		Effort string   `json:"effort"`
-		Prompt string   `json:"prompt"`
-		Args   []string `json:"args"`
+		Kind    string   `json:"kind"` // claude | codex | agy | codebuddy | shell
+		Machine string   `json:"machine"`
+		Name    string   `json:"name"`
+		Cwd     string   `json:"cwd"`
+		Label   string   `json:"label"`
+		Model   string   `json:"model"`
+		Effort  string   `json:"effort"`
+		Prompt  string   `json:"prompt"`
+		Args    []string `json:"args"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -137,22 +139,71 @@ func (s *Server) handleLaunchAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid model or effort"})
 		return
 	}
-	cwd := s.expand(body.Cwd)
-	if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "目录不存在: " + cwd})
-		return
+
+	machine := ""
+	if s.Fleet != nil {
+		machine = s.Fleet.ResolveMachine(body.Machine)
 	}
 	if body.Kind == "shell" {
+		targetHome := s.Home
+		if s.Fleet != nil {
+			if mc, ok := s.Fleet.Machine(machine); !ok {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "电脑不在线：" + body.Machine})
+				return
+			} else if mc.Home != "" {
+				targetHome = mc.Home
+			}
+		}
+		cwd := expandWithHome(targetHome, body.Cwd)
+		if machine == "" {
+			if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "目录不存在: " + cwd})
+				return
+			}
+		}
 		label := body.Label
 		if label == "" {
 			label = filepath.Base(cwd)
 		}
-		wsID, paneID, err := s.Fleet.CreateWorkspace(r.Context(), "", cwd, label)
+		wsID, paneID, err := s.Fleet.CreateWorkspace(r.Context(), machine, cwd, label)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"pane_id": paneID, "workspace_id": wsID})
+		return
+	}
+
+	// On Hub, all non-shell agents launched via `+` are first-class managed Workers under Corgi.
+	if s.Engine != nil {
+		wk, err := s.Engine.LaunchManaged(r.Context(), core.LaunchManagedRequest{
+			Kind:      body.Kind,
+			Machine:   machine,
+			Cwd:       body.Cwd,
+			Name:      body.Name,
+			Label:     body.Label,
+			Model:     body.Model,
+			Effort:    body.Effort,
+			Prompt:    body.Prompt,
+			ExtraArgs: body.Args,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		s.markStarted(wk.PaneID)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"pane_id":      wk.PaneID,
+			"workspace_id": wk.WorkspaceID,
+			"name":         wk.Name,
+			"worker":       wk.Name,
+		})
+		return
+	}
+
+	cwd := s.expand(body.Cwd)
+	if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "目录不存在: " + cwd})
 		return
 	}
 
@@ -261,7 +312,16 @@ func (s *Server) handleSendKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCloseWorkspace(w http.ResponseWriter, r *http.Request) {
-	if err := s.Fleet.CloseWorkspace(r.Context(), r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	if s.Engine != nil {
+		if err := s.Engine.CloseManagedWorkspace(r.Context(), id); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	if err := s.Fleet.CloseWorkspace(r.Context(), id); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}
@@ -548,4 +608,21 @@ func deref(p *string) string {
 		return ""
 	}
 	return *p
+}
+
+func expandWithHome(home, raw string) string {
+	p := strings.TrimSpace(raw)
+	if home == "" {
+		return p
+	}
+	switch {
+	case p == "" || p == "~":
+		return home
+	case strings.HasPrefix(p, "~/"):
+		return filepath.Join(home, p[2:])
+	case !filepath.IsAbs(p):
+		return filepath.Join(home, p)
+	default:
+		return filepath.Clean(p)
+	}
 }

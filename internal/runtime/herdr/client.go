@@ -165,6 +165,9 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 
 // CallRaw executes one NDJSON RPC method and returns the raw JSON result.
 func (c *Client) CallRaw(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if c == nil || c.dial == nil {
+		return nil, fmt.Errorf("herdr client unavailable")
+	}
 	if params == nil {
 		params = map[string]any{}
 	}

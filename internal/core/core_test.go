@@ -119,3 +119,44 @@ func TestEngineReplyCreatesActionAndAtomicResolve(t *testing.T) {
 		t.Fatalf("expected ErrActionAlreadyResolved on second click, got %v", err)
 	}
 }
+
+func TestAdoptUnmanagedAgentsRegistersManagedWorker(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"agy"})
+	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	kind := "agy"
+	cwd := "/Users/dev/project"
+	name := deriveFallbackWorkerName(kind, "w6:p1@mb0")
+	eng.adoptUnmanagedAgents(ctx, []model.Agent{{
+		Name:          &name,
+		PaneID:        "w6:p1@mb0",
+		WorkspaceID:   "w6@mb0",
+		Agent:         &kind,
+		AgentStatus:   "working",
+		Cwd:           &cwd,
+		TerminalTitle: "分析当前项目功能点及定位",
+	}})
+
+	wk, err := st.GetWorker(ctx, name)
+	if err != nil {
+		t.Fatalf("expected adopted worker %q in store: %v", name, err)
+	}
+	if wk.Status != "working" || wk.Machine != "mb0" || wk.Cwd != cwd || wk.CreatedBy != "you" {
+		t.Fatalf("unexpected adopted worker fields: %+v", wk)
+	}
+	snap := eng.Snapshot(ctx, model.MainThread)
+	if len(snap.Workers) != 1 || snap.Workers[0].Name != name {
+		t.Fatalf("expected adopted worker in SuperView snapshot: %+v", snap.Workers)
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kiperjing/corgi/internal/core"
 	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/herdr"
@@ -80,6 +81,25 @@ func (s *Server) handleResumeHistory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
+	if s.Engine != nil {
+		wk, lErr := s.Engine.LaunchManaged(r.Context(), core.LaunchManagedRequest{
+			Kind:      target.Kind,
+			Machine:   target.Machine,
+			Cwd:       target.Cwd,
+			Name:      target.Name,
+			Label:     target.Title,
+			SessionID: target.Session,
+		})
+		if lErr != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": lErr.Error()})
+			return
+		}
+		s.markStarted(wk.PaneID)
+		_ = s.Store.ForgetEndedSession(r.Context(), target.Kind, target.Machine, target.Session)
+		writeJSON(w, http.StatusOK, map[string]any{"pane_id": wk.PaneID, "workspace_id": wk.WorkspaceID, "name": wk.Name, "worker": wk.Name})
+		return
+	}
+
 	askPerm := false
 	if s.Engine != nil {
 		askPerm = s.Engine.Settings().AskPermissions

@@ -374,7 +374,7 @@ func (s *Server) routed(h http.HandlerFunc) http.HandlerFunc {
 		case r.URL.Path == "/api/dirs", r.URL.Path == "/api/file", r.URL.Path == "/api/uploads",
 			r.URL.Path == "/api/models", r.URL.Path == "/api/transcript", r.URL.Path == "/api/update":
 			machine = s.Fleet.ResolveMachine(r.URL.Query().Get("machine"))
-		case r.URL.Path == "/api/agents" && r.Method == http.MethodPost:
+		case r.URL.Path == "/api/agents" && r.Method == http.MethodPost && s.Engine == nil:
 			body, _ = io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 			var b struct {
 				Machine string `json:"machine"`
@@ -382,6 +382,9 @@ func (s *Server) routed(h http.HandlerFunc) http.HandlerFunc {
 			_ = json.Unmarshal(body, &b)
 			machine = s.Fleet.ResolveMachine(b.Machine)
 			r.Body = io.NopCloser(bytes.NewReader(body))
+		case strings.HasPrefix(r.URL.Path, "/api/workspaces/") && strings.HasSuffix(r.URL.Path, "/close") && s.Engine != nil:
+			// Keep workspace closure on Hub so Engine cleanly stops & archives any managed Worker on that workspace.
+			machine = ""
 		}
 		if machine == "" {
 			h(w, r)

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
 	"github.com/kiperjing/corgi/internal/runtime/herdr"
@@ -64,7 +65,13 @@ func (e *Engine) tick(parent context.Context) {
 		return // herdr temporarily unreachable; preserve queued triggers
 	}
 	live := map[string]liveInfo{}
-	for _, a := range rawAgents {
+	for i := range rawAgents {
+		a := &rawAgents[i]
+		if (a.Name == nil || *a.Name == "") && a.PaneID != "" && a.Agent != nil && *a.Agent != "" {
+			fallback := deriveFallbackWorkerName(*a.Agent, a.PaneID)
+			a.Name = &fallback
+			e.fleet.RememberName(a.PaneID, fallback)
+		}
 		if a.Name == nil || *a.Name == "" {
 			continue
 		}
@@ -77,6 +84,10 @@ func (e *Engine) tick(parent context.Context) {
 		}
 		live[*a.Name] = li
 	}
+
+	// Auto-adopt any live non-system agent session into Corgi's managed workers table
+	// so no orphan unmanaged sessions ever exist.
+	e.adoptUnmanagedAgents(ctx, rawAgents)
 
 	// 2. Sync worker states, detect bare-shell failures, create Actions on blocked dialogs or quota errors.
 	e.syncWorkers(ctx, live, now)
@@ -100,6 +111,120 @@ func (e *Engine) tick(parent context.Context) {
 
 	// 6. Watchdog for stalled workers.
 	e.checkStalls(ctx, live, now)
+}
+
+func deriveFallbackWorkerName(rawKind, paneID string) string {
+	k := agent.NormalizeKind(rawKind)
+	if k == "" {
+		k = "agent"
+	}
+	var b strings.Builder
+	for _, r := range strings.ToLower(paneID) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else if r == '@' || r == '-' || r == '_' {
+			b.WriteByte('-')
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if len(slug) > 16 {
+		slug = slug[:16]
+	}
+	if slug == "" {
+		return k + "-live"
+	}
+	return k + "-" + slug
+}
+
+// adoptUnmanagedAgents ensures every live non-system coding agent across all connected machines
+// is tracked in Corgi's managed workers table so it participates in status counts, dialog cards,
+// and end-of-turn reporting.
+func (e *Engine) adoptUnmanagedAgents(ctx context.Context, rawAgents []model.Agent) {
+	workers, err := e.store.ListWorkers(ctx)
+	if err != nil {
+		return
+	}
+	byName := map[string]*model.Worker{}
+	byPane := map[string]*model.Worker{}
+	for _, w := range workers {
+		byName[w.Name] = w
+		if !w.Ended && w.PaneID != "" {
+			byPane[w.PaneID] = w
+		}
+	}
+
+	changed := false
+	for _, a := range rawAgents {
+		if a.Name == nil || *a.Name == "" || a.PaneID == "" || a.Agent == nil {
+			continue
+		}
+		name := *a.Name
+		if name == model.RouterName || name == model.DreamName {
+			continue
+		}
+		if byPane[a.PaneID] != nil {
+			continue
+		}
+		if prev := byName[name]; prev != nil {
+			if !prev.Ended {
+				continue
+			}
+			// Leave "gone" workers with matching PaneID to syncWorkers' own restoration branch.
+			if prev.Status == "gone" && prev.PaneID == a.PaneID {
+				continue
+			}
+		}
+
+		kind := agent.NormalizeKind(*a.Agent)
+		if kind == "" {
+			continue
+		}
+		_, machine := fleet.SplitID(a.PaneID)
+		cwd := ""
+		if a.Cwd != nil {
+			cwd = *a.Cwd
+		}
+		sess := ""
+		if a.Session != nil {
+			sess = extractSessionID(a.Session.Kind, a.Session.Value)
+		}
+		taskDesc := strings.TrimSpace(a.TerminalTitle)
+		if taskDesc == "" {
+			taskDesc = "项目会话 · " + orStr(cwd, name)
+		}
+		st := a.AgentStatus
+		if st == "" {
+			st = "idle"
+		}
+		wk := &model.Worker{
+			Name:        name,
+			Kind:        kind,
+			Machine:     machine,
+			Cwd:         cwd,
+			Task:        oneLineClip(taskDesc, 200),
+			Thread:      model.MainThread,
+			PaneID:      a.PaneID,
+			WorkspaceID: a.WorkspaceID,
+			CreatedBy:   "you",
+			CreatedAt:   time.Now(),
+			Status:      st,
+			Session:     sess,
+		}
+		if e.fleet != nil {
+			if run, ok := e.fleet.Run(a.PaneID); ok {
+				wk.Run = run
+				wk.Model, wk.Effort = run[0], run[1]
+			}
+		}
+		if uErr := e.store.UpsertWorker(ctx, wk); uErr == nil {
+			byName[name] = wk
+			byPane[a.PaneID] = wk
+			changed = true
+		}
+	}
+	if changed {
+		e.notifyChanged()
+	}
 }
 
 func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, now time.Time) {

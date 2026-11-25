@@ -36,11 +36,33 @@ export function Sidebar({
   onCloseMobile,
   onToast,
 }: Props) {
-  const blocked = agents.filter((a) => a.status === "blocked");
-  const active = agents.filter((a) => a.status !== "blocked");
+  const visibleAgents = agents.filter(
+    (a) =>
+      a.name !== "corgi" &&
+      a.name !== "corgi-dream" &&
+      a.workspace_label !== "corgi · router" &&
+      a.workspace_label !== "corgi · dream"
+  );
+  const blocked = visibleAgents.filter((a) => a.status === "blocked");
+  const active = visibleAgents.filter((a) => a.status !== "blocked");
+  const activeWorkers = (superView?.workers ?? []).filter((w) => !w.ended);
+  const runningWorkers = activeWorkers.filter(
+    (w) => w.status === "working" || w.status === "starting" || w.status === "waiting"
+  );
   const pendingActions = (superView?.actions ?? []).filter((a) => a.status === "pending");
   const mainPending = pendingActions.filter((a) => a.thread === "chat:main").length;
   const wecomGroups = (superView?.threads ?? []).filter((t) => t.id.startsWith("wecom:"));
+
+  const corgiSubtitle =
+    mainPending > 0
+      ? `${mainPending} 项待你拍板`
+      : runningWorkers.length > 0
+        ? `${runningWorkers.length} 个任务在跑`
+        : superView?.router.status === "working"
+          ? `Corgi 在想…${activeWorkers.length > 0 ? ` · ${activeWorkers.length} 个会话就绪` : ""}`
+          : activeWorkers.length > 0
+            ? `${activeWorkers.length} 个受管会话就绪`
+            : "随时待命";
 
   const pick = (next: AppRoute) => {
     onSelect(next);
@@ -91,11 +113,7 @@ export function Sidebar({
             <CorgiMark className="w-4 h-4 shrink-0 text-primary" />
             <div className="min-w-0">
               <div className="text-[13.5px] font-medium truncate">和 Corgi 对话</div>
-              <div className="text-[11px] text-muted truncate">
-                {mainPending > 0
-                  ? `${mainPending} 项待你拍板`
-                  : `${(superView?.workers ?? []).filter((w) => !w.ended).length} 个任务在跑`}
-              </div>
+              <div className="text-[11px] text-muted truncate">{corgiSubtitle}</div>
             </div>
           </div>
           <StatusDot status={mainPending > 0 ? "blocked" : superView?.router.status ?? "idle"} />

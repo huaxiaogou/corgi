@@ -63,9 +63,13 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	machine = mc.ID
 
 	// Pre-flight check that the target computer has the requested agent CLI installed.
-	have := mc.Agents
+	have := append([]string(nil), mc.Agents...)
 	if mc.Local {
-		have = e.agents.DetectInstalled(e.home, false)
+		for _, k := range e.agents.DetectInstalled(e.home, false) {
+			if !slices.Contains(have, k) {
+				have = append(have, k)
+			}
+		}
 		if len(have) == 0 {
 			if chkErr := e.agents.CheckInstalled(e.home, kind); chkErr != nil {
 				return nil, chkErr
@@ -215,6 +219,179 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	case <-ctx.Done():
 		return wk, nil
 	}
+}
+
+// LaunchManagedRequest describes a user-initiated agent launch from the `+` modal or History resume.
+type LaunchManagedRequest struct {
+	Kind      string
+	Machine   string
+	Cwd       string
+	Name      string
+	Label     string
+	Model     string
+	Effort    string
+	Prompt    string
+	SessionID string
+	ExtraArgs []string
+}
+
+// LaunchManaged starts an interactive agent on any connected machine and registers it immediately
+// as a Corgi-managed Worker with full turn reporting, dialog card protection, and Router visibility.
+func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*model.Worker, error) {
+	kind := agent.NormalizeKind(req.Kind)
+	ad, err := e.agents.Get(kind)
+	if err != nil {
+		return nil, err
+	}
+	machine := e.fleet.ResolveMachine(req.Machine)
+	mc, ok := e.fleet.Machine(machine)
+	if !ok {
+		return nil, fmt.Errorf("电脑不在线：%s", orStr(req.Machine, machine))
+	}
+	machine = mc.ID
+
+	have := append([]string(nil), mc.Agents...)
+	if mc.Local {
+		for _, k := range e.agents.DetectInstalled(e.home, false) {
+			if !slices.Contains(have, k) {
+				have = append(have, k)
+			}
+		}
+		if len(have) == 0 {
+			if chkErr := e.agents.CheckInstalled(e.home, kind); chkErr != nil {
+				return nil, chkErr
+			}
+		}
+	}
+	if len(have) > 0 && !slices.Contains(have, kind) {
+		return nil, fmt.Errorf("%s 未安装 %s（可用：%s）", mc.Name, kind, strings.Join(have, ", "))
+	}
+
+	targetHome := mc.Home
+	if mc.Local && targetHome == "" {
+		targetHome = e.home
+	}
+	cwd := expandInHome(targetHome, orStr(strings.TrimSpace(req.Cwd), "~"))
+	if mc.Local && cwd != "" {
+		if fi, statErr := os.Stat(cwd); statErr != nil || !fi.IsDir() {
+			return nil, fmt.Errorf("目录不存在: %s", cwd)
+		}
+	}
+
+	explicitName := strings.TrimSpace(req.Name) != ""
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		_, seq, _ := e.store.NextID(ctx, "w")
+		name = fmt.Sprintf("%s-%d", kind, seq)
+	}
+	if !workerNameRe.MatchString(name) || name == model.RouterName || name == model.DreamName {
+		return nil, fmt.Errorf("名称需以小写字母开头，仅含字母/数字/-/_")
+	}
+	if existing, gErr := e.store.GetWorker(ctx, name); gErr == nil && !existing.Ended {
+		if explicitName {
+			return nil, fmt.Errorf("受管会话 %s 已在运行中", name)
+		}
+		_, seq, _ := e.store.NextID(ctx, "w")
+		name = fmt.Sprintf("%s-%d", name, seq)
+	}
+
+	st := e.Settings()
+	if !st.AskPermissions {
+		e.preTrustWorkspace(ctx, machine, kind, cwd)
+	}
+
+	workerBin := e.binPath
+	if !mc.Local || workerBin == "" {
+		workerBin = "corgi"
+	}
+	// Codex `resume <id>` is a subcommand and must precede launch flags.
+	args := append(ad.ResumeArgs(req.SessionID), ad.LaunchArgs(req.Model, req.Effort, !st.AskPermissions)...)
+	if kind == "claude" {
+		args = append(args, "--allowedTools", fmt.Sprintf("Bash(%s report:*),Bash(corgi report:*)", workerBin))
+	}
+	args = append(args, req.ExtraArgs...)
+
+	label := strings.TrimSpace(req.Label)
+	if label == "" {
+		label = "corgi · " + name
+	}
+	wsID, paneID, err := e.fleet.CreateWorkspace(ctx, machine, cwd, label)
+	if err != nil {
+		return nil, err
+	}
+	sErr := e.fleet.StartAgent(ctx, paneID, kind, name, args)
+	var he *herdr.Error
+	blockedOnStart := sErr != nil && errors.As(sErr, &he) && he.Code == "agent_not_ready"
+	if sErr != nil && !blockedOnStart {
+		_ = e.fleet.CloseWorkspace(ctx, wsID)
+		return nil, sErr
+	}
+
+	e.fleet.RememberName(paneID, name)
+	e.fleet.RememberRun(paneID, req.Model, req.Effort)
+
+	prompt := strings.TrimSpace(req.Prompt)
+	taskDesc := prompt
+	if taskDesc == "" {
+		taskDesc = "项目会话 · " + cwd
+	}
+	status := "idle"
+	if blockedOnStart {
+		status = "blocked"
+	} else if prompt != "" {
+		status = "starting"
+	}
+
+	wk := &model.Worker{
+		Name:        name,
+		Kind:        kind,
+		Machine:     machine,
+		Cwd:         cwd,
+		Task:        taskDesc,
+		Thread:      model.MainThread,
+		PaneID:      paneID,
+		WorkspaceID: wsID,
+		CreatedBy:   "you",
+		CreatedAt:   time.Now(),
+		Model:       req.Model,
+		Effort:      req.Effort,
+		Run:         &[2]string{req.Model, req.Effort},
+		Status:      status,
+		Session:     req.SessionID,
+	}
+	if err := e.store.UpsertWorker(ctx, wk); err != nil {
+		return nil, err
+	}
+
+	verb := "新建受管任务"
+	if req.SessionID != "" {
+		verb = "续接受管会话"
+	}
+	e.addEvent(ctx, model.MainThread, fmt.Sprintf("%s %s（%s%s · %s）", verb, name, kind, machineTag(mc.Name, mc.Local), cwd), name, "spawn")
+	e.notifyChanged()
+
+	if prompt != "" {
+		brief := fmt.Sprintf("[corgi task · worker=%s · thread=%s]\n%s\n\nHow this works:\n- Report completion with `%s report \"outcome summary & file paths\"`.\n- If blocked on a decision only the human can make or repeated failures, report `BLOCKED: <need> · tried: <attempts> · recommendation: <choice>`.",
+			name, model.MainThread, prompt, workerBin)
+		_, _ = e.Ingest(ctx, "router", model.MainThread, "you", brief, "", name, name)
+	}
+	return wk, nil
+}
+
+// CloseManagedWorkspace cleanly stops any active Worker owning workspaceID (preserving its session
+// in History) and closes the underlying herdr workspace.
+func (e *Engine) CloseManagedWorkspace(ctx context.Context, workspaceID string) error {
+	if workers, err := e.store.ListWorkers(ctx); err == nil {
+		for _, w := range workers {
+			if !w.Ended && w.WorkspaceID == workspaceID {
+				return e.StopWorker(ctx, w.Name)
+			}
+		}
+	}
+	if e.fleet != nil {
+		return e.fleet.CloseWorkspace(ctx, workspaceID)
+	}
+	return nil
 }
 
 func (e *Engine) failSpawnedWorker(ctx context.Context, wk *model.Worker, paneID, wsID string, err error, started chan<- error) {

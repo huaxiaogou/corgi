@@ -89,12 +89,12 @@ export function LauncherModal({ open, machines, onClose, onLaunched, onToast }: 
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.35)" }}>
       <form onSubmit={(e) => void submit(e)} className="w-full max-w-[480px] max-h-[90vh] flex flex-col card-floating rounded-2xl overflow-hidden">
         <div className="px-5 py-3.5 flex items-center justify-between border-b border-hairline shrink-0">
-          <h3 className="text-sm font-semibold">手动新建</h3>
+          <h3 className="text-sm font-semibold">新建任务 / 会话</h3>
           <button type="button" onClick={onClose} className="text-muted cursor-pointer"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="p-5 space-y-4 text-xs overflow-y-auto">
-          <p className="text-muted">日常任务直接告诉 Corgi 拆活就行；这里用于亲自开一个独立 Agent 或纯终端。</p>
+          <p className="text-muted">指定电脑、项目目录与模型发起任务；启动后自动纳入 Corgi 统一管辖并全程汇报（选「终端」则打开纯命令行）。</p>
 
           {machines.length > 1 && (
             <div className="space-y-1.5">
