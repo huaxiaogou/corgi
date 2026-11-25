@@ -250,7 +250,11 @@ func (m *MemoryManager) SessionStartPreamble() string {
 	var b strings.Builder
 	b.WriteString("[corgi] Session start. Read CORGI.md, memory/instructions.md, memory/notes/index.md, memory/messages.md")
 	if tasks := m.OpenTaskFiles(); len(tasks) > 0 {
-		fmt.Fprintf(&b, " and open tasks (%s)", strings.Join(tasks, ", "))
+		prefixed := make([]string, len(tasks))
+		for i, t := range tasks {
+			prefixed[i] = "memory/" + t
+		}
+		fmt.Fprintf(&b, " and open tasks (%s)", strings.Join(prefixed, ", "))
 	} else {
 		b.WriteString(" (no open tasks)")
 	}

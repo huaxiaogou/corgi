@@ -190,6 +190,7 @@ type Settings struct {
 func DefaultSettings(home string) Settings {
 	return Settings{
 		RouterKind:   "claude",
+		RouterEffort: "low",
 		WorkerKind:   "claude",
 		WorkerCwd:    home,
 		ReplyChars:   120,

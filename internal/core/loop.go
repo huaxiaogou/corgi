@@ -382,7 +382,11 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 		fmt.Fprintf(&b, " · %s\n", t.At.Format("15:04"))
 		body := strings.TrimSpace(t.Text)
 		if r := []rune(body); len(r) > 700 { // Inline & Spill
-			body = string(r[:700]) + fmt.Sprintf(" … [spilled; run `%s show %s`]", e.binPath, t.ID)
+			showBin := e.binPath
+			if target != model.RouterName || showBin == "" {
+				showBin = "corgi"
+			}
+			body = string(r[:700]) + fmt.Sprintf(" … [spilled; run `%s show %s`]", showBin, t.ID)
 		}
 		b.WriteString("  " + strings.ReplaceAll(body, "\n", "\n  ") + "\n")
 	}

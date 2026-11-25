@@ -338,8 +338,10 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 		wecomPending = s.WeCom.PendingUsers()
 	}
 	var hubAgents []string
+	machines := []model.Machine{}
 	if s.Fleet != nil {
-		for _, m := range s.Fleet.Machines() {
+		machines = s.Fleet.Machines()
+		for _, m := range machines {
 			if m.Local {
 				hubAgents = m.Agents
 				break
@@ -353,6 +355,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 		"wecom_error":   wecomErr,
 		"wecom_pending": wecomPending,
 		"hub_agents":    hubAgents,
+		"machines":      machines,
 		"hook_key":      hookKey,
 	})
 }

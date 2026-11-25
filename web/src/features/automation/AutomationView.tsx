@@ -16,6 +16,7 @@ interface SettingsResp {
   wecom_error?: string;
   wecom_pending?: PendingWeComUser[];
   hub_agents?: string[];
+  machines?: Machine[];
   hook_key: string;
 }
 
@@ -53,6 +54,7 @@ export function AutomationView({ onToast }: { onToast: (msg: string) => void }) 
       setWecomError(r.wecom_error ?? "");
       setWecomPending(r.wecom_pending ?? []);
       setHubAgents(r.hub_agents ?? []);
+      if (r.machines) setMachines(r.machines);
       setPolicies(r.policies ?? []);
       setHookKey(r.hook_key ?? "");
       if (tab === "hooks") setTriggers((await api<{ triggers: TriggerView[] }>("/api/super/triggers")).triggers ?? []);
@@ -136,6 +138,7 @@ export function AutomationView({ onToast }: { onToast: (msg: string) => void }) 
               wecomError={wecomError}
               wecomPending={wecomPending}
               hubAgents={hubAgents}
+              machines={machines}
               onChange={setSettings}
               onAllowChange={setAllowText}
               onSave={saveSettings}

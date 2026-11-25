@@ -7,17 +7,21 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/kiperjing/corgi/internal/model"
 )
 
 type paneRevStatus struct {
 	rev    uint64
+	at     time.Time
 	status string
 }
 
 var (
 	customWorkingRe = regexp.MustCompile(`(?i)(esc to interrupt|streaming\s*·|task running|[✢✳✶✻✽✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*\(\d+s)`)
+	titleSpinnerRe  = regexp.MustCompile(`^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✢✳✶✻✽✹]`)
+	customReadyRe   = regexp.MustCompile(`(?i)(codebuddy code|bypass permissions|do you trust|shift\+tab to cycle|^>\s*$)`)
 	customChoiceRe  = regexp.MustCompile(`(?m)^\s*([›>•❯▶]\s+.+|\d+[.)]\s+.+)$`)
 	customAskHintRe = regexp.MustCompile(`(?i)(do you trust|trust (this|the files|the contents)|do you want to|allow|proceed|confirm|esc to cancel|yes,?\s*(i trust|allow|proceed))`)
 )
@@ -109,12 +113,14 @@ func persistCustomFile(path string, data map[string]model.Agent) {
 	}
 }
 
-// inferCustomStatus inspects a shell-fallback pane's screen only when its terminal revision advances,
-// accurately classifying CodeBuddy into "blocked", "working", or "idle".
-func (c *Client) inferCustomStatus(ctx context.Context, paneID string, rev uint64) string {
+// inferCustomStatus inspects a shell-fallback pane's live screen with a short 1.2s cache TTL
+// (since herdr does not bump pane.revision on raw shell output), accurately classifying
+// CodeBuddy into "blocked", "working", or "idle".
+func (c *Client) inferCustomStatus(ctx context.Context, paneID, termTitle string, rev uint64) string {
+	now := time.Now()
 	c.customMu.Lock()
 	if c.revCache != nil {
-		if prev, ok := c.revCache[paneID]; ok && prev.rev == rev && prev.status != "" {
+		if prev, ok := c.revCache[paneID]; ok && prev.rev == rev && now.Sub(prev.at) < 1200*time.Millisecond && prev.status != "" {
 			c.customMu.Unlock()
 			return prev.status
 		}
@@ -125,14 +131,41 @@ func (c *Client) inferCustomStatus(ctx context.Context, paneID string, rev uint6
 	if rr, err := c.Read(ctx, paneID, "detection", "text", 0); err == nil {
 		status = classifyCustomScreen(rr.Text)
 	}
+	if status == "idle" && titleSpinnerRe.MatchString(strings.TrimSpace(termTitle)) {
+		status = "working"
+	}
 
 	c.customMu.Lock()
 	if c.revCache == nil {
 		c.revCache = map[string]paneRevStatus{}
 	}
-	c.revCache[paneID] = paneRevStatus{rev: rev, status: status}
+	c.revCache[paneID] = paneRevStatus{rev: rev, at: now, status: status}
 	c.customMu.Unlock()
 	return status
+}
+
+// waitCustomBoot waits up to 10s for a newly launched shell-fallback TUI (local or remote)
+// to draw its prompt or trust dialog before prompts are pasted into the pane.
+func (c *Client) waitCustomBoot(ctx context.Context, paneID string) {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		rr, err := c.Read(ctx, paneID, "detection", "text", 0)
+		if err != nil || strings.TrimSpace(rr.Text) == "" {
+			return
+		}
+		if customReadyRe.MatchString(rr.Text) || classifyCustomScreen(rr.Text) != "idle" {
+			select {
+			case <-ctx.Done():
+			case <-time.After(250 * time.Millisecond):
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(450 * time.Millisecond):
+		}
+	}
 }
 
 func classifyCustomScreen(screen string) string {

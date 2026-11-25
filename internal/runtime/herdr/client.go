@@ -276,7 +276,7 @@ func (c *Client) Agents(ctx context.Context) ([]model.Agent, error) {
 			if lp.Title != nil {
 				ca.TerminalTitle = *lp.Title
 			}
-			ca.AgentStatus = c.inferCustomStatus(ctx, pid, lp.Revision)
+			ca.AgentStatus = c.inferCustomStatus(ctx, pid, ca.TerminalTitle, lp.Revision)
 		}
 		r.Agents = append(r.Agents, ca)
 	}
@@ -395,13 +395,7 @@ func (c *Client) StartAgent(ctx context.Context, paneID, kind, name string, args
 	if sendErr := c.SendText(ctx, paneID, cmdLine, true); sendErr != nil {
 		return err
 	}
-	if c.home != "" {
-		// Give shell-launched TUIs (e.g. codebuddy) a brief moment to boot before accepting prompts.
-		select {
-		case <-ctx.Done():
-		case <-time.After(3500 * time.Millisecond):
-		}
-	}
+	c.waitCustomBoot(ctx, paneID)
 	n := name
 	k := kind
 	c.customMu.Lock()
@@ -429,7 +423,21 @@ func (c *Client) Prompt(ctx context.Context, target, text string) error {
 		if rr, rErr := c.Read(ctx, pid, "detection", "text", 0); rErr == nil && classifyCustomScreen(rr.Text) == "blocked" {
 			return &Error{Code: "agent_blocked", Message: "agent is waiting on a dialog"}
 		}
-		return c.SendText(ctx, pid, text, true)
+		payload := text
+		if strings.Contains(text, "\n") {
+			payload = "\x1b[200~" + text + "\x1b[201~"
+		}
+		if err := c.Call(ctx, "pane.send_text", map[string]any{"pane_id": pid, "text": payload}, nil); err != nil {
+			return err
+		}
+		if strings.Contains(text, "\n") {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+		return c.SendKeys(ctx, pid, "enter")
 	}
 	err := c.Call(ctx, "agent.prompt", map[string]any{"target": target, "text": text}, nil)
 	if err == nil {
