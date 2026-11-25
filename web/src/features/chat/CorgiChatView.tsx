@@ -395,13 +395,20 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
             rows={1}
             value={text}
             onChange={(e) => setText(e.target.value)}
+            onPaste={(e) => {
+              const files = e.clipboardData?.files;
+              if (files && files.length > 0) {
+                e.preventDefault();
+                void handleUpload(files);
+              }
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void submit(e);
               }
             }}
-            placeholder="告诉 Corgi 你要做什么…"
+            placeholder="告诉 Corgi 你要做什么（支持粘贴截图或点左下角添加文件）…"
             className="w-full resize-none bg-transparent text-[14px] outline-none"
           />
           <div className="flex items-center justify-between pt-1.5">

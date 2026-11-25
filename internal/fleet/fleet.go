@@ -191,7 +191,10 @@ type targetClient struct {
 func (f *Fleet) allClients() []targetClient {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	out := []targetClient{{machine: "", client: f.localH}}
+	var out []targetClient
+	if f.localH != nil {
+		out = append(out, targetClient{machine: "", client: f.localH})
+	}
 	for id, r := range f.remotes {
 		if r.Herdr != nil {
 			out = append(out, targetClient{machine: id, client: r.Herdr})

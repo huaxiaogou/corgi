@@ -136,16 +136,76 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	return wk, nil
 }
 
-// SendToWorker queues a steering message for an active worker.
+// SendToWorker queues a steering message for an active worker, or adopts a live
+// manually-started agent matching workerName so the Router can delegate directly to it.
 func (e *Engine) SendToWorker(ctx context.Context, workerName, thread, text string) (*model.Trigger, error) {
 	wk, err := e.store.GetWorker(ctx, workerName)
 	if err != nil || wk.Ended {
-		return nil, fmt.Errorf("no running worker named %q", workerName)
+		adopted, adoptErr := e.adoptLiveAgent(ctx, workerName, thread, text)
+		if adoptErr != nil {
+			return nil, fmt.Errorf("no running worker or live agent named %q", workerName)
+		}
+		wk = adopted
 	}
 	if thread == "" {
 		thread = wk.Thread
 	}
 	return e.Ingest(ctx, "router", thread, model.RouterName, text, "", wk.Name, wk.Name)
+}
+
+func (e *Engine) adoptLiveAgent(ctx context.Context, target, thread, task string) (*model.Worker, error) {
+	if e.fleet == nil {
+		return nil, fmt.Errorf("fleet unavailable")
+	}
+	agents, err := e.fleet.Agents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range agents {
+		name := ""
+		if a.Name != nil {
+			name = *a.Name
+		}
+		if name == "" || name == model.RouterName || name == model.DreamName {
+			continue
+		}
+		if name != target && a.PaneID != target {
+			continue
+		}
+		_, machine := fleet.SplitID(a.PaneID)
+		kind := ""
+		if a.Agent != nil {
+			kind = agent.NormalizeKind(*a.Agent)
+		}
+		cwd := ""
+		if a.Cwd != nil {
+			cwd = *a.Cwd
+		}
+		if thread == "" {
+			thread = model.MainThread
+		}
+		wk := &model.Worker{
+			Name:        name,
+			Kind:        kind,
+			Machine:     machine,
+			Cwd:         cwd,
+			Task:        oneLineClip(task, 200),
+			Thread:      thread,
+			PaneID:      a.PaneID,
+			WorkspaceID: a.WorkspaceID,
+			CreatedBy:   "adopted",
+			CreatedAt:   time.Now(),
+			Status:      orStr(a.AgentStatus, "idle"),
+		}
+		if err := e.store.UpsertWorker(ctx, wk); err != nil {
+			return nil, err
+		}
+		e.fleet.RememberName(a.PaneID, name)
+		e.addEvent(ctx, thread, fmt.Sprintf("接管已有会话 %s（%s%s）", name, kind, machineTag(machine)), name, "spawn")
+		e.notifyChanged()
+		return wk, nil
+	}
+	return nil, fmt.Errorf("live agent %q not found", target)
 }
 
 // Report receives a worker's progress or completion report and routes it to the Router.

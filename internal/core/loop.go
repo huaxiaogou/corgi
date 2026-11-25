@@ -275,7 +275,7 @@ func (e *Engine) deliverQueued(ctx context.Context, live map[string]liveInfo) {
 				continue
 			}
 		}
-		e.deliverBatch(ctx, target, list)
+		e.deliverBatch(ctx, target, li.pane, list)
 	}
 }
 
@@ -312,7 +312,7 @@ func (e *Engine) rerouteDeadWorkerTriggers(ctx context.Context, target string, l
 	}
 }
 
-func (e *Engine) deliverBatch(ctx context.Context, target string, list []*model.Trigger) {
+func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list []*model.Trigger) {
 	sort.Slice(list, func(i, j int) bool { return list[i].Seq < list[j].Seq })
 	if len(list) > 20 {
 		list = list[:20]
@@ -352,7 +352,11 @@ func (e *Engine) deliverBatch(ctx context.Context, target string, list []*model.
 		fmt.Fprintf(&b, "\nReply with `%s reply`, usually ≤%d characters.", e.binPath, chars)
 	}
 
-	if err := e.fleet.Prompt(ctx, target, b.String()); err != nil {
+	promptTarget := target
+	if paneID != "" {
+		promptTarget = paneID
+	}
+	if err := e.fleet.Prompt(ctx, promptTarget, b.String()); err != nil {
 		var he *herdr.Error
 		if errors.As(err, &he) && (he.Code == "agent_blocked" || he.Code == "agent_not_ready") {
 			return

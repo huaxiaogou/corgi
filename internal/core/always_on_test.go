@@ -84,7 +84,7 @@ func TestHandoverTriggersAndArchivesSession(t *testing.T) {
 		defer mu.Unlock()
 		switch method {
 		case "agent.prompt":
-			prompts = append(prompts, params["prompt"].(string))
+			prompts = append(prompts, params["text"].(string))
 		case "workspace.list":
 			return map[string]any{"workspaces": []any{
 				map[string]any{"workspace_id": "w-router", "label": model.RouterLabel},
@@ -235,7 +235,7 @@ func TestResilienceBareShellRouterRetryAndDismiss(t *testing.T) {
 		case "pane.read":
 			return map[string]any{"read": map[string]any{"text": "Error: rate limit exceeded on upstream model"}}, nil
 		case "agent.prompt":
-			prompts = append(prompts, params["prompt"].(string))
+			prompts = append(prompts, params["text"].(string))
 		}
 		return map[string]any{}, nil
 	})

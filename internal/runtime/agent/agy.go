@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -18,6 +19,8 @@ import (
 	"github.com/kiperjing/corgi/internal/runtime/herdr"
 	_ "modernc.org/sqlite"
 )
+
+var agyUserRequestRe = regexp.MustCompile(`(?s)<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>`)
 
 // AgyAdapter adapts Antigravity CLI (agy) to Corgi's runtime.
 type AgyAdapter struct{}
@@ -176,7 +179,12 @@ func (a *AgyAdapter) LocateTranscript(home, cwd, sessionID string, since time.Ti
 	root := agyHome(home)
 	brain := filepath.Join(root, "brain")
 	if sessionID != "" {
-		return preferFullTranscript(filepath.Join(brain, sessionID, ".system_generated", "logs", "transcript.jsonl"))
+		for _, b := range []string{brain, filepath.Join(home, ".gemini", "antigravity", "brain")} {
+			if p := preferFullTranscript(filepath.Join(b, sessionID, ".system_generated", "logs", "transcript.jsonl")); p != "" {
+				return p
+			}
+		}
+		return ""
 	}
 	if cwd == "" {
 		return ""
@@ -225,18 +233,67 @@ func preferFullTranscript(path string) string {
 
 func (a *AgyAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Message, bool) {
 	var rec struct {
-		Role    string `json:"role"`
-		Type    string `json:"type"`
-		Text    string `json:"text"`
-		Content string `json:"content"`
-		Tool    string `json:"tool"`
-		Name    string `json:"name"`
-		Args    string `json:"args"`
-		Output  string `json:"output"`
+		Role      string `json:"role"`
+		Type      string `json:"type"`
+		Text      string `json:"text"`
+		Content   string `json:"content"`
+		Tool      string `json:"tool"`
+		Name      string `json:"name"`
+		Args      string `json:"args"`
+		Output    string `json:"output"`
+		ToolCalls []struct {
+			Name string          `json:"name"`
+			Args json.RawMessage `json:"args"`
+		} `json:"tool_calls"`
 	}
 	if json.Unmarshal(line, &rec) != nil {
 		return nil, false
 	}
+
+	switch rec.Type {
+	case "USER_INPUT":
+		text := rec.Content
+		if m := agyUserRequestRe.FindStringSubmatch(text); m != nil {
+			text = m[1]
+		} else if strings.Contains(text, "<SYSTEM_MESSAGE>") {
+			return nil, false
+		}
+		if text = strings.TrimSpace(text); text != "" {
+			return []*model.Message{{Kind: "user", Text: text}}, true
+		}
+		return nil, false
+	case "PLANNER_RESPONSE":
+		var out []*model.Message
+		if t := strings.TrimSpace(rec.Content); t != "" {
+			out = append(out, &model.Message{Kind: "assistant", Text: t})
+		}
+		for _, tc := range rec.ToolCalls {
+			out = append(out, &model.Message{
+				Kind:  "tool",
+				Name:  tc.Name,
+				Input: summarizeAgyToolArgs(tc.Args),
+			})
+		}
+		return out, len(out) > 0
+	case "GENERIC":
+		outText := cleanAgyToolOutput(rec.Content)
+		if outText == "" {
+			return nil, false
+		}
+		isErr := strings.Contains(rec.Content, "exited with code") && !strings.Contains(rec.Content, "exited with code 0")
+		return []*model.Message{{
+			Kind:   "tool",
+			Name:   "result",
+			Output: clipText(outText, 800),
+			Error:  isErr,
+		}}, true
+	case "ERROR_MESSAGE":
+		if t := strings.TrimSpace(rec.Content); t != "" {
+			return []*model.Message{{Kind: "assistant", Text: "⚠ " + t}}, true
+		}
+		return nil, false
+	}
+
 	text := strings.TrimSpace(rec.Text)
 	if text == "" {
 		text = strings.TrimSpace(rec.Content)
@@ -263,6 +320,30 @@ func (a *AgyAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Messag
 		}}, true
 	}
 	return nil, false
+}
+
+func summarizeAgyToolArgs(raw json.RawMessage) string {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) == nil {
+		for _, k := range []string{"CommandLine", "Path", "query", "toolSummary"} {
+			if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
+				return clipText(v, 300)
+			}
+		}
+	}
+	return clipText(string(raw), 300)
+}
+
+func cleanAgyToolOutput(raw string) string {
+	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
+	out := lines[:0]
+	for _, l := range lines {
+		if strings.HasPrefix(l, "Created At:") || strings.HasPrefix(l, "Completed At:") {
+			continue
+		}
+		out = append(out, l)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 func (a *AgyAdapter) ReadContextUsage(_ string, _ int) model.ContextUsage {

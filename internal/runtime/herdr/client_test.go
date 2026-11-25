@@ -39,6 +39,10 @@ func TestStartAgentAndPromptShellFallback(t *testing.T) {
 			case "agent.start":
 				resp["error"] = map[string]any{"code": "unsupported_kind", "message": "unknown agent kind codebuddy"}
 			case "agent.prompt":
+				if _, ok := req.Params["text"].(string); !ok {
+					resp["error"] = map[string]any{"code": "invalid_request", "message": "missing field `text`"}
+					break
+				}
 				resp["error"] = map[string]any{"code": "not_found", "message": "agent not found"}
 			case "pane.send_text":
 				mu.Lock()

@@ -411,16 +411,50 @@ func (c *Client) StartAgent(ctx context.Context, paneID, kind, name string, args
 }
 
 // Prompt sends a prompt to an agent by target (name or pane ID).
-// Falls back to pane.send_text + enter for shell-fallback agents not registered in herdr.
+// Falls back to pane.send_text + enter for shell-fallback agents or when herdr
+// marks an already-idle agent as launch_pending / not_ready.
 func (c *Client) Prompt(ctx context.Context, target, text string) error {
-	err := c.Call(ctx, "agent.prompt", map[string]any{"target": target, "prompt": text}, nil)
+	err := c.Call(ctx, "agent.prompt", map[string]any{"target": target, "text": text}, nil)
 	if err == nil {
 		return nil
 	}
 	if pid := c.lookupCustomPane(target); pid != "" {
 		return c.SendText(ctx, pid, text, true)
 	}
-	return err
+	var he *Error
+	if !errors.As(err, &he) || (he.Code != "agent_not_found" && he.Code != "agent_not_ready" && he.Code != "not_found") {
+		return err
+	}
+	pane := target
+	if !strings.Contains(pane, ":") {
+		if agents, aErr := c.Agents(ctx); aErr == nil {
+			for _, a := range agents {
+				if a.Name != nil && *a.Name == target {
+					pane = a.PaneID
+					break
+				}
+			}
+		}
+	}
+	if !strings.Contains(pane, ":") {
+		return err
+	}
+	var info struct {
+		Agent struct {
+			Status string `json:"agent_status"`
+		} `json:"agent"`
+	}
+	if c.Call(ctx, "agent.get", map[string]any{"target": pane}, &info) != nil {
+		return err
+	}
+	switch info.Agent.Status {
+	case "idle", "done":
+	case "working", "blocked":
+		return &Error{Code: "agent_blocked", Message: "agent is " + info.Agent.Status}
+	default:
+		return err
+	}
+	return c.SendText(ctx, pane, "\x1b[200~"+text+"\x1b[201~", true)
 }
 
 func (c *Client) lookupCustomPane(target string) string {

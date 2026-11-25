@@ -264,3 +264,19 @@ func TestParseAgyModelsOutput(t *testing.T) {
 		t.Fatalf("unexpected third agy model: %+v", got[2])
 	}
 }
+
+func TestAgyParseTranscriptLines(t *testing.T) {
+	a := &AgyAdapter{}
+	uMsgs, ok := a.ParseTranscriptLine([]byte(`{"type":"USER_INPUT","content":"<USER_REQUEST>\n修一下登录\n</USER_REQUEST>"}`), "")
+	if !ok || len(uMsgs) != 1 || uMsgs[0].Kind != "user" || uMsgs[0].Text != "修一下登录" {
+		t.Fatalf("unexpected agy user msg: ok=%v msgs=%+v", ok, uMsgs)
+	}
+	pMsgs, ok := a.ParseTranscriptLine([]byte(`{"type":"PLANNER_RESPONSE","content":"先看日志","tool_calls":[{"name":"run_command","args":{"CommandLine":"go test ./..."}}]}`), "")
+	if !ok || len(pMsgs) != 2 || pMsgs[0].Kind != "assistant" || pMsgs[1].Kind != "tool" || pMsgs[1].Input != "go test ./..." {
+		t.Fatalf("unexpected agy planner msgs: ok=%v msgs=%+v", ok, pMsgs)
+	}
+	gMsgs, ok := a.ParseTranscriptLine([]byte(`{"type":"GENERIC","content":"Created At: 2026-11-25\nCompleted At: 2026-11-25\nCommand exited with code 0.\nPASS"}`), "")
+	if !ok || len(gMsgs) != 1 || gMsgs[0].Error || !strings.Contains(gMsgs[0].Output, "PASS") {
+		t.Fatalf("unexpected agy generic msg: ok=%v msgs=%+v", ok, gMsgs)
+	}
+}

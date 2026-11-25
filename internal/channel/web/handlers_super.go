@@ -10,6 +10,7 @@ import (
 
 	"github.com/kiperjing/corgi/internal/channel/wecom"
 	"github.com/kiperjing/corgi/internal/core"
+	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/store"
 )
@@ -247,8 +248,35 @@ func (s *Server) handleSuperList(w http.ResponseWriter, r *http.Request) {
 	workers, _ := s.Store.ListWorkers(r.Context())
 	threads, _ := s.Store.ListThreads(r.Context(), 50)
 	timers, _ := s.Store.ListTimers(r.Context())
+	liveAgents := []map[string]any{}
+	if s.Fleet != nil {
+		if ags, err := s.Fleet.Agents(r.Context()); err == nil {
+			for _, a := range ags {
+				name := ""
+				if a.Name != nil {
+					name = *a.Name
+				}
+				if name == "" || name == model.RouterName || name == model.DreamName {
+					continue
+				}
+				_, machine := fleet.SplitID(a.PaneID)
+				if machine == "" {
+					machine = "hub"
+				}
+				liveAgents = append(liveAgents, map[string]any{
+					"name":    name,
+					"kind":    deref(a.Agent),
+					"machine": machine,
+					"cwd":     deref(a.Cwd),
+					"status":  a.AgentStatus,
+					"pane_id": a.PaneID,
+				})
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"machines": s.Fleet.Machines(),
+		"agents":   liveAgents,
 		"workers":  workers,
 		"threads":  threads,
 		"timers":   timers,
