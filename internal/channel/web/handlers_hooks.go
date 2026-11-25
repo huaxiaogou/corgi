@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/kiperjing/corgi/internal/store"
 )
@@ -80,6 +81,31 @@ func (s *Server) handleSuperTriggers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDismissAction(w http.ResponseWriter, r *http.Request) {
 	act, err := s.Engine.DismissAction(r.Context(), r.PathValue("id"))
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
+		} else if errors.Is(err, store.ErrActionAlreadyResolved) {
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": act})
+}
+
+func (s *Server) handleSnoozeAction(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Until string `json:"until"`
+	}
+	_ = decodeJSON(w, r, &body)
+	var until time.Time
+	if s := strings.TrimSpace(body.Until); s != "" {
+		if parsed, err := time.Parse(time.RFC3339, s); err == nil {
+			until = parsed
+		}
+	}
+	act, err := s.Engine.SnoozeAction(r.Context(), r.PathValue("id"), until)
 	if err != nil {
 		code := http.StatusBadRequest
 		if errors.Is(err, store.ErrNotFound) {

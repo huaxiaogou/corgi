@@ -6,9 +6,23 @@ import { MarkdownText } from "../../components/MarkdownText";
 import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { api } from "../../lib/api";
-import type { Entry, Machine, QueuedPrompt, Settings, SuperView } from "../../types/api";
+import type { Action, Entry, Machine, QueuedPrompt, Settings, SuperView } from "../../types/api";
 import { ChatHeader } from "./ChatHeader";
 import { ComposerBar } from "./ComposerBar";
+
+function actionPriority(a: Action): number {
+  if (a.kind === "worker_dialog" || a.category === "blocked") return 0;
+  if (a.category === "worktree") return 1;
+  if (a.kind === "patrol_digest" || a.kind === "router_choice") return 2;
+  return 3;
+}
+
+function actionCategoryTag(a: Action): { key: string; label: string } {
+  if (a.kind === "worker_dialog" || a.category === "blocked") return { key: "blocked", label: "终端阻塞" };
+  if (a.category === "worktree") return { key: "worktree", label: "未合分支" };
+  if (a.kind === "patrol_digest") return { key: "digest", label: "巡检简报" };
+  return { key: "decision", label: "待拍板" };
+}
 
 interface Props {
   data: SuperView | null;
@@ -26,6 +40,9 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const [searchQ, setSearchQ] = useState("");
   const [searchHits, setSearchHits] = useState<{ id: string; role: string; snippet: string }[]>([]);
   const [pinnedOpen, setPinnedOpen] = useState(false);
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const [inboxFilter, setInboxFilter] = useState("all");
+  const [inboxSearch, setInboxSearch] = useState("");
   const [olderEntries, setOlderEntries] = useState<Entry[]>([]);
   const [moreOlder, setMoreOlder] = useState<boolean | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -67,7 +84,19 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const entries = [...olderEntries.filter((e) => !liveIds.has(e.id)), ...liveEntries];
   const canLoadMore = moreOlder ?? Boolean(data?.earlier);
   const pinnedList = (data?.pinned ?? []).filter((e) => !thread || e.thread === thread);
-  const pendingActions = (data?.actions ?? []).filter((a) => a.status === "pending" && (!thread || a.thread === thread));
+  const pendingActions = (data?.actions ?? [])
+    .filter((a) => a.status === "pending" && (!thread || a.thread === thread))
+    .sort((a, b) => actionPriority(a) - actionPriority(b));
+  const topAction = pendingActions[0] ?? null;
+  const snoozedCount = thread === "chat:main" ? (data?.snoozed_actions ?? 0) : 0;
+  const filteredInbox = pendingActions.filter((a) => {
+    if (inboxFilter !== "all" && actionCategoryTag(a).key !== inboxFilter) return false;
+    if (inboxSearch.trim()) {
+      const q = inboxSearch.toLowerCase();
+      return `${a.title} ${a.target_worker ?? ""} ${a.summary ?? ""}`.toLowerCase().includes(q);
+    }
+    return true;
+  });
   const activeWorkers = (data?.workers ?? []).filter((w) => !w.ended);
   const lastEntry = liveEntries[liveEntries.length - 1];
   const router = data?.router;
@@ -198,6 +227,139 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
         </div>
       )}
 
+      {(pendingActions.length > 0 || snoozedCount > 0) && (
+        <div className="border-b border-hairline surface-rail shrink-0 text-xs">
+          <div className="px-5 py-2 flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={() => pendingActions.length > 0 && setInboxOpen((v) => !v)}
+              className="flex items-center gap-2 min-w-0 text-left cursor-pointer"
+            >
+              <span
+                className="w-2 h-2 rounded-full shrink-0"
+                style={{ background: pendingActions.length > 0 ? "var(--attn)" : "var(--fg-3)" }}
+              />
+              <span className="font-medium text-primary shrink-0">
+                {pendingActions.length > 0 ? `待你确认 (${pendingActions.length})` : `已暂缓 (${snoozedCount})`}
+              </span>
+              {topAction ? (
+                <>
+                  <span className="text-muted">·</span>
+                  <span className="text-secondary truncate">{topAction.title}</span>
+                </>
+              ) : (
+                <span className="text-muted truncate">将在下次晨报重新浮出</span>
+              )}
+            </button>
+            {pendingActions.length > 1 && (
+              <button
+                type="button"
+                onClick={() => setInboxOpen((v) => !v)}
+                className="px-2 py-0.5 rounded-md border border-strong surface-bg surface-hover text-secondary cursor-pointer shrink-0"
+              >
+                {inboxOpen ? "收起收件箱" : "展开收件箱"}
+              </button>
+            )}
+          </div>
+          {inboxOpen && pendingActions.length > 0 && (
+            <div className="px-5 pb-3 pt-1.5 space-y-2 border-t border-hairline surface-bg">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[
+                    { key: "all", label: "全部", count: pendingActions.length },
+                    { key: "blocked", label: "终端阻塞", count: pendingActions.filter((a) => actionCategoryTag(a).key === "blocked").length },
+                    { key: "worktree", label: "未合分支", count: pendingActions.filter((a) => actionCategoryTag(a).key === "worktree").length },
+                    { key: "digest", label: "巡检简报", count: pendingActions.filter((a) => actionCategoryTag(a).key === "digest").length },
+                    { key: "decision", label: "待拍板", count: pendingActions.filter((a) => actionCategoryTag(a).key === "decision").length },
+                  ]
+                    .filter((f) => f.key === "all" || f.count > 0)
+                    .map((f) => (
+                      <button
+                        key={f.key}
+                        type="button"
+                        onClick={() => setInboxFilter(f.key)}
+                        className={`px-2.5 py-0.5 rounded-full border cursor-pointer ${
+                          inboxFilter === f.key ? "btn-accent border-transparent" : "border-hairline text-secondary surface-hover"
+                        }`}
+                      >
+                        {f.label} {f.count}
+                      </button>
+                    ))}
+                </div>
+                <input
+                  value={inboxSearch}
+                  onChange={(e) => setInboxSearch(e.target.value)}
+                  placeholder="筛选任务…"
+                  className="w-36 px-2.5 py-1 rounded-lg border border-hairline surface-rail text-xs outline-none"
+                />
+              </div>
+              <div className="max-h-56 overflow-y-auto divide-y divide-[var(--line)] rounded-xl border border-hairline">
+                {filteredInbox.slice(0, 20).map((act) => {
+                  const tag = actionCategoryTag(act);
+                  const primaryChoice = act.choices?.[0];
+                  return (
+                    <div key={act.id} className="px-3.5 py-2 flex items-center justify-between gap-3 surface-hover">
+                      <div className="min-w-0 flex items-center gap-2">
+                        <span className="px-1.5 py-0.5 rounded font-mono-code text-[10.5px] border border-hairline surface-rail text-secondary shrink-0">
+                          {tag.label}
+                        </span>
+                        <span className="font-medium text-primary truncate">{act.title}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {primaryChoice && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void api(`/api/super/actions/${encodeURIComponent(act.id)}/resolve`, {
+                                choice: primaryChoice.key || primaryChoice.label,
+                                by: "web",
+                              }).then(() => onToast("已拍板并同步"))
+                            }
+                            className="px-2 py-0.5 rounded-md btn-accent text-[11px] cursor-pointer"
+                          >
+                            {primaryChoice.label}
+                          </button>
+                        )}
+                        {act.kind !== "worker_dialog" && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void api(`/api/super/actions/${encodeURIComponent(act.id)}/snooze`, {}).then(() =>
+                                onToast("已暂缓至明天晨报提醒")
+                              )
+                            }
+                            className="px-2 py-0.5 rounded-md border border-strong text-secondary surface-hover text-[11px] cursor-pointer"
+                          >
+                            明天
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void api(`/api/super/actions/${encodeURIComponent(act.id)}/dismiss`, {}).then(() =>
+                              onToast("已忽略待办")
+                            )
+                          }
+                          className="text-muted hover:text-primary px-1 cursor-pointer"
+                          title="忽略"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+                {filteredInbox.length > 20 && (
+                  <div className="px-3.5 py-2 text-center text-[11.5px] text-muted surface-rail">
+                    已展示前 20 条（共 {filteredInbox.length} 条），支持按分类或搜索快速筛选
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {pinnedList.length > 0 && (
         <div className="px-5 py-2 border-b border-hairline surface-rail text-xs shrink-0 space-y-1.5">
           <button type="button" onClick={() => setPinnedOpen((v) => !v)} className="flex items-center gap-1.5 text-secondary font-medium cursor-pointer">
@@ -285,13 +447,17 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
             );
           })}
 
-          {pendingActions.map((act) => (
-            <div key={act.id} className="pl-0 sm:pl-10">
+          {topAction && (
+            <div className="pl-0 sm:pl-10 space-y-2">
               <DecisionCard
-                action={act}
+                action={topAction}
                 onResolve={async (id, key) => {
                   await api(`/api/super/actions/${encodeURIComponent(id)}/resolve`, { choice: key, by: "web" });
                   onToast("已拍板并同步");
+                }}
+                onSnooze={async (id) => {
+                  await api(`/api/super/actions/${encodeURIComponent(id)}/snooze`, {});
+                  onToast("已暂缓至明天晨报再次提醒");
                 }}
                 onDismiss={async (id) => {
                   await api(`/api/super/actions/${encodeURIComponent(id)}/dismiss`, {});
@@ -302,8 +468,22 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                   if (wk?.pane_id) onSelectWorker(wk.pane_id);
                 }}
               />
+              {pendingActions.length > 1 && (
+                <div className="flex items-center justify-between px-4 py-2 rounded-xl border border-hairline surface-rail text-xs">
+                  <span className="text-secondary">
+                    还有 <strong>{pendingActions.length - 1}</strong> 项待确认已折叠在顶部收件箱
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setInboxOpen(true)}
+                    className="font-medium text-primary hover:underline cursor-pointer"
+                  >
+                    展开全部 {pendingActions.length} 项 →
+                  </button>
+                </div>
+              )}
             </div>
-          ))}
+          )}
 
             </div>
 

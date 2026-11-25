@@ -31,7 +31,7 @@ export interface ActionChoice {
 
 export interface Action {
   id: string;
-  kind: "router_choice" | "router_check" | "worker_dialog";
+  kind: "router_choice" | "router_check" | "worker_dialog" | "patrol_digest";
   thread: string;
   entry_id?: string;
   target_worker?: string;
@@ -40,12 +40,14 @@ export interface Action {
   summary?: string;
   command?: string;
   choices?: ActionChoice[];
-  status: "pending" | "resolved" | "expired";
+  status: "pending" | "resolved" | "expired" | "snoozed";
+  category?: "blocked" | "worktree" | "decision" | "stale" | string;
   resolved_by?: string;
   chosen_key?: string;
   chosen_label?: string;
   created_at: string;
   resolved_at?: string;
+  snooze_until?: string;
 }
 
 export interface Worker {
@@ -57,6 +59,7 @@ export interface Worker {
   thread: string;
   pane_id?: string;
   workspace_id?: string;
+  created_by?: string;
   created_at: string;
   model?: string;
   effort?: string;
@@ -69,6 +72,9 @@ export interface Worker {
   repo_root?: string;
   worktree_path?: string;
   worktree_branch?: string;
+  idle_since?: string;
+  keep?: boolean;
+  snooze_until?: string;
 }
 
 export interface Thread {
@@ -120,6 +126,7 @@ export interface SuperView {
   entries: Entry[];
   earlier?: boolean;
   actions: Action[];
+  snoozed_actions?: number;
   pinned: Entry[];
   workers: Worker[];
   threads: Thread[];
@@ -159,6 +166,9 @@ export interface AgentView {
   run?: [string, string];
   repo_root?: string;
   worktree_branch?: string;
+  idle_since?: string;
+  keep?: boolean;
+  created_by?: string;
 }
 
 export interface PaneState {
@@ -217,6 +227,10 @@ export interface Settings {
   worker_machine?: string;
   reply_chars: number;
   stall_minutes: number;
+  idle_patrol_minutes?: number;
+  active_hours?: string;
+  stale_archive_days?: number;
+  morning_digest?: boolean;
   rotate_pct?: number;
   dream_at?: string;
   notify_level?: "quiet" | "normal";

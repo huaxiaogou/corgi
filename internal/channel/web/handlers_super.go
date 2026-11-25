@@ -117,16 +117,28 @@ func (s *Server) handleStopRouter(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSuperReply(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Text    string   `json:"text"`
-		Thread  string   `json:"thread"`
-		Re      string   `json:"re"`
-		Options []string `json:"options"`
-		Check   bool     `json:"check"`
+		Text     string   `json:"text"`
+		Thread   string   `json:"thread"`
+		Re       string   `json:"re"`
+		Options  []string `json:"options"`
+		Check    bool     `json:"check"`
+		Digest   bool     `json:"digest"`
+		Worker   string   `json:"worker"`
+		Category string   `json:"category"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	entry, act, warn, err := s.Engine.Reply(r.Context(), body.Thread, body.Text, body.Re, body.Options, body.Check)
+	entry, act, warn, err := s.Engine.ReplyWithMeta(r.Context(), core.ReplyRequest{
+		Thread:   body.Thread,
+		Text:     body.Text,
+		ReID:     body.Re,
+		Options:  body.Options,
+		Check:    body.Check,
+		Digest:   body.Digest,
+		Worker:   body.Worker,
+		Category: body.Category,
+	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -139,6 +151,25 @@ func (s *Server) handleSuperReply(w http.ResponseWriter, r *http.Request) {
 		res["warning"] = warn
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleKeepWorker(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Keep bool `json:"keep"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	wk, err := s.Engine.SetWorkerKeep(r.Context(), r.PathValue("name"), body.Keep)
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "worker": wk.Name, "keep": wk.Keep})
 }
 
 func (s *Server) handleResolveAction(w http.ResponseWriter, r *http.Request) {

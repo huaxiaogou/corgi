@@ -25,6 +25,7 @@ var Commands = map[string]func(corgiDir string, args []string) error{
 	"report":    cmdReport,
 	"subscribe": cmdSubscribe,
 	"stop":      cmdStop,
+	"keep":      cmdKeep,
 	"answer":    cmdAnswer,
 	"show":      cmdShow,
 	"list":      cmdList,
@@ -201,6 +202,9 @@ func cmdReply(dir string, args []string) error {
 	thread := fs.String("thread", model.MainThread, "thread id")
 	re := fs.String("re", "", "entry or trigger id this replies to")
 	check := fs.Bool("check", false, "mark as awaiting human review")
+	digest := fs.Bool("digest", false, "mark as consolidated patrol/morning digest (replaces prior digest card)")
+	worker := fs.String("worker", "", "optional related worker name")
+	category := fs.String("category", "", "optional action category (worktree | decision | stale)")
 	var opts stringList
 	fs.Var(&opts, "opt", "quick-choice option button (repeatable)")
 	if err := parseInterspersed(fs, args); err != nil {
@@ -212,6 +216,7 @@ func cmdReply(dir string, args []string) error {
 	}
 	out, err := apiCall(dir, http.MethodPost, "/api/super/reply", map[string]any{
 		"thread": *thread, "re": *re, "text": text, "options": []string(opts), "check": *check,
+		"digest": *digest, "worker": *worker, "category": *category,
 	})
 	if err == nil {
 		fmt.Println(strings.TrimSpace(string(out)))
@@ -341,6 +346,22 @@ func cmdStop(dir string, args []string) error {
 		return fmt.Errorf("usage: corgi stop <worker>")
 	}
 	out, err := apiCall(dir, http.MethodPost, "/api/super/stop", map[string]any{"worker": args[0]})
+	if err == nil {
+		fmt.Println(strings.TrimSpace(string(out)))
+	}
+	return err
+}
+
+func cmdKeep(dir string, args []string) error {
+	fs := flag.NewFlagSet("keep", flag.ContinueOnError)
+	off := fs.Bool("off", false, "clear permanent keep/exempt flag")
+	if err := parseInterspersed(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: corgi keep [--off] <worker>")
+	}
+	out, err := apiCall(dir, http.MethodPost, "/api/super/workers/"+fs.Arg(0)+"/keep", map[string]any{"keep": !*off})
 	if err == nil {
 		fmt.Println(strings.TrimSpace(string(out)))
 	}

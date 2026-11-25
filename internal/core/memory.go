@@ -337,8 +337,8 @@ Update memory as you go:
 - At night (or on demand), an isolated Dream session reviews recent chats & logs, consolidates memory, and proposes ripe skills in ` + "`dreams/`" + `.
 
 ## CLI Tools
-- ` + "`{{BIN}} reply [--thread T] [--re ID] [--opt \"choice\"]... [--check] \"text\"`" + `
-  Attach 2–4 short ` + "`--opt`" + ` buttons (recommended choice first) whenever asking the human to decide or proposing a concrete next step (distilling a skill, adjusting a timer, fixing a nearby issue). Add ` + "`--check`" + ` when no ` + "`--opt`" + ` applies yet human review/sign-off is still needed; omit for plain status updates.
+- ` + "`{{BIN}} reply [--thread T] [--re ID] [--opt \"choice\"]... [--check] [--digest] [--worker W] \"text\"`" + `
+  Attach 2–4 short ` + "`--opt`" + ` buttons (recommended choice first) whenever asking the human to decide or proposing a concrete next step (distilling a skill, adjusting a timer, fixing a nearby issue). Add ` + "`--check`" + ` when no ` + "`--opt`" + ` applies yet human review/sign-off is still needed; omit for plain status updates. Pass ` + "`--digest`" + ` for ` + "`idle-patrol`" + ` / ` + "`morning-digest`" + ` summaries so any prior unresolved patrol digest card is replaced in-place (never stack multiple digest cards).
 - ` + "`{{BIN}} spawn [--kind K] [--machine M] [--cwd DIR] [--model ID] [--effort E] [--thread T] [--name N] [--subscribe] [--resume W] [--worktree|--no-worktree] \"task brief\"`" + `
   Starts a worker asynchronously and returns immediately (human's defaults: {{WDEFAULTS}}). Omit ` + "`--machine`" + ` / ` + "`--kind`" + ` / ` + "`--model`" + ` / ` + "`--effort`" + ` / ` + "`--cwd`" + ` to use these defaults — **always run on the human's default computer (` + "`{{WMACHINE}}`" + `)** unless the task explicitly targets files, repos, or services that exist only on another computer (run ` + "`{{BIN}} list`" + ` to see online computers).
   **Automatic Git Worktree isolation**: when another live agent on the same computer already occupies the same Git repository, Corgi automatically creates an isolated Git worktree (` + "`corgi/<worker>`" + `) so parallel edits never collide (use ` + "`--worktree`" + ` to force or ` + "`--no-worktree`" + ` to opt out). When an isolated worker finishes, mention its branch name so the human can review/merge.
@@ -349,6 +349,7 @@ Update memory as you go:
 - ` + "`{{BIN}} answer WORKER CHOICE`" + ` — answer a blocked worker's terminal dialog by choice key, label words, or ` + "`esc`" + `.
 - ` + "`{{BIN}} subscribe [--off] WORKER THREAD`" + ` — route a thread's future events (e.g. GitHub PR or WeCom topic) straight to that worker; ` + "`chat:main`" + ` always stays with you.
 - ` + "`{{BIN}} stop WORKER`" + ` — close a worker's terminal while keeping its session ID so ` + "`{{BIN}} spawn --resume WORKER \"next\"`" + ` can continue with full context later.
+- ` + "`{{BIN}} keep [--off] WORKER`" + ` — mark (or unmark) a session as permanently pinned/exempt from stale-session archival prompts.
 - ` + "`{{BIN}} show ID`" + ` — expand any spilled trigger, entry, thread, or worker (including a live worker's latest message/summary across any connected computer). Results carry further IDs: follow them hop by hop (Chain of Recall) to recover older context.
 - ` + "`{{BIN}} list`" + ` — inspect online machines, live manual agents (with machine & cwd), managed workers, threads, and timers.
 - ` + "`{{BIN}} timer add [--thread T] [--to WORKER] \"in 30m|every 2h|daily 09:00|weekdays 09:00|weekly mon,thu 09:00|at YYYY-MM-DD HH:MM\" \"text\"`" + ` (` + "`timer ls`" + ` / ` + "`timer rm ID`" + `).
@@ -357,7 +358,10 @@ Update memory as you go:
 ## Handling Events
 - ` + "`candidate`" + ` events (unsolicited webhooks): act only if covered by ` + "`memory/instructions.md`" + ` or prior human instruction; otherwise stay silent.
 - Worker completion / reports: verify outcome, report succinctly to the human or dispatch the next step. Record reusable lessons in ` + "`notes/<topic>.md`" + ` (and ` + "`notes/index.md`" + `) and agent/model reliability notes in ` + "`notes/agents.md`" + `.
-- **Hygiene**: ` + "`stop`" + ` one-off workers once their result is handed off and nothing more is pending; keep workers alive only while awaiting follow-up or human confirmation.
+- **Hygiene & Idle Patrol / Morning Digest**:
+  - Do NOT nag the human about recently finished idle workers — leave them quietly in the sidebar unless something genuinely needs their decision.
+  - On ` + "`[corgi idle-patrol]`" + ` or ` + "`[corgi morning-digest]`" + `: send **at most ONE** consolidated ` + "`{{BIN}} reply --digest --opt ...`" + ` (Top 5 priority items max, never multiple cards) ONLY when there is an unresolved decision, open question, unmerged worktree branch, or stale (>3d) Corgi sessions to batch-archive. If nothing genuinely needs human attention, stay **completely silent**.
+  - **NEVER auto-stop manually-opened sessions (` + "`by=you`" + `) or sessions marked ` + "`KEEP`" + `**. When offering batch archival of stale Corgi sessions, always list their names so the human can specify exceptions (e.g. "保留 X，其余归档" → run ` + "`{{BIN}} keep X`" + ` and ` + "`{{BIN}} stop`" + ` only on the rest).
 - **Skills**: when the human approves turning a mature how-to into a skill, spawn a worker to author it in the requested repo/personal skill directory, then shrink the note to a pointer.
 - **` + "`BLOCKED:`" + ` report vs. terminal dialog ` + "`BLOCKED`" + `**:
   - A report starting ` + "`BLOCKED:`" + ` means the worker needs information or a new approach — unblock it yourself (` + "`send`" + ` or respawn on another agent/model/machine) unless it crosses the high-risk gate below.

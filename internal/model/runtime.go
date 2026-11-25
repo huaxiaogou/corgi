@@ -92,6 +92,9 @@ type AgentView struct {
 	Run            *[2]string `json:"run,omitempty"`
 	RepoRoot       string     `json:"repo_root,omitempty"`
 	WorktreeBranch string     `json:"worktree_branch,omitempty"`
+	IdleSince      *time.Time `json:"idle_since,omitempty"`
+	Keep           bool       `json:"keep,omitempty"`
+	CreatedBy      string     `json:"created_by,omitempty"`
 }
 
 // QueuedPrompt is one durable human prompt waiting for a busy agent pane or main Corgi chat thread.
@@ -239,6 +242,7 @@ type SuperView struct {
 	Entries         []*Entry        `json:"entries"`
 	Earlier         bool            `json:"earlier,omitempty"`
 	Actions         []*Action       `json:"actions"`
+	SnoozedActions  int             `json:"snoozed_actions,omitempty"`
 	Pinned          []*Entry        `json:"pinned"`
 	Workers         []*Worker       `json:"workers"`
 	Threads         []*Thread       `json:"threads"`

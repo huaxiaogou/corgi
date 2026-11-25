@@ -82,40 +82,47 @@ type Thread struct {
 
 // Worker represents a managed coding agent spawned by Corgi.
 type Worker struct {
-	Name           string     `json:"name"`
-	Kind           string     `json:"kind"` // claude | codex | agy | codebuddy
-	Machine        string     `json:"machine,omitempty"`
-	Cwd            string     `json:"cwd"`
-	Task           string     `json:"task"`
-	Thread         string     `json:"thread"`
-	PaneID         string     `json:"pane_id,omitempty"`
-	WorkspaceID    string     `json:"workspace_id,omitempty"`
-	CreatedBy      string     `json:"created_by"`
-	CreatedAt      time.Time  `json:"created_at"`
-	Model          string     `json:"model,omitempty"`
-	Effort         string     `json:"effort,omitempty"`
-	Run            *[2]string `json:"run,omitempty"`
-	Title          string     `json:"title,omitempty"`
-	Status         string     `json:"status"` // starting | working | waiting | idle | done | blocked | gone | failed
-	LastReport     string     `json:"last_report,omitempty"`
-	ReportAt       time.Time  `json:"report_at,omitempty"`
-	Ended          bool       `json:"ended,omitempty"`
-	Session        string     `json:"session,omitempty"`
-	RepoRoot       string     `json:"repo_root,omitempty"`
-	RepoCommonDir  string     `json:"repo_common_dir,omitempty"`
-	WorktreePath   string     `json:"worktree_path,omitempty"`
-	WorktreeBranch string     `json:"worktree_branch,omitempty"`
-	WorktreeBase   string     `json:"worktree_base,omitempty"`
+	Name            string     `json:"name"`
+	Kind            string     `json:"kind"` // claude | codex | agy | codebuddy
+	Machine         string     `json:"machine,omitempty"`
+	Cwd             string     `json:"cwd"`
+	Task            string     `json:"task"`
+	Thread          string     `json:"thread"`
+	PaneID          string     `json:"pane_id,omitempty"`
+	WorkspaceID     string     `json:"workspace_id,omitempty"`
+	CreatedBy       string     `json:"created_by"`
+	CreatedAt       time.Time  `json:"created_at"`
+	Model           string     `json:"model,omitempty"`
+	Effort          string     `json:"effort,omitempty"`
+	Run             *[2]string `json:"run,omitempty"`
+	Title           string     `json:"title,omitempty"`
+	Status          string     `json:"status"` // starting | working | waiting | idle | done | blocked | gone | failed
+	LastReport      string     `json:"last_report,omitempty"`
+	ReportAt        time.Time  `json:"report_at,omitempty"`
+	Ended           bool       `json:"ended,omitempty"`
+	Session         string     `json:"session,omitempty"`
+	RepoRoot        string     `json:"repo_root,omitempty"`
+	RepoCommonDir   string     `json:"repo_common_dir,omitempty"`
+	WorktreePath    string     `json:"worktree_path,omitempty"`
+	WorktreeBranch  string     `json:"worktree_branch,omitempty"`
+	WorktreeBase    string     `json:"worktree_base,omitempty"`
+	IdleSince       *time.Time `json:"idle_since,omitempty"`
+	IdlePatrolAt    *time.Time `json:"idle_patrol_at,omitempty"`
+	IdlePatrolCount int        `json:"idle_patrol_count,omitempty"`
+	Keep            bool       `json:"keep,omitempty"`
+	SnoozeUntil     *time.Time `json:"snooze_until,omitempty"`
 }
 
 const (
 	ActionKindRouterChoice = "router_choice"
 	ActionKindRouterCheck  = "router_check"
 	ActionKindWorkerDialog = "worker_dialog"
+	ActionKindPatrolDigest = "patrol_digest"
 
 	ActionPending  = "pending"
 	ActionResolved = "resolved"
 	ActionExpired  = "expired"
+	ActionSnoozed  = "snoozed"
 )
 
 // ActionChoice is one selectable button on a unified decision card.
@@ -139,13 +146,15 @@ type Action struct {
 	Summary       string         `json:"summary,omitempty"`
 	Command       string         `json:"command,omitempty"`
 	Choices       []ActionChoice `json:"choices,omitempty"`
-	Status        string         `json:"status"`                // pending | resolved | expired
+	Status        string         `json:"status"`                // pending | resolved | expired | snoozed
+	Category      string         `json:"category,omitempty"`    // blocked | worktree | decision | stale
 	ResolvedBy    string         `json:"resolved_by,omitempty"` // web | wecom | router | cli
 	ChosenKey     string         `json:"chosen_key,omitempty"`
 	ChosenLabel   string         `json:"chosen_label,omitempty"`
 	WeComRespCode string         `json:"wecom_resp_code,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`
 	ResolvedAt    *time.Time     `json:"resolved_at,omitempty"`
+	SnoozeUntil   *time.Time     `json:"snooze_until,omitempty"`
 }
 
 // Timer schedules a one-shot or recurring event into a thread or directly to a worker.
@@ -170,40 +179,84 @@ type Policy struct {
 
 // Settings holds durable Corgi configuration.
 type Settings struct {
-	RouterKind      string   `json:"router_kind"`
-	RouterModel     string   `json:"router_model,omitempty"`
-	RouterEffort    string   `json:"router_effort,omitempty"`
-	WorkerKind      string   `json:"worker_kind"`
-	WorkerModel     string   `json:"worker_model,omitempty"`
-	WorkerEffort    string   `json:"worker_effort,omitempty"`
-	WorkerCwd       string   `json:"worker_cwd"`
-	WorkerMachine   string   `json:"worker_machine,omitempty"`
-	ReplyChars      int      `json:"reply_chars"`
-	StallMinutes    int      `json:"stall_minutes"`
-	RotatePct       int      `json:"rotate_pct,omitempty"`   // 0 = default 60, -1 = never
-	DreamAt         string   `json:"dream_at,omitempty"`     // "HH:MM", "" = "04:00", "off" = disabled
-	NotifyLevel     string   `json:"notify_level,omitempty"` // quiet | normal
-	AskPermissions  bool     `json:"ask_permissions,omitempty"`
-	Paused          bool     `json:"paused,omitempty"`
-	WeComEnabled    bool     `json:"wecom_enabled,omitempty"`
-	WeComBotID      string   `json:"wecom_bot_id,omitempty"`
-	WeComSecret     string   `json:"wecom_secret,omitempty"`
-	WeComAllowUsers []string `json:"wecom_allow_users,omitempty"`
-	WeComDefaultTo  string   `json:"wecom_default_to,omitempty"` // default single-chat userid for proactive push
+	RouterKind        string   `json:"router_kind"`
+	RouterModel       string   `json:"router_model,omitempty"`
+	RouterEffort      string   `json:"router_effort,omitempty"`
+	WorkerKind        string   `json:"worker_kind"`
+	WorkerModel       string   `json:"worker_model,omitempty"`
+	WorkerEffort      string   `json:"worker_effort,omitempty"`
+	WorkerCwd         string   `json:"worker_cwd"`
+	WorkerMachine     string   `json:"worker_machine,omitempty"`
+	ReplyChars        int      `json:"reply_chars"`
+	StallMinutes      int      `json:"stall_minutes"`
+	IdlePatrolMinutes int      `json:"idle_patrol_minutes,omitempty"` // 0 = default 30, -1 = off
+	ActiveHours       string   `json:"active_hours,omitempty"`        // "" = default "09:00-22:30", "24h" = always
+	StaleArchiveDays  int      `json:"stale_archive_days,omitempty"`  // 0 = default 3, -1 = off
+	MorningDigest     *bool    `json:"morning_digest,omitempty"`      // nil = default true
+	RotatePct         int      `json:"rotate_pct,omitempty"`          // 0 = default 60, -1 = never
+	DreamAt           string   `json:"dream_at,omitempty"`            // "HH:MM", "" = "04:00", "off" = disabled
+	NotifyLevel       string   `json:"notify_level,omitempty"`        // quiet | normal
+	AskPermissions    bool     `json:"ask_permissions,omitempty"`
+	Paused            bool     `json:"paused,omitempty"`
+	WeComEnabled      bool     `json:"wecom_enabled,omitempty"`
+	WeComBotID        string   `json:"wecom_bot_id,omitempty"`
+	WeComSecret       string   `json:"wecom_secret,omitempty"`
+	WeComAllowUsers   []string `json:"wecom_allow_users,omitempty"`
+	WeComDefaultTo    string   `json:"wecom_default_to,omitempty"` // default single-chat userid for proactive push
+}
+
+// MorningDigestEnabled reports whether daily morning summary digests are active (defaults to true).
+func (s Settings) MorningDigestEnabled() bool {
+	return s.MorningDigest == nil || *s.MorningDigest
+}
+
+// EffectiveIdlePatrolMinutes returns configured first-patrol threshold (default 30, <=0 means disabled).
+func (s Settings) EffectiveIdlePatrolMinutes() int {
+	if s.IdlePatrolMinutes < 0 {
+		return 0
+	}
+	if s.IdlePatrolMinutes == 0 {
+		return 30
+	}
+	return s.IdlePatrolMinutes
+}
+
+// EffectiveStaleArchiveDays returns configured stale-session prompt threshold in days (default 3, <=0 means disabled).
+func (s Settings) EffectiveStaleArchiveDays() int {
+	if s.StaleArchiveDays < 0 {
+		return 0
+	}
+	if s.StaleArchiveDays == 0 {
+		return 3
+	}
+	return s.StaleArchiveDays
+}
+
+// EffectiveActiveHours returns normalized active hours (defaults to "09:00-22:30").
+func (s Settings) EffectiveActiveHours() string {
+	if s.ActiveHours == "" {
+		return "09:00-22:30"
+	}
+	return s.ActiveHours
 }
 
 // DefaultSettings returns sane defaults for a fresh installation.
 func DefaultSettings(_ string) Settings {
+	on := true
 	return Settings{
-		RouterKind:   "claude",
-		RouterEffort: "low",
-		WorkerKind:   "claude",
-		WorkerCwd:    "~",
-		ReplyChars:   120,
-		StallMinutes: 12,
-		RotatePct:    60,
-		DreamAt:      "04:00",
-		NotifyLevel:  "quiet",
+		RouterKind:        "claude",
+		RouterEffort:      "low",
+		WorkerKind:        "claude",
+		WorkerCwd:         "~",
+		ReplyChars:        120,
+		StallMinutes:      12,
+		IdlePatrolMinutes: 30,
+		ActiveHours:       "09:00-22:30",
+		StaleArchiveDays:  3,
+		MorningDigest:     &on,
+		RotatePct:         60,
+		DreamAt:           "04:00",
+		NotifyLevel:       "quiet",
 	}
 }
 

@@ -119,8 +119,9 @@ func (e *Engine) tick(parent context.Context) {
 	e.deliverQueued(ctx, live)
 	e.drainPanePrompts(ctx, rawAgents)
 
-	// 6. Watchdog for stalled workers.
+	// 6. Watchdog for stalled workers and zero-token gated idle patrol / morning digest.
 	e.checkStalls(ctx, live, now)
+	e.checkIdlePatrol(ctx, live, now)
 }
 
 func deriveFallbackWorkerName(rawKind, paneID string) string {
@@ -284,7 +285,24 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, now 
 			}
 		}
 		prev := w.Status
+		idleChanged := false
+		if li.status == "idle" || li.status == "done" {
+			if w.IdleSince == nil {
+				t := now
+				if (prev == "idle" || prev == "done") && !w.ReportAt.IsZero() && w.ReportAt.Before(now) {
+					t = w.ReportAt
+				}
+				w.IdleSince = &t
+				idleChanged = true
+			}
+		} else if w.IdleSince != nil || w.IdlePatrolCount > 0 || w.SnoozeUntil != nil {
+			resetWorkerIdle(w)
+			idleChanged = true
+		}
 		if li.status == prev && li.pane == w.PaneID {
+			if idleChanged {
+				_ = e.store.UpsertWorker(ctx, w)
+			}
 			continue
 		}
 		w.PaneID = li.pane
@@ -348,6 +366,7 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 	act := &model.Action{
 		ID:           aid,
 		Kind:         model.ActionKindWorkerDialog,
+		Category:     "blocked",
 		Thread:       w.Thread,
 		TargetWorker: w.Name,
 		PaneID:       w.PaneID,

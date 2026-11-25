@@ -86,6 +86,7 @@ func (e *Engine) MemorySnapshot(ctx context.Context, displayDir string) MemorySn
 func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 	entries, earlier, _ := e.store.ListEntries(ctx, thread, 200)
 	actions, _ := e.store.ListPendingActions(ctx)
+	snoozed, _ := e.store.ListSnoozedActions(ctx)
 	pinned, _ := e.store.ListPinnedEntries(ctx, 50)
 	workers, _ := e.store.ListWorkers(ctx)
 	threads, _ := e.store.ListThreads(ctx, 100)
@@ -202,6 +203,7 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 		Entries:         entries,
 		Earlier:         earlier,
 		Actions:         actions,
+		SnoozedActions:  len(snoozed),
 		Pinned:          pinned,
 		Workers:         activeWorkers,
 		Threads:         threads,

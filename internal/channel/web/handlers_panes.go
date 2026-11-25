@@ -127,9 +127,15 @@ func (s *Server) buildPaneState(ctx context.Context) model.PaneState {
 			if wk := workerByPane[p.ID]; wk != nil {
 				v.WorktreeBranch = wk.WorktreeBranch
 				v.RepoRoot = wk.RepoRoot
+				v.IdleSince = wk.IdleSince
+				v.Keep = wk.Keep
+				v.CreatedBy = wk.CreatedBy
 			} else if wk := workerByName[v.Name]; wk != nil {
 				v.WorktreeBranch = wk.WorktreeBranch
 				v.RepoRoot = wk.RepoRoot
+				v.IdleSince = wk.IdleSince
+				v.Keep = wk.Keep
+				v.CreatedBy = wk.CreatedBy
 			}
 			st.Agents = append(st.Agents, v)
 		} else {

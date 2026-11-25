@@ -175,4 +175,25 @@ func TestCmdReplyAndSpawnInterspersedFlags(t *testing.T) {
 	if gotBody["subscribe"] != true {
 		t.Fatalf("subscribe = %#v", gotBody["subscribe"])
 	}
+
+	if err := Run(dir, "reply", []string{"早报汇总", "--digest", "--worker", "taihu-plan", "--opt", "按方案 A", "--opt", "稍后"}); err != nil {
+		t.Fatalf("Run reply --digest failed: %v", err)
+	}
+	if gotBody["digest"] != true || gotBody["worker"] != "taihu-plan" {
+		t.Fatalf("expected digest=true worker=taihu-plan, got %#v", gotBody)
+	}
+
+	if err := Run(dir, "keep", []string{"taihu-plan"}); err != nil {
+		t.Fatalf("Run keep failed: %v", err)
+	}
+	if gotPath != "/api/super/workers/taihu-plan/keep" || gotBody["keep"] != true {
+		t.Fatalf("keep got path=%q body=%#v", gotPath, gotBody)
+	}
+
+	if err := Run(dir, "keep", []string{"taihu-plan", "--off"}); err != nil {
+		t.Fatalf("Run keep --off failed: %v", err)
+	}
+	if gotPath != "/api/super/workers/taihu-plan/keep" || gotBody["keep"] != false {
+		t.Fatalf("keep --off got path=%q body=%#v", gotPath, gotBody)
+	}
 }

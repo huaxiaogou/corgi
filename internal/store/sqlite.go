@@ -281,6 +281,15 @@ func (s *Store) LoadSettings(ctx context.Context, home string) (model.Settings, 
 	if st.StallMinutes <= 0 {
 		st.StallMinutes = 12
 	}
+	if st.IdlePatrolMinutes == 0 {
+		st.IdlePatrolMinutes = 30
+	}
+	if st.ActiveHours == "" {
+		st.ActiveHours = "09:00-22:30"
+	}
+	if st.StaleArchiveDays == 0 {
+		st.StaleArchiveDays = 3
+	}
 	if st.NotifyLevel != "normal" {
 		st.NotifyLevel = "quiet"
 	}

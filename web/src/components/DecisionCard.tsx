@@ -1,14 +1,16 @@
 import { useState } from "react";
+import { Clock } from "lucide-react";
 import type { Action } from "../types/api";
 
 interface Props {
   action: Action;
   onResolve: (actionId: string, choiceKey: string) => Promise<void>;
   onDismiss?: (actionId: string) => Promise<void>;
+  onSnooze?: (actionId: string) => Promise<void>;
   onOpenWorker?: (workerName: string) => void;
 }
 
-export function DecisionCard({ action, onResolve, onDismiss, onOpenWorker }: Props) {
+export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWorker }: Props) {
   const [busy, setBusy] = useState(false);
 
   const pick = async (choiceKey: string) => {
@@ -31,15 +33,32 @@ export function DecisionCard({ action, onResolve, onDismiss, onOpenWorker }: Pro
     }
   };
 
+  const snooze = async () => {
+    if (!onSnooze || busy || action.status !== "pending") return;
+    setBusy(true);
+    try {
+      await onSnooze(action.id);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const badgeLabel =
+    action.kind === "patrol_digest"
+      ? action.target_worker
+        ? `巡检简报 · ${action.target_worker}`
+        : "空闲巡检 / 晨间简报"
+      : action.target_worker
+        ? `${action.target_worker} 需要你确认`
+        : "需要你拍板";
+
   return (
     <div className="card-floating rounded-2xl overflow-hidden">
       <div className="px-5 pt-4 pb-3 space-y-2">
         <div className="flex items-center justify-between gap-2 text-xs">
           <div className="flex items-center gap-2 min-w-0">
             <span className="w-2 h-2 rounded-full shrink-0" style={{ background: "var(--attn)" }} />
-            <span className="font-medium truncate">
-              {action.target_worker ? `${action.target_worker} 需要你确认` : "需要你拍板"}
-            </span>
+            <span className="font-medium truncate">{badgeLabel}</span>
           </div>
           {action.target_worker && onOpenWorker && (
             <button
@@ -54,7 +73,7 @@ export function DecisionCard({ action, onResolve, onDismiss, onOpenWorker }: Pro
 
         <div className="text-[15px] font-semibold leading-snug text-primary">{action.title}</div>
         {action.summary && action.summary !== action.title && (
-          <p className="text-[13px] leading-relaxed text-secondary">{action.summary}</p>
+          <p className="text-[13px] leading-relaxed text-secondary whitespace-pre-line">{action.summary}</p>
         )}
         {action.command && (
           <pre className="px-3.5 py-2.5 rounded-xl text-[12.5px] font-mono-code overflow-x-auto surface-rail border border-hairline">
@@ -92,16 +111,31 @@ export function DecisionCard({ action, onResolve, onDismiss, onOpenWorker }: Pro
             </button>
           </div>
         ) : (
-          onDismiss && (
-            <div className="px-5 py-2 flex justify-end">
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void dismiss()}
-                className="text-[11.5px] text-muted hover:underline cursor-pointer disabled:opacity-50"
-              >
-                暂不处理（忽略）
-              </button>
+          (onSnooze || onDismiss) && (
+            <div className="px-5 py-2 flex items-center justify-between gap-3">
+              {onSnooze ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void snooze()}
+                  className="inline-flex items-center gap-1.5 text-[11.5px] text-secondary hover:text-primary cursor-pointer disabled:opacity-50"
+                >
+                  <Clock className="w-3.5 h-3.5" strokeWidth={1.7} />
+                  <span>明天再提醒</span>
+                </button>
+              ) : (
+                <span />
+              )}
+              {onDismiss && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void dismiss()}
+                  className="text-[11.5px] text-muted hover:underline cursor-pointer disabled:opacity-50"
+                >
+                  暂不处理（忽略）
+                </button>
+              )}
             </div>
           )
         )}

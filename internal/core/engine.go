@@ -116,6 +116,7 @@ type Engine struct {
 	lastAnswer       map[string]time.Time
 	lastTrust        map[string]time.Time
 	idleCheckAt      map[string]time.Time
+	lastPatrolScan   time.Time
 	noAgent          map[string]time.Time
 	rereadTrigID     string
 
@@ -219,6 +220,21 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 		}
 		if ns.StallMinutes <= 0 {
 			ns.StallMinutes = 12
+		}
+		if ns.IdlePatrolMinutes < 0 {
+			ns.IdlePatrolMinutes = -1
+		} else if ns.IdlePatrolMinutes == 0 {
+			ns.IdlePatrolMinutes = 30
+		} else if ns.IdlePatrolMinutes > 480 {
+			ns.IdlePatrolMinutes = 480
+		}
+		ns.ActiveHours = NormalizeActiveHours(ns.ActiveHours)
+		if ns.StaleArchiveDays < 0 {
+			ns.StaleArchiveDays = -1
+		} else if ns.StaleArchiveDays == 0 {
+			ns.StaleArchiveDays = 3
+		} else if ns.StaleArchiveDays > 60 {
+			ns.StaleArchiveDays = 60
 		}
 		if ns.NotifyLevel != "normal" {
 			ns.NotifyLevel = "quiet"
@@ -405,26 +421,51 @@ func (e *Engine) buildDispatchHint(req SayRequest) string {
 	return "[The human picked where this runs: spawn with " + strings.Join(hints, " ") + "]"
 }
 
+// ReplyRequest describes a Corgi outbound reply with optional quick-choice buttons, review check, or digest replacement.
+type ReplyRequest struct {
+	Thread   string
+	Text     string
+	ReID     string
+	Options  []string
+	Check    bool
+	Digest   bool
+	Worker   string
+	Category string
+}
+
 // Reply records Corgi's outbound message and creates a synchronized Action if options/check are set.
 func (e *Engine) Reply(ctx context.Context, thread, text, reID string, options []string, check bool) (*model.Entry, *model.Action, string, error) {
-	text = strings.TrimSpace(text)
+	return e.ReplyWithMeta(ctx, ReplyRequest{
+		Thread:  thread,
+		Text:    text,
+		ReID:    reID,
+		Options: options,
+		Check:   check,
+	})
+}
+
+// ReplyWithMeta records Corgi's outbound message and creates a synchronized Action,
+// replacing any prior pending patrol digest card when req.Digest is true.
+func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.Entry, *model.Action, string, error) {
+	text := strings.TrimSpace(req.Text)
 	if text == "" {
 		return nil, nil, "", fmt.Errorf("empty reply")
 	}
+	thread := req.Thread
 	if thread == "" {
 		thread = model.MainThread
 	}
-	opts := cleanOptions(options)
+	opts := cleanOptions(req.Options)
 
 	var quote *model.Quote
-	if reID != "" {
-		if prev, err := e.store.GetEntry(ctx, reID); err == nil {
+	if req.ReID != "" {
+		if prev, err := e.store.GetEntry(ctx, req.ReID); err == nil {
 			who := "你"
 			if prev.Role != "user" {
 				who = prev.Role
 			}
 			quote = &model.Quote{Entry: prev.ID, Who: who, Text: oneLineClip(prev.Text, 120)}
-		} else if tr, err := e.store.GetTrigger(ctx, reID); err == nil {
+		} else if tr, err := e.store.GetTrigger(ctx, req.ReID); err == nil {
 			quote = &model.Quote{Who: tr.From, Text: oneLineClip(tr.Text, 120)}
 		}
 	}
@@ -444,11 +485,11 @@ func (e *Engine) Reply(ctx context.Context, thread, text, reID string, options [
 		At:      now,
 		Re:      quote,
 		Options: opts,
-		Check:   check,
+		Check:   req.Check,
 	}
 
 	var action *model.Action
-	if len(opts) > 0 || check {
+	if len(opts) > 0 || req.Check {
 		aid, _, err := e.store.NextID(ctx, "a")
 		if err != nil {
 			return nil, nil, "", err
@@ -466,16 +507,32 @@ func (e *Engine) Reply(ctx context.Context, thread, text, reID string, options [
 		} else {
 			choices = []model.ActionChoice{{Key: "1", Label: "已确认"}}
 		}
+		if req.Digest {
+			kind = model.ActionKindPatrolDigest
+			_ = e.store.ExpireActionsByKind(ctx, thread, model.ActionKindPatrolDigest)
+		}
+		cat := strings.TrimSpace(req.Category)
+		if cat == "" {
+			if req.Digest {
+				cat = "decision"
+			} else if len(opts) > 0 {
+				cat = "decision"
+			} else {
+				cat = "decision"
+			}
+		}
 		action = &model.Action{
-			ID:        aid,
-			Kind:      kind,
-			Thread:    thread,
-			EntryID:   entry.ID,
-			Title:     oneLineClip(text, 64),
-			Summary:   text,
-			Choices:   choices,
-			Status:    model.ActionPending,
-			CreatedAt: now,
+			ID:           aid,
+			Kind:         kind,
+			Thread:       thread,
+			EntryID:      entry.ID,
+			TargetWorker: strings.TrimSpace(req.Worker),
+			Category:     cat,
+			Title:        oneLineClip(text, 64),
+			Summary:      text,
+			Choices:      choices,
+			Status:       model.ActionPending,
+			CreatedAt:    now,
 		}
 		entry.ActionID = aid
 		if err := e.store.InsertAction(ctx, action); err != nil {

@@ -499,3 +499,45 @@ func TestLaunchAgentRecoversFromTransientPaneBusy(t *testing.T) {
 		t.Fatalf("expected workspace not closed after retry recovery, got %d closes", got)
 	}
 }
+
+func TestSnoozeActionAndKeepWorkerEndpoints(t *testing.T) {
+	srv, master := newTestServer(t)
+	h := srv.Routes()
+	ctx := context.Background()
+
+	_ = srv.Store.UpsertWorker(ctx, &model.Worker{
+		Name: "taihu-plan", Kind: "codebuddy", Cwd: srv.Home, Thread: model.MainThread,
+		CreatedBy: "corgi", CreatedAt: time.Now(), Status: "idle",
+	})
+
+	// 1. Toggle Keep on worker.
+	kReq := httptest.NewRequest(http.MethodPost, "/api/super/workers/taihu-plan/keep", bytes.NewBufferString(`{"keep":true}`))
+	kReq.Header.Set("Authorization", "Bearer "+master)
+	kRec := httptest.NewRecorder()
+	h.ServeHTTP(kRec, kReq)
+	if kRec.Code != http.StatusOK || !bytes.Contains(kRec.Body.Bytes(), []byte(`"keep":true`)) {
+		t.Fatalf("keep endpoint failed: code=%d body=%s", kRec.Code, kRec.Body.String())
+	}
+	if wk, err := srv.Store.GetWorker(ctx, "taihu-plan"); err != nil || !wk.Keep {
+		t.Fatalf("expected worker.Keep=true persisted, got wk=%+v err=%v", wk, err)
+	}
+
+	// 2. Snooze a pending digest action.
+	_, act, _, err := srv.Engine.ReplyWithMeta(ctx, core.ReplyRequest{
+		Thread: model.MainThread, Text: "巡检汇总", Options: []string{"继续", "暂缓"}, Digest: true, Worker: "taihu-plan",
+	})
+	if err != nil || act == nil {
+		t.Fatalf("ReplyWithMeta failed: %v", err)
+	}
+	sReq := httptest.NewRequest(http.MethodPost, "/api/super/actions/"+act.ID+"/snooze", bytes.NewBufferString(`{}`))
+	sReq.Header.Set("Authorization", "Bearer "+master)
+	sRec := httptest.NewRecorder()
+	h.ServeHTTP(sRec, sReq)
+	if sRec.Code != http.StatusOK || !bytes.Contains(sRec.Body.Bytes(), []byte(`"status":"snoozed"`)) {
+		t.Fatalf("snooze endpoint failed: code=%d body=%s", sRec.Code, sRec.Body.String())
+	}
+	snap := srv.Engine.Snapshot(ctx, model.MainThread)
+	if len(snap.Actions) != 0 || snap.SnoozedActions != 1 {
+		t.Fatalf("expected 0 pending & 1 snoozed in snapshot, got actions=%d snoozed=%d", len(snap.Actions), snap.SnoozedActions)
+	}
+}

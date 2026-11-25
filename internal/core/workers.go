@@ -477,6 +477,10 @@ func (e *Engine) SendToWorker(ctx context.Context, workerName, thread, text stri
 	if thread == "" {
 		thread = wk.Thread
 	}
+	if wk.IdleSince != nil || wk.IdlePatrolCount > 0 || wk.SnoozeUntil != nil {
+		resetWorkerIdle(wk)
+		_ = e.store.UpsertWorker(ctx, wk)
+	}
 	return e.Ingest(ctx, "router", thread, model.RouterName, text, "", wk.Name, wk.Name)
 }
 
@@ -666,7 +670,7 @@ func (e *Engine) ResolveAction(ctx context.Context, actionID, resolvedBy, choice
 		e.lastAnswer[resolved.PaneID] = time.Now()
 		e.mu.Unlock()
 		e.addEvent(ctx, resolved.Thread, fmt.Sprintf("已为 %s 选择：%s（via %s）", resolved.TargetWorker, chosenLabel, resolvedBy), resolved.TargetWorker, "info")
-	case model.ActionKindRouterChoice, model.ActionKindRouterCheck:
+	case model.ActionKindRouterChoice, model.ActionKindRouterCheck, model.ActionKindPatrolDigest:
 		_, _, _ = e.Say(ctx, SayRequest{
 			Thread:    resolved.Thread,
 			Channel:   resolvedBy,

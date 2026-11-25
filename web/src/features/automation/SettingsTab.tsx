@@ -204,6 +204,72 @@ export function SettingsTab({
         </label>
       </section>
 
+      <section className="p-4 rounded-xl border border-hairline space-y-3">
+        <div>
+          <div className="font-semibold text-sm">空闲巡检与晨间待办简报</div>
+          <div className="text-[11.5px] text-muted mt-0.5">
+            Hub 先做零成本门控，仅在活跃时段内检查持续空闲会话；无待办则静默跳过，多任务自动合并为 1 条摘要卡。
+          </div>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <label className="space-y-1">
+            <span className="text-muted">首次空闲巡检 (分钟，-1 关闭)</span>
+            <input
+              type="number"
+              min={-1}
+              max={480}
+              value={settings.idle_patrol_minutes ?? 30}
+              onChange={(e) => onChange({ ...settings, idle_patrol_minutes: Number(e.target.value) })}
+              className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="text-muted">活跃免打扰时段 (如 09:00-22:30 / 24h)</span>
+            <input
+              placeholder="09:00-22:30"
+              value={settings.active_hours ?? "09:00-22:30"}
+              onChange={(e) => onChange({ ...settings, active_hours: e.target.value })}
+              className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="text-muted">旧会话清理提示 (天，-1 关闭)</span>
+            <input
+              type="number"
+              min={-1}
+              max={60}
+              value={settings.stale_archive_days ?? 3}
+              onChange={(e) => onChange({ ...settings, stale_archive_days: Number(e.target.value) })}
+              className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
+            />
+          </label>
+        </div>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={settings.morning_digest !== false}
+            onChange={(e) => onChange({ ...settings, morning_digest: e.target.checked })}
+          />
+          <span>开启每日晨间汇总简报（在活跃时段起点汇总跨天待办与超期旧会话，全部干净时自动跳过）</span>
+        </label>
+        <div className="px-3 py-2 rounded-lg surface-rail border border-hairline text-[11.5px] text-secondary space-y-0.5">
+          <div>
+            当天退避：空闲满{" "}
+            <span className="font-mono-code text-primary">
+              {(settings.idle_patrol_minutes ?? 30) < 0 ? "已关闭" : `${settings.idle_patrol_minutes || 30}m`}
+            </span>{" "}
+            第 1 次 → 隔 <span className="font-mono-code text-primary">4h</span> 第 2 次 → 当天静默
+          </div>
+          <div>
+            跨天防忘：次日{" "}
+            <span className="font-mono-code text-primary">
+              {(settings.active_hours || "09:00-22:30").split("-")[0] || "09:00"}
+            </span>{" "}
+            发唯一 1 条晨报；手动会话与常驻保留会话永久豁免归档
+          </div>
+        </div>
+      </section>
+
       <button type="button" onClick={() => void onSave()} className="px-4 py-2 rounded-lg btn-accent font-medium cursor-pointer">
         保存设置
       </button>

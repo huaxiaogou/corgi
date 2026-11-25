@@ -323,3 +323,119 @@ func (s *Store) ExpireWorkerActions(ctx context.Context, workerName string) erro
 	}
 	return nil
 }
+
+// SnoozeAction atomically transitions a pending action to snoozed until the given time.
+func (s *Store) SnoozeAction(ctx context.Context, id string, until time.Time) (*model.Action, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin snooze action: %w", err)
+	}
+	defer tx.Rollback()
+
+	var raw, status string
+	err = tx.QueryRowContext(ctx, `SELECT status, data FROM actions WHERE id = ?`, id).Scan(&status, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read action %s: %w", id, err)
+	}
+	if status != model.ActionPending {
+		return nil, ErrActionAlreadyResolved
+	}
+	var a model.Action
+	if err := json.Unmarshal([]byte(raw), &a); err != nil {
+		return nil, fmt.Errorf("decode action %s: %w", id, err)
+	}
+	a.Status = model.ActionSnoozed
+	a.SnoozeUntil = &until
+	updated, err := mustJSON(&a)
+	if err != nil {
+		return nil, fmt.Errorf("encode action %s: %w", id, err)
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE actions SET status = ?, data = ?
+		WHERE id = ? AND status = ?
+	`, model.ActionSnoozed, updated, id, model.ActionPending)
+	if err != nil {
+		return nil, fmt.Errorf("snooze action %s: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrActionAlreadyResolved
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit snooze action %s: %w", id, err)
+	}
+	return &a, nil
+}
+
+// ListSnoozedActions returns all snoozed actions awaiting re-surface.
+func (s *Store) ListSnoozedActions(ctx context.Context) ([]*model.Action, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT data FROM actions WHERE status = ? ORDER BY created_at ASC`, model.ActionSnoozed)
+	if err != nil {
+		return nil, fmt.Errorf("list snoozed actions: %w", err)
+	}
+	defer rows.Close()
+	out := []*model.Action{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var a model.Action
+		if json.Unmarshal([]byte(raw), &a) == nil {
+			out = append(out, &a)
+		}
+	}
+	return out, rows.Err()
+}
+
+// WakeDueSnoozedActions moves any snoozed action whose snooze_until <= now back to pending.
+func (s *Store) WakeDueSnoozedActions(ctx context.Context, now time.Time) ([]*model.Action, error) {
+	snoozed, err := s.ListSnoozedActions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var woken []*model.Action
+	for _, a := range snoozed {
+		if a.SnoozeUntil != nil && a.SnoozeUntil.After(now) {
+			continue
+		}
+		a.Status = model.ActionPending
+		a.SnoozeUntil = nil
+		updated, err := mustJSON(a)
+		if err != nil {
+			continue
+		}
+		res, err := s.db.ExecContext(ctx, `UPDATE actions SET status = ?, data = ? WHERE id = ? AND status = ?`,
+			model.ActionPending, updated, a.ID, model.ActionSnoozed)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				woken = append(woken, a)
+			}
+		}
+	}
+	return woken, nil
+}
+
+// ExpireActionsByKind expires any pending actions of a specific kind in thread (e.g. replacing prior patrol digest cards).
+func (s *Store) ExpireActionsByKind(ctx context.Context, thread, kind string) error {
+	pending, err := s.ListPendingActions(ctx)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	for _, a := range pending {
+		if a.Kind != kind || (thread != "" && a.Thread != thread) {
+			continue
+		}
+		a.Status = model.ActionExpired
+		a.ResolvedBy = "replaced"
+		a.ResolvedAt = &now
+		if updated, err := mustJSON(a); err == nil {
+			_, _ = s.db.ExecContext(ctx, `UPDATE actions SET status = ?, data = ?, resolved_at = ? WHERE id = ? AND status = ?`,
+				model.ActionExpired, updated, now.Unix(), a.ID, model.ActionPending)
+		}
+	}
+	return nil
+}
