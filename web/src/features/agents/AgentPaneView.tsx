@@ -24,6 +24,9 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
   }, [pane.pane_id]);
 
   useEffect(() => {
+    setLogText("");
+    setMessages([]);
+    setApproval(null);
     const url =
       mode === "chat"
         ? `/api/panes/${encodeURIComponent(pane.pane_id)}/chat`

@@ -11,17 +11,9 @@ interface Props {
 }
 
 const KEY_MAP: Record<string, string> = {
-  "\x1b[A": "up",
-  "\x1b[B": "down",
-  "\x1b[C": "right",
-  "\x1b[D": "left",
-  "\r": "enter",
-  "\x1b": "esc",
-  "\t": "tab",
-  "\x7f": "backspace",
-  "\x03": "ctrl+c",
-  "\x04": "ctrl+d",
-  "\x0c": "ctrl+l",
+  "\x1b[A": "up", "\x1b[B": "down", "\x1b[C": "right", "\x1b[D": "left",
+  "\r": "enter", "\x1b": "esc", "\t": "tab", "\x7f": "backspace",
+  "\x03": "ctrl+c", "\x04": "ctrl+d", "\x0c": "ctrl+l",
 };
 
 // eslint-disable-next-line no-control-regex
@@ -49,7 +41,7 @@ function readThemeColors() {
   const fg = cs.getPropertyValue("--fg").trim();
   const cursor = cs.getPropertyValue("--fg-2").trim();
   const selBg = cs.getPropertyValue("--accent").trim();
-  const selFg = cs.getPropertyValue("--accent-fg").trim();
+  const selFg = cs.getPropertyValue("--on-accent").trim();
   return { background: bg, foreground: fg, cursor, selectionBackground: selBg, selectionForeground: selFg };
 }
 
@@ -58,6 +50,10 @@ export function TerminalScreen({ frame, onKey, onText, onToast }: Props) {
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const latestFrameRef = useRef(frame);
+  const lastRenderedRef = useRef<string | null>(null);
+  const renderingRef = useRef(false);
+  const hadSelectionRef = useRef(false);
+  const dirtyFrameRef = useRef(false);
   const onKeyRef = useRef(onKey);
   const onTextRef = useRef(onText);
   const onToastRef = useRef(onToast);
@@ -65,6 +61,19 @@ export function TerminalScreen({ frame, onKey, onText, onToast }: Props) {
   onTextRef.current = onText;
   onToastRef.current = onToast;
   latestFrameRef.current = frame;
+
+  const renderFrame = (term: Terminal, text: string) => {
+    if (renderingRef.current) return;
+    renderingRef.current = true;
+    try {
+      term.reset();
+      term.write(text || "等待终端输出…");
+      lastRenderedRef.current = text;
+      dirtyFrameRef.current = false;
+    } finally {
+      renderingRef.current = false;
+    }
+  };
 
   const urls = useMemo(() => extractURLs(frame), [frame]);
 
@@ -86,6 +95,9 @@ export function TerminalScreen({ frame, onKey, onText, onToast }: Props) {
     fit.fit();
     termRef.current = term;
     fitRef.current = fit;
+    lastRenderedRef.current = null;
+    hadSelectionRef.current = false;
+    dirtyFrameRef.current = false;
 
     // Allow Cmd+C / Ctrl+Shift+C to copy selected terminal text instead of sending Ctrl+C.
     term.attachCustomKeyEventHandler((ev) => {
@@ -99,10 +111,14 @@ export function TerminalScreen({ frame, onKey, onText, onToast }: Props) {
       return true;
     });
 
+    // Only flush a deferred frame when user clears an actual selection; guard against reset() re-entrancy.
     const selSub = term.onSelectionChange(() => {
-      if (!term.hasSelection() && latestFrameRef.current) {
-        term.reset();
-        term.write(latestFrameRef.current);
+      if (renderingRef.current) return;
+      const hasSel = term.hasSelection();
+      const wasSel = hadSelectionRef.current;
+      hadSelectionRef.current = hasSel;
+      if (wasSel && !hasSel && dirtyFrameRef.current) {
+        renderFrame(term, latestFrameRef.current);
       }
     });
 
@@ -118,18 +134,13 @@ export function TerminalScreen({ frame, onKey, onText, onToast }: Props) {
     });
 
     const ro = new ResizeObserver(() => {
-      try {
-        fit.fit();
-      } catch {
-        // ignore resize race on unmount
-      }
+      try { fit.fit(); } catch { /* ignore unmount race */ }
     });
     ro.observe(el);
-
-    const mo = new MutationObserver(() => {
-      term.options.theme = readThemeColors();
-    });
+    const mo = new MutationObserver(() => { term.options.theme = readThemeColors(); });
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+    renderFrame(term, latestFrameRef.current);
 
     return () => {
       selSub.dispose();
@@ -144,18 +155,13 @@ export function TerminalScreen({ frame, onKey, onText, onToast }: Props) {
 
   useEffect(() => {
     const term = termRef.current;
-    if (!term || term.hasSelection()) return;
-    term.reset();
-    if (frame) {
-      term.write(frame);
-    } else {
-      term.write("等待终端输出…");
+    if (!term) return;
+    if (term.hasSelection()) {
+      dirtyFrameRef.current = true;
+      return;
     }
-    try {
-      fitRef.current?.fit();
-    } catch {
-      // ignore
-    }
+    if (frame === lastRenderedRef.current) return;
+    renderFrame(term, frame);
   }, [frame]);
 
   const copyLink = async (u: string) => {
