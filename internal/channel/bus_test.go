@@ -2,6 +2,9 @@ package channel
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/kiperjing/corgi/internal/channel/wecom"
 	"github.com/kiperjing/corgi/internal/core"
 	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
@@ -145,5 +150,217 @@ func TestWebGroupSyncReportAttachmentAndWorkerTag(t *testing.T) {
 	}
 	if len(files) != 1 || files[0].chat != "grp-88" || files[0].name != "perf-report.md" || !strings.Contains(files[0].body, "All checks green") {
 		t.Fatalf("expected report attachment pushed to WeCom, got %+v", files)
+	}
+}
+
+func TestHandleWeComCardClickResolvesAndUpdatesCard(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"claude"})
+	eng, err := core.NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type wsFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers map[string]any `json:"headers"`
+		Body    map[string]any `json:"body"`
+	}
+	sentCh := make(chan wsFrame, 4)
+	updateCh := make(chan wsFrame, 4)
+	serverConnCh := make(chan *websocket.Conn, 1)
+
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+		select {
+		case serverConnCh <- conn:
+		default:
+		}
+		for {
+			_, data, err := conn.Read(r.Context())
+			if err != nil {
+				return
+			}
+			var f wsFrame
+			if json.Unmarshal(data, &f) != nil {
+				continue
+			}
+			reqID, _ := f.Headers["req_id"].(string)
+			switch f.Cmd {
+			case "aibot_send_msg":
+				sentCh <- f
+				ack, _ := json.Marshal(map[string]any{
+					"headers": map[string]any{"req_id": reqID},
+					"errcode": 0,
+					"errmsg":  "ok",
+				})
+				_ = conn.Write(r.Context(), websocket.MessageText, ack)
+			case "aibot_respond_update_msg":
+				updateCh <- f
+				ack, _ := json.Marshal(map[string]any{
+					"headers": map[string]any{"req_id": reqID},
+					"errcode": 0,
+					"errmsg":  "ok",
+				})
+				_ = conn.Write(r.Context(), websocket.MessageText, ack)
+			}
+		}
+	}))
+	defer wsSrv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var bus *Bus
+	wc := wecom.NewClient(wecom.Config{
+		GatewayURL: "ws" + strings.TrimPrefix(wsSrv.URL, "http"),
+		BotID:      "bot-1",
+		Secret:     "sec-1",
+		AllowUsers: []string{"owner_01"},
+		DefaultTo:  "owner_01",
+	}, wecom.Handlers{
+		OnCardClick: func(c context.Context, ev wecom.CardClickEvent) { bus.HandleWeComCardClick(c, ev) },
+	}, nil)
+	bus = NewBus(eng, wc, nil)
+	go wc.Run(ctx)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !wc.Online() && time.Now().Before(deadline) {
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !wc.Online() {
+		t.Fatal("wecom client did not come online")
+	}
+	srvConn := <-serverConnCh
+
+	// 1. Reply with long summary + long options triggers immediate WeCom template card push.
+	longSummary := "登录接口并发刷新 token 存在竞态。建议先加分布式锁并补充并发回归测试，确认按哪种方案推进？"
+	opts := []string{
+		"先加分布式锁并补齐并发回归测试（推荐）",
+		"仅记录告警日志，暂不改动登录核心链路",
+	}
+	_, act, _, err := eng.Reply(ctx, model.MainThread, longSummary, "", opts, false)
+	if err != nil || act == nil {
+		t.Fatalf("eng.Reply failed: act=%v err=%v", act, err)
+	}
+
+	select {
+	case f := <-sentCh:
+		tc, _ := f.Body["template_card"].(map[string]any)
+		if tc["card_type"] != "button_interaction" || tc["task_id"] != act.ID {
+			t.Fatalf("unexpected pushed card: %+v", tc)
+		}
+		if _, ok := tc["horizontal_content_list"]; !ok {
+			t.Fatalf("expected expanded options in horizontal_content_list, got %+v", tc)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pushed action card")
+	}
+
+	// 2. User clicks option 2 via aibot_event_callback -> Action resolved in DB + card updated in-place.
+	click1, _ := json.Marshal(map[string]any{
+		"cmd":     "aibot_event_callback",
+		"headers": map[string]any{"req_id": "cb-click-1"},
+		"body": map[string]any{
+			"chattype": "single",
+			"from":     map[string]any{"userid": "owner_01"},
+			"event": map[string]any{
+				"eventtype": "template_card_event",
+				"template_card_event": map[string]any{
+					"task_id":   act.ID,
+					"event_key": act.ID + ":2",
+				},
+			},
+		},
+	})
+	if err := srvConn.Write(ctx, websocket.MessageText, click1); err != nil {
+		t.Fatalf("write click1 callback: %v", err)
+	}
+
+	select {
+	case upd := <-updateCh:
+		if upd.Headers["req_id"] != "cb-click-1" {
+			t.Fatalf("expected req_id cb-click-1, got %+v", upd.Headers)
+		}
+		if upd.Body["response_type"] != "update_template_card" {
+			t.Fatalf("unexpected response_type: %+v", upd.Body)
+		}
+		tc, _ := upd.Body["template_card"].(map[string]any)
+		src, _ := tc["source"].(map[string]any)
+		if tc["card_type"] != "button_interaction" || tc["task_id"] != act.ID || src["desc"] != "Corgi · 已拍板" {
+			t.Fatalf("unexpected updated template_card: %+v", tc)
+		}
+		if rt, _ := tc["replace_text"].(string); !strings.Contains(rt, "仅记录告警") {
+			t.Fatalf("expected replace_text to reflect chosen option, got %q", rt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for card update after click1")
+	}
+
+	gotAct, err := st.GetAction(ctx, act.ID)
+	if err != nil {
+		t.Fatalf("GetAction: %v", err)
+	}
+	if gotAct.Status != model.ActionResolved || gotAct.ResolvedBy != "wecom" || gotAct.ChosenKey != "2" || gotAct.ChosenLabel != opts[1] || gotAct.ResolvedAt == nil {
+		t.Fatalf("action was not properly recorded as resolved: %+v", gotAct)
+	}
+	entries, _, err := st.ListEntries(ctx, model.MainThread, 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	userReplies := 0
+	for _, e := range entries {
+		if e.Role == "user" && e.Channel == "wecom" && e.Text == opts[1] {
+			userReplies++
+		}
+	}
+	if userReplies != 1 {
+		t.Fatalf("expected 1 recorded user reply entry for choice, got %d (entries=%+v)", userReplies, entries)
+	}
+
+	// 3. Re-clicking an already-resolved card still refreshes the stale card in-place without double-recording.
+	click2, _ := json.Marshal(map[string]any{
+		"cmd":     "aibot_event_callback",
+		"headers": map[string]any{"req_id": "cb-click-2"},
+		"body": map[string]any{
+			"chattype": "single",
+			"from":     map[string]any{"userid": "owner_01"},
+			"event": map[string]any{
+				"eventtype": "template_card_event",
+				"task_id":   act.ID,
+				"event_key": act.ID + ":1",
+			},
+		},
+	})
+	if err := srvConn.Write(ctx, websocket.MessageText, click2); err != nil {
+		t.Fatalf("write click2 callback: %v", err)
+	}
+
+	select {
+	case upd := <-updateCh:
+		if upd.Headers["req_id"] != "cb-click-2" {
+			t.Fatalf("expected req_id cb-click-2 on stale card refresh, got %+v", upd.Headers)
+		}
+		tc, _ := upd.Body["template_card"].(map[string]any)
+		if rt, _ := tc["replace_text"].(string); !strings.Contains(rt, "仅记录告警") {
+			t.Fatalf("stale refresh should preserve original choice 2, got %q", rt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stale card refresh on click2")
+	}
+
+	entries2, _, _ := st.ListEntries(ctx, model.MainThread, 10)
+	if len(entries2) != len(entries) {
+		t.Fatalf("second click must not create duplicate reply entries: before=%d after=%d", len(entries), len(entries2))
 	}
 }

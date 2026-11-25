@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/kiperjing/corgi/internal/model"
 )
 
 const DefaultGatewayURL = "wss://openws.work.weixin.qq.com"
@@ -32,8 +31,10 @@ type IncomingMessage struct {
 // CardClickEvent is a normalized allowlisted template card button click.
 type CardClickEvent struct {
 	ReqID        string
+	ChatType     string // single | group
 	ChatID       string
 	FromUser     string
+	TaskID       string
 	ActionID     string
 	ChoiceKey    string
 	ResponseCode string
@@ -209,9 +210,10 @@ func (c *Client) runOnce(ctx context.Context, cfg Config) error {
 	}()
 
 	// Authenticate & subscribe.
+	subReqID := c.nextReqID()
 	subFrame := map[string]any{
 		"cmd":     "aibot_subscribe",
-		"headers": map[string]any{"req_id": c.nextReqID()},
+		"headers": map[string]any{"req_id": subReqID},
 		"body": map[string]any{
 			"bot_id": cfg.BotID,
 			"secret": cfg.Secret,
@@ -249,7 +251,7 @@ func (c *Client) runOnce(ctx context.Context, cfg Config) error {
 		if err != nil {
 			return err
 		}
-		if err := c.handleFrameWithErr(ctx, data); err != nil {
+		if err := c.handleFrameWithErr(ctx, data, subReqID); err != nil {
 			return err
 		}
 	}
@@ -257,10 +259,10 @@ func (c *Client) runOnce(ctx context.Context, cfg Config) error {
 
 // HandleFrame parses an inbound JSON frame from WeCom and enforces strict sender allowlisting.
 func (c *Client) HandleFrame(ctx context.Context, data []byte) {
-	_ = c.handleFrameWithErr(ctx, data)
+	_ = c.handleFrameWithErr(ctx, data, "")
 }
 
-func (c *Client) handleFrameWithErr(ctx context.Context, data []byte) error {
+func (c *Client) handleFrameWithErr(ctx context.Context, data []byte, subReqID string) error {
 	var env struct {
 		Cmd     string          `json:"cmd"`
 		Headers map[string]any  `json:"headers"`
@@ -273,7 +275,8 @@ func (c *Client) handleFrameWithErr(ctx context.Context, data []byte) error {
 	}
 	reqID, _ := env.Headers["req_id"].(string)
 
-	// Route RPC acknowledgements (e.g. aibot_upload_media_*) to awaiting callers.
+	// Route RPC acknowledgements (e.g. aibot_upload_media_*, aibot_send_msg, aibot_respond_update_msg)
+	// to awaiting callers without tearing down the live WebSocket on per-command errors.
 	if reqID != "" && env.Cmd != "aibot_msg_callback" && env.Cmd != "aibot_event_callback" {
 		c.pendingMu.Lock()
 		ch, ok := c.pending[reqID]
@@ -286,7 +289,11 @@ func (c *Client) handleFrameWithErr(ctx context.Context, data []byte) error {
 			return nil
 		}
 		if env.ErrCode != 0 {
-			return fmt.Errorf("wecom errcode=%d: %s", env.ErrCode, env.ErrMsg)
+			if subReqID != "" && reqID == subReqID {
+				return fmt.Errorf("wecom errcode=%d: %s", env.ErrCode, env.ErrMsg)
+			}
+			c.logger.Warn("wecom command returned error", "cmd", env.Cmd, "req_id", reqID, "errcode", env.ErrCode, "errmsg", env.ErrMsg)
+			return nil
 		}
 	}
 
@@ -315,12 +322,21 @@ func (c *Client) handleFrameWithErr(ctx context.Context, data []byte) error {
 	case "aibot_event_callback":
 		ev, ok := ParseCardEventCallback(reqID, env.Body)
 		if !ok {
+			if et := extractCallbackEventType(env.Body); strings.EqualFold(et, "template_card_event") {
+				c.logger.Warn("failed to parse wecom template_card_event callback", "req_id", reqID)
+			}
 			return nil
 		}
 		if !c.IsAllowed(ev.FromUser) {
-			c.logger.Info("dropped wecom card click from non-allowlisted user", "user", ev.FromUser)
+			c.logger.Info("dropped wecom card click from non-allowlisted user", "user", ev.FromUser, "action", ev.ActionID)
 			return nil
 		}
+		if ev.ChatType != "group" && ev.FromUser != "" {
+			c.mu.Lock()
+			c.lastSingleUser = ev.FromUser
+			c.mu.Unlock()
+		}
+		c.logger.Info("received wecom card click", "req_id", ev.ReqID, "action", ev.ActionID, "task_id", ev.TaskID, "choice", ev.ChoiceKey, "user", ev.FromUser)
 		if c.handlers.OnCardClick != nil {
 			go c.handlers.OnCardClick(ctx, ev)
 		}
@@ -420,47 +436,6 @@ func ParseMsgCallback(raw json.RawMessage) (IncomingMessage, bool) {
 	}, true
 }
 
-// ParseCardEventCallback parses a button_interaction template_card click event.
-func ParseCardEventCallback(reqID string, raw json.RawMessage) (CardClickEvent, bool) {
-	var b struct {
-		ChatID       string `json:"chatid"`
-		ResponseCode string `json:"response_code"`
-		From         struct {
-			UserID string `json:"userid"`
-		} `json:"from"`
-		Event struct {
-			EventType         string `json:"eventtype"`
-			TemplateCardEvent *struct {
-				TaskID   string `json:"task_id"`
-				EventKey string `json:"event_key"`
-			} `json:"template_card_event"`
-		} `json:"event"`
-	}
-	if json.Unmarshal(raw, &b) != nil || b.Event.TemplateCardEvent == nil || b.From.UserID == "" {
-		return CardClickEvent{}, false
-	}
-	ev := b.Event.TemplateCardEvent
-	actionID, choiceKey := parseEventKey(ev.TaskID, ev.EventKey)
-	if actionID == "" {
-		return CardClickEvent{}, false
-	}
-	return CardClickEvent{
-		ReqID:        reqID,
-		ChatID:       b.ChatID,
-		FromUser:     b.From.UserID,
-		ActionID:     actionID,
-		ChoiceKey:    choiceKey,
-		ResponseCode: b.ResponseCode,
-	}, true
-}
-
-func parseEventKey(taskID, eventKey string) (actionID, choiceKey string) {
-	if a, k, ok := strings.Cut(eventKey, ":"); ok {
-		return a, k
-	}
-	return taskID, eventKey
-}
-
 func stripLeadingMention(s string) string {
 	s = strings.TrimSpace(s)
 	for strings.HasPrefix(s, "@") {
@@ -508,87 +483,6 @@ func (c *Client) SendMarkdown(ctx context.Context, chatID, markdown string) erro
 			"chatid":   chatID,
 			"msgtype":  "markdown",
 			"markdown": map[string]any{"content": markdown},
-		},
-	}
-	return c.send(ctx, frame)
-}
-
-// BuildActionCard constructs a WeCom button_interaction template_card for an Action.
-func BuildActionCard(a *model.Action) map[string]any {
-	buttons := make([]map[string]any, 0, len(a.Choices))
-	for i, ch := range a.Choices {
-		if i >= 6 {
-			break
-		}
-		style := 2 // secondary outline
-		if i == 0 {
-			style = 1 // primary highlight for recommended option
-		}
-		key := ch.Key
-		if key == "" {
-			key = fmt.Sprintf("%d", i+1)
-		}
-		buttons = append(buttons, map[string]any{
-			"text":  ch.Label,
-			"style": style,
-			"key":   a.ID + ":" + key,
-		})
-	}
-	desc := a.Summary
-	if a.Command != "" {
-		if desc != "" {
-			desc += "\n"
-		}
-		desc += "`" + a.Command + "`"
-	}
-	return map[string]any{
-		"card_type": "button_interaction",
-		"source":    map[string]any{"desc": "Corgi · 待拍板"},
-		"main_title": map[string]any{
-			"title": a.Title,
-			"desc":  desc,
-		},
-		"task_id":     a.ID,
-		"button_list": buttons,
-	}
-}
-
-// SendActionCard proactively pushes an interactive decision card via aibot_send_msg.
-func (c *Client) SendActionCard(ctx context.Context, chatID string, a *model.Action) error {
-	chatID = c.resolveTarget(chatID)
-	if chatID == "" {
-		return nil
-	}
-	frame := map[string]any{
-		"cmd":     "aibot_send_msg",
-		"headers": map[string]any{"req_id": c.nextReqID()},
-		"body": map[string]any{
-			"chatid":        chatID,
-			"msgtype":       "template_card",
-			"template_card": BuildActionCard(a),
-		},
-	}
-	return c.send(ctx, frame)
-}
-
-// UpdateCardResolved refreshes an interacted template card in-place using aibot_respond_update_msg.
-func (c *Client) UpdateCardResolved(ctx context.Context, reqID string, a *model.Action) error {
-	if reqID == "" {
-		return nil
-	}
-	frame := map[string]any{
-		"cmd":     "aibot_respond_update_msg",
-		"headers": map[string]any{"req_id": reqID},
-		"body": map[string]any{
-			"response_type": "update_template_card",
-			"template_card": map[string]any{
-				"card_type": "text_notice",
-				"source":    map[string]any{"desc": "Corgi · 已拍板"},
-				"main_title": map[string]any{
-					"title": a.Title,
-					"desc":  fmt.Sprintf("已选择：%s（via %s）", a.ChosenLabel, a.ResolvedBy),
-				},
-			},
 		},
 	}
 	return c.send(ctx, frame)

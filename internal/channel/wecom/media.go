@@ -170,9 +170,16 @@ func extFromBytes(b []byte, mediaType string) string {
 	}
 }
 
-// callRPC sends a WS command with req_id and awaits its matching response frame.
+// callRPC sends a WS command with a generated req_id and awaits its matching response frame.
 func (c *Client) callRPC(ctx context.Context, cmd string, body map[string]any) (wsResp, error) {
-	reqID := c.nextReqID()
+	return c.callRPCWithReqID(ctx, c.nextReqID(), cmd, body)
+}
+
+// callRPCWithReqID sends a WS command with an explicit req_id and awaits its matching ACK frame.
+func (c *Client) callRPCWithReqID(ctx context.Context, reqID, cmd string, body map[string]any) (wsResp, error) {
+	if strings.TrimSpace(reqID) == "" {
+		reqID = c.nextReqID()
+	}
 	ch := make(chan wsResp, 1)
 
 	c.pendingMu.Lock()

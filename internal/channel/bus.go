@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/kiperjing/corgi/internal/channel/wecom"
 	"github.com/kiperjing/corgi/internal/core"
 	"github.com/kiperjing/corgi/internal/model"
+	"github.com/kiperjing/corgi/internal/store"
 )
 
 var mdReportPathRe = regexp.MustCompile(`((?:~/|/[\w.-]+/)[\w./-]+\.md)\b`)
@@ -347,6 +349,7 @@ func (b *Bus) HandleWeComMessage(ctx context.Context, msg wecom.IncomingMessage)
 }
 
 // HandleWeComCardClick resolves the target Action atomically and updates the WeCom card in-place.
+// If the Action was already resolved or expired elsewhere, it still refreshes the stale WeCom card.
 func (b *Bus) HandleWeComCardClick(ctx context.Context, ev wecom.CardClickEvent) {
 	b.mu.Lock()
 	b.wecomActiveAt = time.Now()
@@ -354,12 +357,24 @@ func (b *Bus) HandleWeComCardClick(ctx context.Context, ev wecom.CardClickEvent)
 
 	act, err := b.engine.ResolveAction(ctx, ev.ActionID, "wecom", ev.ChoiceKey)
 	if err != nil {
-		b.logger.Info("wecom card click ignored", "action", ev.ActionID, "err", err)
-		return
+		if errors.Is(err, store.ErrActionAlreadyResolved) {
+			existing, gErr := b.engine.GetAction(ctx, ev.ActionID)
+			if gErr != nil || existing == nil {
+				b.logger.Info("wecom card click ignored (already resolved)", "action", ev.ActionID, "err", gErr)
+				return
+			}
+			act = existing
+			b.logger.Info("refreshing already-resolved wecom action card", "action", act.ID, "status", act.Status, "resolved_by", act.ResolvedBy)
+		} else {
+			b.logger.Warn("wecom card click failed", "action", ev.ActionID, "choice", ev.ChoiceKey, "err", err)
+			return
+		}
+	} else {
+		b.logger.Info("resolved action from wecom card click", "action", act.ID, "choice_key", act.ChosenKey, "choice_label", act.ChosenLabel)
 	}
 	if b.wecom != nil {
-		if err := b.wecom.UpdateCardResolved(ctx, ev.ReqID, act); err != nil {
-			b.logger.Warn("update wecom template card failed", "action", act.ID, "err", err)
+		if err := b.wecom.UpdateCardResolvedWithTask(ctx, ev.ReqID, ev.TaskID, act); err != nil {
+			b.logger.Warn("update wecom template card failed", "action", act.ID, "req_id", ev.ReqID, "err", err)
 		}
 	}
 }

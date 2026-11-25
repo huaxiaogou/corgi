@@ -649,8 +649,16 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 	return nil
 }
 
+// GetAction loads one Action by ID from the durable store.
+func (e *Engine) GetAction(ctx context.Context, actionID string) (*model.Action, error) {
+	return e.store.GetAction(ctx, actionID)
+}
+
 // ResolveAction atomically resolves a pending Action from Web, WeCom, Router, or CLI.
 func (e *Engine) ResolveAction(ctx context.Context, actionID, resolvedBy, choiceInput string) (*model.Action, error) {
+	if strings.TrimSpace(choiceInput) == "" {
+		return nil, fmt.Errorf("empty action choice")
+	}
 	act, err := e.store.GetAction(ctx, actionID)
 	if err != nil {
 		return nil, err
@@ -663,7 +671,10 @@ func (e *Engine) ResolveAction(ctx context.Context, actionID, resolvedBy, choice
 
 	switch resolved.Kind {
 	case model.ActionKindWorkerDialog:
-		if err := e.sendDialogAnswer(ctx, resolved.PaneID, chosenKey, chosenCursor); err != nil {
+		dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		err := e.sendDialogAnswer(dctx, resolved.PaneID, chosenKey, chosenCursor)
+		cancel()
+		if err != nil {
 			e.logger.Warn("failed sending dialog answer to worker", "worker", resolved.TargetWorker, "err", err)
 		}
 		e.mu.Lock()
@@ -770,9 +781,18 @@ func matchActionChoice(a *model.Action, raw string) (key, label string, cursor i
 	}
 	low := strings.ToLower(q)
 	for i, c := range a.Choices {
-		if strings.EqualFold(c.Key, q) || strings.EqualFold(c.Label, q) {
+		if (c.Key != "" && strings.EqualFold(c.Key, q)) || (c.Label != "" && strings.EqualFold(c.Label, q)) {
 			return c.Key, c.Label, i + 1
 		}
+	}
+	for i, c := range a.Choices {
+		if c.Value != "" && strings.EqualFold(c.Value, q) {
+			return c.Key, c.Label, i + 1
+		}
+	}
+	if idx, err := strconv.Atoi(q); err == nil && idx >= 1 && idx <= len(a.Choices) {
+		c := a.Choices[idx-1]
+		return c.Key, c.Label, idx
 	}
 	for i, c := range a.Choices {
 		if low != "" && strings.Contains(strings.ToLower(c.Label), low) {

@@ -165,6 +165,75 @@ func TestEngineReplyCreatesActionAndAtomicResolve(t *testing.T) {
 	}
 }
 
+func TestMatchActionChoiceAndCursorDialogResolution(t *testing.T) {
+	act := &model.Action{
+		ID:   "a9",
+		Kind: model.ActionKindWorkerDialog,
+		Choices: []model.ActionChoice{
+			{Key: "", Label: "Yes, allow once", Value: "1"},
+			{Key: "", Label: "Yes, allow for this session", Value: "2"},
+			{Key: "n", Label: "No, deny command", Value: "3"},
+		},
+	}
+	tests := []struct {
+		input      string
+		wantKey    string
+		wantLabel  string
+		wantCursor int
+	}{
+		{input: "1", wantKey: "", wantLabel: "Yes, allow once", wantCursor: 1},
+		{input: "2", wantKey: "", wantLabel: "Yes, allow for this session", wantCursor: 2},
+		{input: "n", wantKey: "n", wantLabel: "No, deny command", wantCursor: 3},
+		{input: "session", wantKey: "", wantLabel: "Yes, allow for this session", wantCursor: 2},
+		{input: "esc", wantKey: "esc", wantLabel: "取消 (Esc)", wantCursor: 0},
+	}
+	for _, tc := range tests {
+		k, lbl, cur := matchActionChoice(act, tc.input)
+		if k != tc.wantKey || lbl != tc.wantLabel || cur != tc.wantCursor {
+			t.Fatalf("matchActionChoice(%q) = (%q, %q, %d), want (%q, %q, %d)",
+				tc.input, k, lbl, cur, tc.wantKey, tc.wantLabel, tc.wantCursor)
+		}
+	}
+
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"claude"})
+	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := st.InsertAction(ctx, &model.Action{
+		ID:      "a9",
+		Kind:    model.ActionKindWorkerDialog,
+		Thread:  model.MainThread,
+		Title:   "Run command",
+		Choices: act.Choices,
+		Status:  model.ActionPending,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.ResolveAction(ctx, "a9", "wecom", "   "); err == nil {
+		t.Fatal("expected error for empty choice input")
+	}
+	resolved, err := eng.ResolveAction(ctx, "a9", "wecom", "2")
+	if err != nil {
+		t.Fatalf("ResolveAction cursor dialog failed: %v", err)
+	}
+	if resolved.ChosenLabel != "Yes, allow for this session" || resolved.Status != model.ActionResolved {
+		t.Fatalf("unexpected resolved cursor action: %+v", resolved)
+	}
+	got, err := eng.GetAction(ctx, "a9")
+	if err != nil || got.Status != model.ActionResolved || got.ChosenLabel != "Yes, allow for this session" {
+		t.Fatalf("GetAction mismatch: got=%+v err=%v", got, err)
+	}
+}
+
 func TestAdoptUnmanagedAgentsRegistersManagedWorker(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "corgi.db"))
