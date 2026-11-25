@@ -15,7 +15,7 @@
 #        curl -fsSL https://github.com/huaxiaogou/corgi/releases/latest/download/install.sh | sh -s -- hub
 #
 # 环境变量：
-#   CORGI_BIN_DIR      安装目录（默认 ~/.local/bin）
+#   CORGI_BIN_DIR      安装目录（Linux 可写时默认 /usr/local/bin，否则 ~/.local/bin）
 #   CORGI_BINARY       直接安装指定二进制文件（跳过编译与下载）
 #   CORGI_REPO         GitHub 仓库（默认 huaxiaogou/corgi）
 #   CORGI_VERSION      下载版本（默认 latest）
@@ -25,8 +25,6 @@ set -eu
 
 REPO=${CORGI_REPO:-huaxiaogou/corgi}
 VERSION=${CORGI_VERSION:-latest}
-BIN_DIR=${CORGI_BIN_DIR:-$HOME/.local/bin}
-BIN=$BIN_DIR/corgi
 
 say()  { printf '%s\n' "$*"; }
 step() { printf '\033[1m==>\033[0m %s\n' "$*"; }
@@ -44,6 +42,15 @@ case "$(uname -m)" in
   arm64 | aarch64) arch=arm64 ;;
   *) die "暂时只支持 amd64 和 arm64（当前：$(uname -m)）" ;;
 esac
+
+if [ -n "${CORGI_BIN_DIR:-}" ]; then
+  BIN_DIR=$CORGI_BIN_DIR
+elif [ "$os" = linux ] && [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+  BIN_DIR=/usr/local/bin
+else
+  BIN_DIR=$HOME/.local/bin
+fi
+BIN=$BIN_DIR/corgi
 
 fetch() {
   if command -v curl >/dev/null 2>&1; then
@@ -66,7 +73,7 @@ build_service_path() {
   if command -v node >/dev/null 2>&1; then
     node_dir=$(dirname "$(command -v node)")
   fi
-  for extra in "$HOME/.cargo/bin" "$HOME/go/bin" "$HOME/.npm-global/bin" "$HOME/.volta/bin" "$node_dir" /opt/homebrew/opt/node*/bin; do
+  for extra in "$HOME/.local/bin" "$HOME/.cargo/bin" "$HOME/go/bin" "$HOME/.npm-global/bin" "$HOME/.volta/bin" "$node_dir" /opt/homebrew/opt/node*/bin; do
     [ -n "$extra" ] && [ -d "$extra" ] || continue
     case ":$p:" in
       *":$extra:"*) ;;
@@ -151,7 +158,7 @@ install_binary() {
       fi
       v=$(git -C "$src" describe --tags --always --dirty 2>/dev/null || echo dev)
       step "从源码编译（$src，$v）"
-      (cd "$src" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$v" -o "$tmp/$asset" ./cmd/corgi) || die "Go 编译失败"
+      (cd "$src" && CGO_ENABLED=0 go build -ldflags "-X main.version=$v" -o "$tmp/$asset" ./cmd/corgi) || die "Go 编译失败"
     fi
   else
     step "下载 $asset（$VERSION）"
@@ -164,7 +171,11 @@ install_binary() {
 
   mkdir -p "$BIN_DIR"
   chmod 755 "$tmp/$asset"
+  [ -L "$BIN" ] && rm -f "$BIN"
   mv -f "$tmp/$asset" "$BIN.new" && mv -f "$BIN.new" "$BIN"
+  if [ "$BIN_DIR" != "$HOME/.local/bin" ] && [ -e "$HOME/.local/bin/corgi" ] && [ ! -L "$HOME/.local/bin/corgi" ]; then
+    rm -f "$HOME/.local/bin/corgi"
+  fi
   step "已安装 $("$BIN" version 2>/dev/null || echo corgi) → $BIN"
   if [ -z "${CORGI_DRY_SERVICE:-}" ]; then
     ensure_shell_path

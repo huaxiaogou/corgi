@@ -18,7 +18,7 @@ for target in linux/amd64 linux/arm64 darwin/arm64 darwin/amd64; do
   BIN="$OUT_DIR/corgi-${GOOS}-${GOARCH}"
   echo "==> Compiling $BIN (version=$VERSION)..."
   CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-    go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o "$BIN" ./cmd/corgi
+    go build -ldflags="-X main.version=$VERSION" -o "$BIN" ./cmd/corgi
 done
 
 echo "==> Copying install.sh and computing SHA256SUMS.txt..."
