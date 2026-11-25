@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Pin, X } from "lucide-react";
+import { ArrowDown, Pin, X } from "lucide-react";
 import { CorgiButtMark, CorgiMark, StatusDot } from "../../components/CorgiMark";
 import { DecisionCard } from "../../components/DecisionCard";
 import { MarkdownText } from "../../components/MarkdownText";
+import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { api } from "../../lib/api";
 import type { Entry, Machine, Settings, SuperView } from "../../types/api";
 import { ChatHeader } from "./ChatHeader";
@@ -32,13 +33,29 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
     setMoreOlder(null);
   }, [thread]);
 
-  const liveEntries = data?.entries ?? [];
+  const liveEntries = (data?.entries ?? []).filter((e) => !thread || e.thread === thread);
   const liveIds = new Set(liveEntries.map((e) => e.id));
   const entries = [...olderEntries.filter((e) => !liveIds.has(e.id)), ...liveEntries];
   const canLoadMore = moreOlder ?? Boolean(data?.earlier);
   const pinnedList = (data?.pinned ?? []).filter((e) => !thread || e.thread === thread);
   const pendingActions = (data?.actions ?? []).filter((a) => a.status === "pending" && (!thread || a.thread === thread));
   const activeWorkers = (data?.workers ?? []).filter((w) => !w.ended);
+  const lastEntry = liveEntries[liveEntries.length - 1];
+  const router = data?.router;
+
+  const { containerRef, onScroll, showJumpBottom, scrollToBottom, capturePrependAnchor } = useAutoScroll({
+    resetKey: thread,
+    contentKey: [
+      liveEntries.length,
+      lastEntry?.id ?? "",
+      lastEntry?.text.length ?? 0,
+      pendingActions.map((a) => a.id).join(","),
+      router?.status ?? "",
+      router?.replied ? "1" : "0",
+    ].join("|"),
+    prependKey: olderEntries.length,
+    hasContent: liveEntries.length > 0 || pendingActions.length > 0 || router?.status === "working",
+  });
 
   const loadEarlier = async () => {
     if (loadingOlder || entries.length === 0) return;
@@ -47,7 +64,11 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
       const res = await api<{ entries: Entry[]; more: boolean }>(
         `/api/super/earlier?thread=${encodeURIComponent(thread)}&before=${entries[0].seq}&limit=80`
       );
-      setOlderEntries((prev) => [...(res.entries ?? []), ...prev]);
+      const incoming = res.entries ?? [];
+      if (incoming.length > 0) {
+        capturePrependAnchor();
+        setOlderEntries((prev) => [...incoming, ...prev]);
+      }
       setMoreOlder(Boolean(res.more));
     } catch (err) {
       onToast(err instanceof Error ? err.message : "加载历史失败");
@@ -83,7 +104,6 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
     }
   };
 
-  const router = data?.router;
   const isWeComGroup = thread.startsWith("wecom:");
   const headerTitle = thread === "chat:main" ? "Corgi" : isWeComGroup ? `企微群 · ${thread.replace(/^wecom:/, "")}` : thread;
 
@@ -169,8 +189,9 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto px-5 py-6">
-        <div className="max-w-[740px] mx-auto space-y-5">
+      <div className="relative flex-1 flex flex-col min-h-0">
+        <div ref={containerRef} onScroll={onScroll} className="flex-1 overflow-y-auto px-5 py-6 min-h-0">
+          <div className="max-w-[740px] mx-auto space-y-5">
           {canLoadMore && (
             <div className="text-center">
               <button type="button" disabled={loadingOlder} onClick={() => void loadEarlier()} className="px-3.5 py-1 rounded-full text-xs border border-strong text-secondary surface-hover cursor-pointer disabled:opacity-50">
@@ -259,7 +280,18 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
               <span>{router.replied ? "已回复，在整理记忆…" : "Corgi 在想…"}</span>
             </div>
           )}
+          </div>
         </div>
+        {showJumpBottom && (
+          <button
+            type="button"
+            onClick={() => scrollToBottom(true)}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs card-floating border-strong text-secondary surface-hover cursor-pointer"
+          >
+            <ArrowDown className="w-3.5 h-3.5" />
+            <span>回到最新</span>
+          </button>
+        )}
       </div>
 
       <ComposerBar
@@ -272,6 +304,7 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
           setReplyTo(null);
           try {
             await api("/api/super/say", { thread, text, re: reId, machine, kind, model, effort });
+            scrollToBottom();
           } catch (err) {
             onToast(err instanceof Error ? err.message : "发送失败");
           }

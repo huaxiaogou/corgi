@@ -123,6 +123,7 @@ export function App() {
         <main className="flex-1 flex min-w-0 min-h-0">
           {route.view === "corgi" && (
             <CorgiChatView
+              key={route.thread}
               data={superView}
               machines={machines}
               thread={route.thread}
@@ -133,6 +134,7 @@ export function App() {
           )}
           {route.view === "agent" && selectedPane && (
             <AgentPaneView
+              key={selectedPane.pane_id}
               pane={selectedPane}
               onClosed={() => setRoute({ view: "corgi", thread: "chat:main" })}
               onOpenFile={(p) => setFileTarget({ path: p, machine: selectedPane.machine })}

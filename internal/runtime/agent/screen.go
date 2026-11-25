@@ -22,12 +22,16 @@ var (
 	horizTokenRe    = regexp.MustCompile(`(?:\[([A-Za-z][A-Za-z0-9 _/-]{1,20})\]|([›>❯▶▸➜→])\s+([A-Za-z][A-Za-z0-9/-]{1,20})(?:\s{2,}|$))`)
 	primaryBtnRe    = regexp.MustCompile(`(?i)^(done|confirm|continue|next|ok|accept|allow|yes|finish|submit)$`)
 	ruleOrLogoRe    = regexp.MustCompile(`^[-─━═╭╮╰╯┌┐└┘│┃|╌┄┈▄▀█▌▐░▒▓\s]+$`)
-	footerHintRe    = regexp.MustCompile(`(?i)(↑/↓|navigate\s*·|enter\s+(confirm|toggle|select)|esc\s+to\s+(cancel|interrupt)|\bauto\s*·\s*[a-z0-9])`)
+	footerHintRe    = regexp.MustCompile(`(?i)(↑/↓|navigate\s*·|enter\s+(to\s+)?(confirm|toggle|select|continue)|esc\s+to\s+(cancel|interrupt|back)|tab\s+to\s+amend|\bauto\s*·\s*[a-z0-9])`)
+	dialogActionRe  = regexp.MustCompile(`(?i)(↑/↓\s*navigate|enter\s+(to\s+)?(confirm|toggle|select|continue)|esc\s+to\s+(cancel|back)|tab\s+to\s+amend)`)
+	idleChromeRe    = regexp.MustCompile("(?i)(bypass permissions on|manual mode on|accept edits on|plan mode on|\\? for shortcuts|← for agents|↵\\s*send|⏎\\s*send|shift\\+tab to cycle|⇧tab to cycle|^\\s*[❯>›]\\s*$|^\\s*[❯>›]\\s+try\\s+\")")
 	bgFooterRe      = regexp.MustCompile(`(?i)\b[1-9]\d*\s+(background\s+(task|shell|job)s?\b|task\(s\)|shells?\s+running\b)`)
 	quotaErrRe      = regexp.MustCompile(`(?i)(usage limit|limit reached|hit your( \w+)? limit|reached your( \w+)? limit|quota exceeded|exceeded your( current)? quota|resource.?exhausted|daily limit|rate.?limit(ed)?\b|credit balance|out of credits|please run /login|not logged in|invalid api key|api error|overloaded|unexpected status \d{3}|try again (at|in) )`)
 	confirmHintRe   = regexp.MustCompile(`(?i)(do you want to|allow|proceed|trust (this|the files|the contents)|do you trust|confirm|press enter|esc to cancel|y/n|yes,?\s*(i trust|allow|proceed)|choose your color scheme|terms of service|select login method)`)
 	activityGlyphRe = regexp.MustCompile(`^[✢✳✶✻✽✹●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*(.+)$`)
 )
+
+const maxBelowMenu = 4
 
 type horizButton struct {
 	label   string
@@ -118,13 +122,37 @@ func horizontalMoveKeys(curIdx, targetIdx int) []string {
 	return append(keys, "enter")
 }
 
+// hasIdleInputPrompt checks the bottom non-empty lines for normal CLI input box chrome
+// (e.g. `> ... ↵ send`, `bypass permissions on`, `? for shortcuts`) so historical markdown lists
+// or quoted dialogs in scrollback above an idle prompt are never mistaken for an active dialog.
+func hasIdleInputPrompt(screen string) bool {
+	tail := nonEmptyTail(screen, 6)
+	hasChrome := false
+	for _, l := range tail {
+		if dialogActionRe.MatchString(l) {
+			return false
+		}
+		if idleChromeRe.MatchString(l) {
+			hasChrome = true
+		}
+	}
+	return hasChrome
+}
+
 // ParseApproval extracts structured question/choices and exact navigation keys from a terminal dialog.
 func ParseApproval(screen string) model.Approval {
 	var rawLines []string
+	hasDialogFooter := false
 	for _, r := range strings.Split(screen, "\n") {
 		cleaned := cleanSplitColumn(r)
 		t := strings.TrimSpace(cleaned)
-		if t == "" || footerHintRe.MatchString(t) {
+		if t == "" {
+			continue
+		}
+		if dialogActionRe.MatchString(t) {
+			hasDialogFooter = true
+		}
+		if footerHintRe.MatchString(t) {
 			continue
 		}
 		rawLines = append(rawLines, cleaned)
@@ -138,13 +166,14 @@ func ParseApproval(screen string) model.Approval {
 	}
 	rawJoined := strings.Join(trimmedLines, "\n")
 	out := model.Approval{Raw: rawJoined}
-	if len(rawLines) == 0 {
+	if len(rawLines) == 0 || hasIdleInputPrompt(screen) {
 		return out
 	}
 
 	var choices []model.Choice
 	style := ""
 	firstChoiceIdx := -1
+	lastChoiceIdx := -1
 
 	// 1. First check for horizontal wizard button bars (e.g. `[Previous]  [Done]` or `> Previous  [Done]`),
 	// optionally paired with an agreement checkbox (`> [x] Yes, I agree...`) above the buttons.
@@ -155,6 +184,7 @@ func ParseApproval(screen string) model.Approval {
 				continue
 			}
 			firstChoiceIdx = i
+			lastChoiceIdx = i
 			style = "cursor"
 
 			// Look upward for an optional checkbox control above the button bar.
@@ -280,6 +310,7 @@ func ParseApproval(screen string) model.Approval {
 		choices = nil
 		style = ""
 		firstChoiceIdx = -1
+		lastChoiceIdx = -1
 		cursorTextIndent := -1
 
 		for i, l := range rawLines {
@@ -288,13 +319,19 @@ func ParseApproval(screen string) model.Approval {
 				continue
 			}
 			if m := numChoiceRe.FindStringSubmatch(l); m != nil {
+				lbl := strings.TrimSpace(m[3])
+				// Skip long markdown prose bullets like `1. **Heading**：...` unless marked with an active cursor.
+				if m[1] == "" && (len([]rune(lbl)) > 96 || strings.Contains(lbl, "**")) {
+					continue
+				}
 				if firstChoiceIdx < 0 {
 					firstChoiceIdx = i
 				}
+				lastChoiceIdx = i
 				style = "number"
 				choices = append(choices, model.Choice{
 					Key:    m[2],
-					Label:  strings.TrimSpace(m[3]),
+					Label:  lbl,
 					Cursor: len(choices) + 1,
 					Active: m[1] != "",
 				})
@@ -307,6 +344,7 @@ func ParseApproval(screen string) model.Approval {
 				}
 				if m := cursorChoiceRe.FindStringSubmatch(l); m != nil && confirmHintRe.MatchString(strings.Join(trimmedLines[:i+1], "\n")) {
 					firstChoiceIdx = i
+					lastChoiceIdx = i
 					style = "cursor"
 					// Track column where option text starts (e.g. "  > terminal" -> indent 4) so
 					// deeper-indented wrapped paragraph lines are not mistaken for sibling options.
@@ -348,6 +386,7 @@ func ParseApproval(screen string) model.Approval {
 				}
 				ind := len(l) - len(strings.TrimLeft(l, " "))
 				if t != "" && ind <= cursorTextIndent+1 && len(t) <= 80 && len(choices) < 9 {
+					lastChoiceIdx = i
 					choices = append(choices, model.Choice{
 						Key:    strconv.Itoa(len(choices) + 1),
 						Label:  t,
@@ -368,12 +407,29 @@ func ParseApproval(screen string) model.Approval {
 				break
 			}
 		}
-		if curIdx >= 0 && (style == "cursor" || style == "number") {
+		// Require a cursor, interactive footer, or confirmation hint for cursorless numbered menus
+		// so plain numbered markdown lists are never mistaken for blocking prompts.
+		if style == "number" && curIdx < 0 && !hasDialogFooter && !confirmHintRe.MatchString(rawJoined) {
+			choices = nil
+		}
+		if curIdx >= 0 && style == "cursor" {
 			for i := range choices {
-				if style == "cursor" {
-					choices[i].Keys = verticalMoveKeys(curIdx, i)
-				}
+				choices[i].Keys = verticalMoveKeys(curIdx, i)
 			}
+		}
+	}
+
+	// Bottom-anchor guard: a live blocking dialog sits at the bottom of the screen with at most
+	// a few footer/status lines below it; scrollback menus buried above normal output are ignored.
+	if len(choices) >= 2 && lastChoiceIdx >= 0 {
+		below := 0
+		for i := lastChoiceIdx + 1; i < len(rawLines); i++ {
+			if !ruleOrLogoRe.MatchString(trimmedLines[i]) {
+				below++
+			}
+		}
+		if below > maxBelowMenu {
+			return model.Approval{Raw: out.Raw}
 		}
 	}
 

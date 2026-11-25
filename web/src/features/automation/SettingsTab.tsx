@@ -90,7 +90,13 @@ export function SettingsTab({
             <span className="text-muted">默认运行电脑</span>
             <select
               value={settings.worker_machine ?? ""}
-              onChange={(e) => onChange({ ...settings, worker_machine: e.target.value })}
+              onChange={(e) => {
+                const nextMachine = e.target.value;
+                const curCwd = (settings.worker_cwd ?? "").trim();
+                const resetCwd =
+                  nextMachine !== (settings.worker_machine ?? "") && curCwd.startsWith("/") ? "~" : settings.worker_cwd;
+                onChange({ ...settings, worker_machine: nextMachine, worker_cwd: resetCwd });
+              }}
               className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline"
             >
               {machines.length === 0 && <option value="">Hub 本机</option>}

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent } from "react";
-import { ArrowUp, Keyboard, Paperclip, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Keyboard, Paperclip, Trash2, X } from "lucide-react";
 import { TerminalScreen } from "../../components/TerminalScreen";
+import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { api, uploadFile } from "../../lib/api";
 import type { AgentView, Approval, ChatMessage, MsgPatch } from "../../types/api";
 import { AgentChatThread } from "./AgentChatThread";
@@ -95,13 +96,57 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
     return () => es.close();
   }, [pane.pane_id, mode]);
 
+  const lastLive = liveMsgs[liveMsgs.length - 1];
+  const scrollHasContent =
+    mode === "log"
+      ? logText.length > 0
+      : liveMsgs.length > 0 || Boolean(approval) || liveStatus === "working" || logText.length > 0;
+  const scrollContentKey =
+    mode === "log"
+      ? `log:${logText.length}`
+      : [
+          liveMsgs.length,
+          lastLive?.kind ?? "",
+          lastLive?.text?.length ?? 0,
+          lastLive?.input?.length ?? 0,
+          lastLive?.output?.length ?? 0,
+          liveStatus,
+          liveTail,
+          approval?.title ?? "",
+          approval?.choices.length ?? 0,
+          logText.length,
+        ].join("|");
+
+  const { containerRef, onScroll, showJumpBottom, scrollToBottom, capturePrependAnchor } = useAutoScroll({
+    resetKey: `${pane.pane_id}:${mode}`,
+    contentKey: scrollContentKey,
+    prependKey: olderMsgs.length,
+    hasContent: scrollHasContent,
+    enabled: mode !== "screen",
+  });
+
+  const switchMode = (next: "chat" | "screen" | "log") => {
+    if (next === mode) return;
+    setLogText("");
+    setOlderMsgs([]);
+    setLiveMsgs([]);
+    setEarlierCursor(0);
+    baseRef.current = 0;
+    setApproval(null);
+    setMode(next);
+  };
+
   const loadEarlier = async () => {
     if (!earlierCursor || loadingEarlier) return;
     setLoadingEarlier(true);
     try {
       const enc = encodeURIComponent(pane.pane_id);
       const res = await api<{ messages: ChatMessage[]; earlier: number }>(`/api/panes/${enc}/earlier?before=${earlierCursor}`);
-      setOlderMsgs((prev) => [...(res.messages ?? []), ...prev]);
+      const incoming = res.messages ?? [];
+      if (incoming.length > 0) {
+        capturePrependAnchor();
+        setOlderMsgs((prev) => [...incoming, ...prev]);
+      }
       setEarlierCursor(res.earlier ?? 0);
     } catch (err) {
       onToast(err instanceof Error ? err.message : "加载历史失败");
@@ -128,6 +173,7 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
     } else {
       await api(`/api/panes/${enc}/text`, { text: rawText, enter: true });
     }
+    scrollToBottom();
   };
 
   const sendInput = async (e: FormEvent) => {
@@ -187,7 +233,7 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
         <div className="flex items-center gap-2 shrink-0">
           <div className="inline-flex p-0.5 rounded-lg text-xs surface-rail border border-hairline">
             {modeTabs.map((m) => (
-              <button key={m} type="button" onClick={() => setMode(m)} className={`px-2.5 py-1 rounded-md cursor-pointer ${mode === m ? "surface-bg font-medium text-primary" : "text-secondary"}`}>
+              <button key={m} type="button" onClick={() => switchMode(m)} className={`px-2.5 py-1 rounded-md cursor-pointer ${mode === m ? "surface-bg font-medium text-primary" : "text-secondary"}`}>
                 {m === "chat" ? "对话" : m === "screen" ? "屏幕" : "日志"}
               </button>
             ))}
@@ -203,31 +249,43 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto px-5 py-5 min-h-0">
-        {mode === "screen" ? (
-          <div className="h-full max-w-[960px] mx-auto">
-            <TerminalScreen frame={logText} onKey={(k) => void sendKey(k)} onText={(t) => void api(`/api/panes/${encodeURIComponent(pane.pane_id)}/text`, { text: t, enter: false })} onToast={onToast} />
-          </div>
-        ) : mode === "chat" ? (
-          <AgentChatThread
-            messages={messages}
-            earlierCursor={earlierCursor}
-            loadingEarlier={loadingEarlier}
-            approval={approval}
-            liveStatus={liveStatus}
-            liveTail={liveTail}
-            liveMeta={liveMeta}
-            setupHint={setupHint}
-            isAgent={pane.is_agent}
-            onLoadEarlier={() => void loadEarlier()}
-            onPickAskOption={(opt) => void submitPromptText(opt)}
-            onAnswerApproval={(c, i) => void answerApproval(c, i)}
-            onCancelApproval={() => void sendKey("esc")}
-            onSwitchToScreen={() => setMode("screen")}
-            onOpenFile={onOpenFile}
-          />
-        ) : (
-          <pre className="max-w-[900px] mx-auto text-xs font-mono-code leading-relaxed whitespace-pre-wrap text-secondary">{logText || "等待终端输出…"}</pre>
+      <div className="relative flex-1 flex flex-col min-h-0">
+        <div ref={containerRef} onScroll={onScroll} className="flex-1 overflow-y-auto px-5 py-5 min-h-0">
+          {mode === "screen" ? (
+            <div className="h-full max-w-[960px] mx-auto">
+              <TerminalScreen frame={logText} onKey={(k) => void sendKey(k)} onText={(t) => void api(`/api/panes/${encodeURIComponent(pane.pane_id)}/text`, { text: t, enter: false })} onToast={onToast} />
+            </div>
+          ) : mode === "chat" ? (
+            <AgentChatThread
+              messages={messages}
+              earlierCursor={earlierCursor}
+              loadingEarlier={loadingEarlier}
+              approval={approval}
+              liveStatus={liveStatus}
+              liveTail={liveTail}
+              liveMeta={liveMeta}
+              setupHint={setupHint}
+              isAgent={pane.is_agent}
+              onLoadEarlier={() => void loadEarlier()}
+              onPickAskOption={(opt) => void submitPromptText(opt)}
+              onAnswerApproval={(c, i) => void answerApproval(c, i)}
+              onCancelApproval={() => void sendKey("esc")}
+              onSwitchToScreen={() => switchMode("screen")}
+              onOpenFile={onOpenFile}
+            />
+          ) : (
+            <pre className="max-w-[900px] mx-auto text-xs font-mono-code leading-relaxed whitespace-pre-wrap text-secondary">{logText || "等待终端输出…"}</pre>
+          )}
+        </div>
+        {mode !== "screen" && showJumpBottom && (
+          <button
+            type="button"
+            onClick={() => scrollToBottom(true)}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs card-floating border-strong text-secondary surface-hover cursor-pointer"
+          >
+            <ArrowDown className="w-3.5 h-3.5" />
+            <span>回到最新</span>
+          </button>
         )}
       </div>
 

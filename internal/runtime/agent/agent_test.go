@@ -410,6 +410,45 @@ func TestAgyContextProtoProgressHashWizardAndPatch(t *testing.T) {
 		t.Fatalf("expected split-column preview stripped cleanly, got %+v", themeAp.Choices)
 	}
 
+	// Regression: Router scrollback containing a numbered Markdown summary above an idle prompt
+	// MUST NOT trigger ScreenAsks (previously caused agent_blocked delivery deadlocks).
+	routerIdleWithMarkdown := `
+  1. **单点对话，多代理分治**：人主要只和常驻的大脑对话。
+  2. **全托管闭环与最低打扰**：常规故障尽量自愈。
+  3. **轻量、自托管**：Go 单二进制内嵌前端资源。
+● 已处理 t89：当前确实没有进行中的任务。
+✔ Worked for 3m 49s
+──────────────────────────────────────────────────────
+> Verify /usr/local/bin/corgi reply e92 within 120 characters    ↵ send
+──────────────────────────────────────────────────────
+hy4std low · ← for agents    ⏵⏵ bypass permissions on (⇧tab to cycle)
+`
+	if ScreenAsks(routerIdleWithMarkdown) {
+		t.Fatal("idle router prompt with historical markdown 1/2/3 list must not trigger ScreenAsks")
+	}
+
+	// Regression: Router quoting a worker's trust dialog in scrollback above an idle prompt.
+	quotedTrustAboveIdle := `
+  worker w1 is BLOCKED waiting for approval. Screen:
+    Do you trust the contents of this project?
+    > Yes, I trust this folder
+      No, exit
+● 已告知用户需要确认目录信任。
+──────────────────────────────────────────────────────
+>
+──────────────────────────────────────────────────────
+? for shortcuts                                         auto · Claude Opus 5.5 · medium
+`
+	if ScreenAsks(quotedTrustAboveIdle) {
+		t.Fatal("quoted worker dialog above idle prompt must not trigger ScreenAsks")
+	}
+
+	// Plain numbered markdown output with no interactive dialog hints.
+	plainList := "Summary:\n1. Build passed\n2. Tests passed\n3. Deployed"
+	if ScreenAsks(plainList) {
+		t.Fatal("plain numbered list without dialog hints must not trigger ScreenAsks")
+	}
+
 	// MsgSync incremental patching + EarlierMessages.
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "big.jsonl")

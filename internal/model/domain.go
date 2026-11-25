@@ -187,12 +187,12 @@ type Settings struct {
 }
 
 // DefaultSettings returns sane defaults for a fresh installation.
-func DefaultSettings(home string) Settings {
+func DefaultSettings(_ string) Settings {
 	return Settings{
 		RouterKind:   "claude",
 		RouterEffort: "low",
 		WorkerKind:   "claude",
-		WorkerCwd:    home,
+		WorkerCwd:    "~",
 		ReplyChars:   120,
 		StallMinutes: 12,
 		RotatePct:    60,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Eye, History, RotateCcw, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
 import type { ChatMessage, EndedSession } from "../types/api";
@@ -14,6 +14,12 @@ export function HistorySection({ onSelectPane, onToast }: Props) {
   const [history, setHistory] = useState<EndedSession[]>([]);
   const [resumingId, setResumingId] = useState("");
   const [preview, setPreview] = useState<{ sess: EndedSession; msgs: ChatMessage[] } | null>(null);
+  const previewListRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!preview || !previewListRef.current) return;
+    previewListRef.current.scrollTop = previewListRef.current.scrollHeight;
+  }, [preview]);
 
   const refresh = () => {
     void api<{ sessions: EndedSession[] }>("/api/history")
@@ -120,7 +126,7 @@ export function HistorySection({ onSelectPane, onToast }: Props) {
                 </button>
               </div>
             </div>
-            <div className="flex-1 overflow-y-auto p-5 space-y-3 text-xs">
+            <div ref={previewListRef} className="flex-1 overflow-y-auto p-5 space-y-3 text-xs">
               {preview.msgs.length === 0 && <div className="text-muted text-center py-8">暂无可展示的对话消息</div>}
               {preview.msgs.map((m, i) =>
                 m.kind === "user" ? (

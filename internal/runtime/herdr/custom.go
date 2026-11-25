@@ -19,11 +19,12 @@ type paneRevStatus struct {
 }
 
 var (
-	customWorkingRe = regexp.MustCompile(`(?i)(esc to interrupt|streaming\s*·|task running|[✢✳✶✻✽✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*\(\d+s)`)
-	titleSpinnerRe  = regexp.MustCompile(`^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✢✳✶✻✽✹]`)
-	customReadyRe   = regexp.MustCompile(`(?i)(codebuddy code|bypass permissions|do you trust|shift\+tab to cycle|^>\s*$)`)
-	customChoiceRe  = regexp.MustCompile(`(?m)^\s*([›>•❯▶]\s+.+|\d+[.)]\s+.+)$`)
-	customAskHintRe = regexp.MustCompile(`(?i)(do you trust|trust (this|the files|the contents)|do you want to|allow|proceed|confirm|esc to cancel|yes,?\s*(i trust|allow|proceed))`)
+	customWorkingRe    = regexp.MustCompile(`(?i)(esc to interrupt|streaming\s*·|task running|[✢✳✶✻✽✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*\(\d+s)`)
+	titleSpinnerRe     = regexp.MustCompile(`^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✢✳✶✻✽✹]`)
+	customReadyRe      = regexp.MustCompile(`(?i)(codebuddy code|bypass permissions|do you trust|shift\+tab to cycle|^>\s*$)`)
+	customIdleChromeRe = regexp.MustCompile(`(?i)(bypass permissions on|← for agents|↵\s*send|⇧tab to cycle|shift\+tab to cycle)`)
+	customChoiceRe     = regexp.MustCompile(`(?m)^\s*([›>•❯▶]\s+.+|\d+[.)]\s+.+)$`)
+	customAskHintRe    = regexp.MustCompile(`(?i)(do you trust|trust (this|the files|the contents)|do you want to|allow|proceed|confirm|esc to cancel|yes,?\s*(i trust|allow|proceed))`)
 )
 
 // SetCustomStore configures on-disk persistence for shell-fallback agents (e.g. codebuddy)
@@ -174,11 +175,27 @@ func classifyCustomScreen(screen string) string {
 		lines = lines[len(lines)-26:]
 	}
 	tail := strings.Join(lines, "\n")
-	if customAskHintRe.MatchString(tail) && len(customChoiceRe.FindAllString(tail, 4)) >= 2 {
-		return "blocked"
-	}
 	if customWorkingRe.MatchString(tail) {
 		return "working"
+	}
+	// If the live CLI input chrome is visible at the bottom (without an active cancel hint),
+	// any numbered list in scrollback above it is normal history, not a blocking dialog.
+	var nonEmpty []string
+	for _, l := range lines {
+		if t := strings.TrimSpace(l); t != "" {
+			nonEmpty = append(nonEmpty, t)
+		}
+	}
+	bottom := nonEmpty
+	if len(bottom) > 6 {
+		bottom = bottom[len(bottom)-6:]
+	}
+	bottomJoined := strings.Join(bottom, "\n")
+	if customIdleChromeRe.MatchString(bottomJoined) && !strings.Contains(strings.ToLower(bottomJoined), "esc to cancel") {
+		return "idle"
+	}
+	if customAskHintRe.MatchString(tail) && len(customChoiceRe.FindAllString(tail, 4)) >= 2 {
+		return "blocked"
 	}
 	return "idle"
 }
