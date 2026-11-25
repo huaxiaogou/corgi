@@ -656,14 +656,38 @@ func (e *Engine) GetAction(ctx context.Context, actionID string) (*model.Action,
 
 // ResolveAction atomically resolves a pending Action from Web, WeCom, Router, or CLI.
 func (e *Engine) ResolveAction(ctx context.Context, actionID, resolvedBy, choiceInput string) (*model.Action, error) {
-	if strings.TrimSpace(choiceInput) == "" {
+	return e.resolveAction(ctx, actionID, resolvedBy, choiceInput, false)
+}
+
+// ResolveActionCustom atomically resolves a pending decision card with a human-written custom answer,
+// bypassing preset choice fuzzy matching so custom text is never overwritten by a preset option.
+func (e *Engine) ResolveActionCustom(ctx context.Context, actionID, resolvedBy, customText string) (*model.Action, error) {
+	return e.resolveAction(ctx, actionID, resolvedBy, customText, true)
+}
+
+func (e *Engine) resolveAction(ctx context.Context, actionID, resolvedBy, choiceInput string, custom bool) (*model.Action, error) {
+	trimmed := strings.TrimSpace(choiceInput)
+	if trimmed == "" {
 		return nil, fmt.Errorf("empty action choice")
 	}
 	act, err := e.store.GetAction(ctx, actionID)
 	if err != nil {
 		return nil, err
 	}
-	chosenKey, chosenLabel, chosenCursor := matchActionChoice(act, choiceInput)
+	var (
+		chosenKey    string
+		chosenLabel  string
+		chosenCursor int
+	)
+	if custom {
+		if act.Kind == model.ActionKindWorkerDialog {
+			return nil, fmt.Errorf("terminal dialog does not accept custom free-text input")
+		}
+		chosenKey = "custom"
+		chosenLabel = trimmed
+	} else {
+		chosenKey, chosenLabel, chosenCursor = matchActionChoice(act, trimmed)
+	}
 	resolved, err := e.store.ResolveAction(ctx, actionID, resolvedBy, chosenKey, chosenLabel)
 	if err != nil {
 		return nil, err
@@ -682,13 +706,18 @@ func (e *Engine) ResolveAction(ctx context.Context, actionID, resolvedBy, choice
 		e.mu.Unlock()
 		e.addEventWithAction(ctx, resolved.Thread, fmt.Sprintf("已为 %s 选择：%s（via %s）", resolved.TargetWorker, chosenLabel, resolvedBy), resolved.TargetWorker, "info", resolved.ID)
 	case model.ActionKindRouterChoice, model.ActionKindRouterCheck, model.ActionKindPatrolDigest:
+		promptCtx := ""
+		if custom {
+			promptCtx = buildCustomDecisionPromptContext(resolved)
+		}
 		_, _, _ = e.Say(ctx, SayRequest{
-			Thread:    resolved.Thread,
-			Channel:   resolvedBy,
-			From:      resolvedBy,
-			Text:      chosenLabel,
-			ReEntryID: resolved.EntryID,
-			ActionID:  resolved.ID,
+			Thread:        resolved.Thread,
+			Channel:       resolvedBy,
+			From:          resolvedBy,
+			Text:          chosenLabel,
+			ReEntryID:     resolved.EntryID,
+			ActionID:      resolved.ID,
+			PromptContext: promptCtx,
 		})
 	}
 
@@ -698,6 +727,20 @@ func (e *Engine) ResolveAction(ctx context.Context, actionID, resolvedBy, choice
 	sink.OnActionResolved(ctx, resolved)
 	sink.OnStateChanged()
 	return resolved, nil
+}
+
+func buildCustomDecisionPromptContext(a *model.Action) string {
+	q := oneLineClip(orStr(a.Summary, a.Title), 240)
+	var b strings.Builder
+	fmt.Fprintf(&b, "[In reply to decision card: %q]", q)
+	if len(a.Choices) > 0 {
+		opts := make([]string, 0, len(a.Choices))
+		for i, c := range a.Choices {
+			opts = append(opts, fmt.Sprintf("%d. %s", i+1, c.Label))
+		}
+		fmt.Fprintf(&b, "\n[Preset options were: %s — human provided a custom answer instead]", strings.Join(opts, " | "))
+	}
+	return b.String()
 }
 
 // DismissAction atomically dismisses a pending reminder/choice without sending a reply to Router.

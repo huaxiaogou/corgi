@@ -1,10 +1,10 @@
-import { useState } from "react";
-import { Clock } from "lucide-react";
+import { useState, type FormEvent } from "react";
+import { Clock, PenLine } from "lucide-react";
 import type { Action } from "../types/api";
 
 interface Props {
   action: Action;
-  onResolve: (actionId: string, choiceKey: string) => Promise<void>;
+  onResolve: (actionId: string, choiceKey: string, custom?: boolean) => Promise<void>;
   onDismiss?: (actionId: string) => Promise<void>;
   onSnooze?: (actionId: string) => Promise<void>;
   onOpenWorker?: (workerName: string) => void;
@@ -25,39 +25,36 @@ function isClippedTitleOfSummary(title: string, summary: string): boolean {
 
 export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWorker }: Props) {
   const [busy, setBusy] = useState(false);
+  const [customText, setCustomText] = useState("");
 
-  const pick = async (choiceKey: string) => {
+  const run = async (fn: () => Promise<void>) => {
     if (busy || action.status !== "pending") return;
     setBusy(true);
     try {
-      await onResolve(action.id, choiceKey);
+      await fn();
     } finally {
       setBusy(false);
     }
   };
 
-  const dismiss = async () => {
-    if (!onDismiss || busy || action.status !== "pending") return;
-    setBusy(true);
-    try {
-      await onDismiss(action.id);
-    } finally {
-      setBusy(false);
-    }
+  const pick = (choiceKey: string, custom = false) =>
+    run(async () => {
+      await onResolve(action.id, choiceKey, custom);
+      if (custom) setCustomText("");
+    });
+
+  const submitCustom = (e?: FormEvent) => {
+    e?.preventDefault();
+    const trimmed = customText.trim();
+    if (trimmed) void pick(trimmed, true);
   };
 
-  const snooze = async () => {
-    if (!onSnooze || busy || action.status !== "pending") return;
-    setBusy(true);
-    try {
-      await onSnooze(action.id);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const dismiss = () => (onDismiss ? run(() => onDismiss(action.id)) : Promise.resolve());
+  const snooze = () => (onSnooze ? run(() => onSnooze(action.id)) : Promise.resolve());
 
   const choices = action.choices ?? [];
   const isRouterCheck = action.kind === "router_check";
+  const isWorkerDialog = action.kind === "worker_dialog";
   const showRecommended = choices.length > 1 && !isRouterCheck;
   const summaryCoversTitle = Boolean(action.summary) && isClippedTitleOfSummary(action.title, action.summary ?? "");
 
@@ -98,9 +95,7 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
         ) : (
           <>
             <div className="text-[15px] font-semibold leading-snug text-primary">{action.title}</div>
-            {action.summary && (
-              <p className="text-[13px] leading-relaxed text-secondary whitespace-pre-line">{action.summary}</p>
-            )}
+            {action.summary && <p className="text-[13px] leading-relaxed text-secondary whitespace-pre-line">{action.summary}</p>}
           </>
         )}
         {action.command && (
@@ -127,7 +122,39 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
           </button>
         ))}
 
-        {action.kind === "worker_dialog" ? (
+        {!isWorkerDialog && (
+          <form onSubmit={(e) => void submitCustom(e)} className="px-5 py-2.5 border-b border-hairline surface-rail flex flex-wrap sm:flex-nowrap items-start gap-2.5">
+            <span
+              className="w-5 h-5 rounded flex items-center justify-center border border-dashed border-strong text-secondary surface-bg shrink-0 mt-1.5"
+              title="自由输入其他想法"
+            >
+              <PenLine className="w-3 h-3" strokeWidth={1.8} />
+            </span>
+            <textarea
+              rows={1}
+              value={customText}
+              disabled={busy}
+              onChange={(e) => setCustomText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void submitCustom();
+                }
+              }}
+              placeholder="输入其他想法或补充条件…（Enter 提交，Shift+Enter 换行）"
+              className="flex-1 min-w-[180px] min-h-[34px] max-h-28 px-3 py-1.5 rounded-lg surface-bg border border-strong text-[13px] leading-snug text-primary outline-none resize-y disabled:opacity-50"
+            />
+            <button
+              type="submit"
+              disabled={busy || !customText.trim()}
+              className="w-full sm:w-auto px-3.5 py-1.5 min-h-[34px] rounded-lg btn-accent text-xs font-medium cursor-pointer shrink-0 disabled:opacity-35 disabled:cursor-not-allowed"
+            >
+              提交想法
+            </button>
+          </form>
+        )}
+
+        {isWorkerDialog ? (
           <div className="px-5 py-2.5">
             <button
               type="button"

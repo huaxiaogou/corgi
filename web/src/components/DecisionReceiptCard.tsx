@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowUpRight, Check, ChevronDown, ChevronUp, Clock, CornerDownRight, MessageSquarePlus, X } from "lucide-react";
+import { ArrowUpRight, Check, ChevronDown, ChevronUp, Clock, CornerDownRight, MessageSquarePlus, PenLine, X } from "lucide-react";
 import type { Action } from "../types/api";
 
 interface Props {
@@ -58,14 +58,17 @@ export function DecisionReceiptCard({
   }
 
   const isEsc = (action.chosen_key ?? "").toLowerCase() === "esc";
+  const isCustom = (action.chosen_key ?? "").toLowerCase() === "custom";
   const isDismissed = action.status === "expired" && action.resolved_by === "dismiss";
   const chosenLabel = action.chosen_label || action.chosen_key || (isDismissed ? "已忽略" : "已处理");
   const choices = action.choices ?? [];
-  const chosenChoice = choices.find(
-    (c) =>
-      (action.chosen_key && c.key && c.key.toLowerCase() === action.chosen_key.toLowerCase()) ||
-      (action.chosen_label && c.label === action.chosen_label)
-  );
+  const chosenChoice = isCustom
+    ? undefined
+    : choices.find(
+        (c) =>
+          (action.chosen_key && c.key && c.key.toLowerCase() === action.chosen_key.toLowerCase()) ||
+          (action.chosen_label && c.label === action.chosen_label)
+      );
   const otherChoices = choices.filter((c) => c !== chosenChoice);
   const rawChannel = (action.resolved_by ?? "").trim();
   const channel = CHANNEL_LABELS[rawChannel.toLowerCase()] ?? rawChannel;
@@ -79,6 +82,7 @@ export function DecisionReceiptCard({
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="w-2 h-2 rounded-full shrink-0" style={{ background: statusDotColor }} />
           <span className="font-medium text-primary">{statusLabel}</span>
+          {isCustom && <span className="text-muted">· 自定义回答</span>}
           {channel && <span className="text-muted">· {channel}</span>}
           {timeText && <span className="font-mono-code text-muted">· {timeText}</span>}
         </div>
@@ -123,11 +127,11 @@ export function DecisionReceiptCard({
 
         <div className="rounded-xl border border-strong surface-rail px-3 py-2.5 flex items-start gap-2.5">
           <span className="w-5 h-5 rounded-md btn-accent flex items-center justify-center shrink-0 mt-0.5">
-            {isEsc || isDismissed ? <X className="w-3 h-3" strokeWidth={2.4} /> : <Check className="w-3 h-3" strokeWidth={2.4} />}
+            {isCustom ? <PenLine className="w-3 h-3" strokeWidth={2.2} /> : isEsc || isDismissed ? <X className="w-3 h-3" strokeWidth={2.4} /> : <Check className="w-3 h-3" strokeWidth={2.4} />}
           </span>
           <div className="min-w-0 flex-1">
-            <div className="text-[11px] text-muted">{isEsc ? "操作结果" : "你的选择"}</div>
-            <div className="text-[13.5px] font-semibold text-primary leading-snug break-words">{chosenLabel}</div>
+            <div className="text-[11px] text-muted">{isCustom ? "你的自定义回答" : isEsc ? "操作结果" : "你的选择"}</div>
+            <div className="text-[13.5px] font-semibold text-primary leading-snug whitespace-pre-wrap break-words">{chosenLabel}</div>
             {chosenChoice?.detail && <div className="mt-0.5 text-xs text-secondary leading-relaxed">{chosenChoice.detail}</div>}
           </div>
         </div>
@@ -139,7 +143,15 @@ export function DecisionReceiptCard({
               onClick={() => setAltsOpen((v) => !v)}
               className="inline-flex items-center gap-1 text-[11.5px] text-muted hover:text-primary cursor-pointer"
             >
-              <span>{altsOpen ? `收起其余 ${otherChoices.length} 个未选备选` : `查看其余 ${otherChoices.length} 个备选`}</span>
+              <span>
+                {isCustom
+                  ? altsOpen
+                    ? `收起原 ${otherChoices.length} 个备选`
+                    : `查看原 ${otherChoices.length} 个备选`
+                  : altsOpen
+                    ? `收起其余 ${otherChoices.length} 个未选备选`
+                    : `查看其余 ${otherChoices.length} 个备选`}
+              </span>
               {altsOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
             </button>
             {altsOpen && (

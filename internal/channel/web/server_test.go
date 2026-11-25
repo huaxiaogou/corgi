@@ -627,3 +627,62 @@ func TestSuperSnapshotAndEarlierIncludeResolvedActions(t *testing.T) {
 		t.Fatalf("expected resolved_actions in /api/super/earlier, got %+v", earBody.ResolvedActions)
 	}
 }
+
+func TestResolveActionCustomHTTPAndWorkerDialogGuard(t *testing.T) {
+	srv, master := newTestServer(t)
+	h := srv.Routes()
+	ctx := context.Background()
+
+	_, act, _, err := srv.Engine.Reply(ctx, model.MainThread, "多用户接入方向？", "", []string{"个人用", "按共享服务设计", "暂不推进"}, false)
+	if err != nil || act == nil {
+		t.Fatalf("Reply failed: %v", err)
+	}
+
+	customText := "先研究不接太湖，或单实例共享的替代方案"
+	post := func(id string, payload map[string]any) (int, []byte) {
+		b, _ := json.Marshal(payload)
+		r := httptest.NewRequest(http.MethodPost, "/api/super/actions/"+id+"/resolve", bytes.NewReader(b))
+		r.Header.Set("Authorization", "Bearer "+master)
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, w.Body.Bytes()
+	}
+
+	code1, body1 := post(act.ID, map[string]any{"choice": customText, "by": "web", "custom": true})
+	if code1 != http.StatusOK {
+		t.Fatalf("custom resolve want 200, got %d body=%s", code1, string(body1))
+	}
+	var out struct {
+		OK     bool         `json:"ok"`
+		Action model.Action `json:"action"`
+	}
+	if err := json.Unmarshal(body1, &out); err != nil {
+		t.Fatalf("decode custom resolve response: %v", err)
+	}
+	if out.Action.ChosenKey != "custom" || out.Action.ChosenLabel != customText {
+		t.Fatalf("custom resolve mismatch: %+v", out.Action)
+	}
+
+	// Duplicate submit returns 409 Conflict.
+	if code2, _ := post(act.ID, map[string]any{"choice": "2", "by": "web"}); code2 != http.StatusConflict {
+		t.Fatalf("duplicate resolve after custom answer want 409, got %d", code2)
+	}
+
+	// Custom free-text against worker_dialog returns 400 Bad Request.
+	dlg := &model.Action{
+		ID:        "a-http-dlg",
+		Kind:      model.ActionKindWorkerDialog,
+		Thread:    model.MainThread,
+		Title:     "Run command",
+		Choices:   []model.ActionChoice{{Key: "1", Label: "Allow"}},
+		Status:    model.ActionPending,
+		CreatedAt: time.Now(),
+	}
+	if err := srv.Store.InsertAction(ctx, dlg); err != nil {
+		t.Fatal(err)
+	}
+	if codeDlg, _ := post(dlg.ID, map[string]any{"choice": "自定义命令", "by": "web", "custom": true}); codeDlg != http.StatusBadRequest {
+		t.Fatalf("custom resolve on worker_dialog want 400, got %d", codeDlg)
+	}
+}

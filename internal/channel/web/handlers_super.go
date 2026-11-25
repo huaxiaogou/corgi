@@ -177,6 +177,7 @@ func (s *Server) handleResolveAction(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Choice string `json:"choice"`
 		By     string `json:"by"`
+		Custom bool   `json:"custom"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -185,7 +186,15 @@ func (s *Server) handleResolveAction(w http.ResponseWriter, r *http.Request) {
 	if by == "" {
 		by = "web"
 	}
-	act, err := s.Engine.ResolveAction(r.Context(), id, by, body.Choice)
+	var (
+		act *model.Action
+		err error
+	)
+	if body.Custom {
+		act, err = s.Engine.ResolveActionCustom(r.Context(), id, by, body.Choice)
+	} else {
+		act, err = s.Engine.ResolveAction(r.Context(), id, by, body.Choice)
+	}
 	if err != nil {
 		code := http.StatusBadRequest
 		if errors.Is(err, store.ErrNotFound) {

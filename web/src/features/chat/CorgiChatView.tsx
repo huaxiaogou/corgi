@@ -5,6 +5,7 @@ import { DecisionCard } from "../../components/DecisionCard";
 import { DecisionReceiptCard } from "../../components/DecisionReceiptCard";
 import { MarkdownText } from "../../components/MarkdownText";
 import { PromptQueueTray } from "../../components/PromptQueueTray";
+import { QuoteBlock } from "../../components/QuoteBlock";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { api } from "../../lib/api";
 import type { Action, Entry, Machine, QueuedPrompt, Settings, SuperView } from "../../types/api";
@@ -518,16 +519,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
               }
               return (
                 <div key={entry.id} id={`entry-${entry.id}`} className={`flex flex-col items-end gap-1 ${hlClass}`}>
-                  {entry.re && (
-                    <button
-                      type="button"
-                      onClick={() => entry.re?.entry && jumpToEntry(entry.re.entry)}
-                      className={`max-w-[82%] text-left text-[11.5px] text-muted px-2.5 py-1 rounded-lg surface-rail border border-hairline truncate ${entry.re.entry ? "hover:text-primary cursor-pointer" : "cursor-default"}`}
-                      title={entry.re.text}
-                    >
-                      {entry.re.who}：{entry.re.text}
-                    </button>
-                  )}
+                  {entry.re && <QuoteBlock quote={entry.re} align="right" onJumpToEntry={jumpToEntry} />}
                   <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-sm text-[14px] leading-relaxed pill-user whitespace-pre-wrap">{entry.text}</div>
                   <span className="text-[11px] text-muted pr-1">
                     {entry.channel === "wecom" ? "企业微信 · " : ""}
@@ -542,11 +534,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                   <CorgiMark className="w-4 h-4" />
                 </div>
                 <div className="flex-1 min-w-0 space-y-1.5">
-                  {entry.re && (
-                    <div className="text-xs text-muted pl-2.5 border-l-2 border-strong truncate">
-                      {entry.re.who}：{entry.re.text}
-                    </div>
-                  )}
+                  {entry.re && <QuoteBlock quote={entry.re} align="left" onJumpToEntry={jumpToEntry} />}
                   <div className="text-[14.5px]">
                     <MarkdownText text={entry.text} onOpenFile={(p) => onOpenFile(p)} />
                   </div>
@@ -568,9 +556,13 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
             <div className="pl-0 sm:pl-10 space-y-2">
               <DecisionCard
                 action={topAction}
-                onResolve={async (id, key) => {
-                  await api(`/api/super/actions/${encodeURIComponent(id)}/resolve`, { choice: key, by: "web" });
-                  onToast("已拍板并同步");
+                onResolve={async (id, key, custom) => {
+                  await api(`/api/super/actions/${encodeURIComponent(id)}/resolve`, {
+                    choice: key,
+                    by: "web",
+                    ...(custom ? { custom: true } : {}),
+                  });
+                  onToast(custom ? "已提交自定义回答并同步" : "已拍板并同步");
                 }}
                 onSnooze={async (id) => {
                   await api(`/api/super/actions/${encodeURIComponent(id)}/snooze`, {});

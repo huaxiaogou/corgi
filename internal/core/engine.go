@@ -54,9 +54,10 @@ type SayRequest struct {
 	Channel   string `json:"channel"` // web | wecom | cli
 	From      string `json:"from"`
 	Text      string `json:"text"`
-	ReEntryID string `json:"re"`
-	ActionID  string `json:"action_id,omitempty"`
-	QuoteText string `json:"quote_text,omitempty"`
+	ReEntryID     string `json:"re"`
+	ActionID      string `json:"action_id,omitempty"`
+	PromptContext string `json:"-"`
+	QuoteText     string `json:"quote_text,omitempty"`
 	Machine   string `json:"machine,omitempty"`
 	Kind      string `json:"kind,omitempty"`
 	Model     string `json:"model,omitempty"`
@@ -329,14 +330,14 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 			if prev.Role == "user" {
 				who = "你"
 			}
-			qText := oneLineClip(prev.Text, 120)
+			qText := oneLineClip(prev.Text, 240)
 			if prev.Role == "user" && prev.ActionID != "" && prev.Re != nil && strings.TrimSpace(prev.Re.Text) != "" {
-				qText = oneLineClip("拍板「"+prev.Text+"」｜原问："+prev.Re.Text, 140)
+				qText = oneLineClip("拍板「"+prev.Text+"」｜原问："+prev.Re.Text, 260)
 			}
 			quote = &model.Quote{Entry: prev.ID, Who: who, Text: qText}
 		}
 	} else if req.QuoteText != "" {
-		quote = &model.Quote{Who: "引用", Text: oneLineClip(req.QuoteText, 120)}
+		quote = &model.Quote{Who: "引用", Text: oneLineClip(req.QuoteText, 240)}
 	}
 
 	eid, eseq, err := e.store.NextID(ctx, "e")
@@ -357,7 +358,9 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 
 	// Build prompt payload enriched with one-off dispatch overrides or quote context.
 	promptText := text
-	if quote != nil {
+	if strings.TrimSpace(req.PromptContext) != "" {
+		promptText = strings.TrimSpace(req.PromptContext) + "\n" + promptText
+	} else if quote != nil {
 		promptText = fmt.Sprintf("[In reply to: %q]\n%s", quote.Text, promptText)
 	}
 	if hint := e.buildDispatchHint(req); hint != "" {

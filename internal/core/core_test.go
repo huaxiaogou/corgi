@@ -692,3 +692,124 @@ func TestDefaultRotatePctAndNormalization(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveActionCustomBypassesFuzzyMatchAndPreservesRouterContext(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"claude"})
+	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	question := "待定事项：如果团队其他同事也使用 Corgi，接入方案需先定身份隔离与权限边界。你想按哪种方向继续细化？"
+	qEntry, act, _, err := eng.ReplyWithMeta(ctx, ReplyRequest{
+		Thread:  model.MainThread,
+		Text:    question,
+		Options: []string{"个人手机先用", "按共享服务设计", "暂不推进"},
+		Digest:  true,
+	})
+	if err != nil || qEntry == nil || act == nil {
+		t.Fatalf("ReplyWithMeta failed: entry=%v act=%v err=%v", qEntry, act, err)
+	}
+
+	// Custom text deliberately contains "共享" to prove custom=true never fuzzy-matches preset choice 2.
+	customAnswer := "先研究不接太湖，或一个太湖供大家共享，怎么解决这个场景"
+	resolved, err := eng.ResolveActionCustom(ctx, act.ID, "web", customAnswer)
+	if err != nil {
+		t.Fatalf("ResolveActionCustom failed: %v", err)
+	}
+	if resolved.Status != model.ActionResolved || resolved.ChosenKey != "custom" || resolved.ChosenLabel != customAnswer || resolved.ResolvedBy != "web" {
+		t.Fatalf("unexpected custom resolved action: %+v", resolved)
+	}
+	if len(resolved.Choices) != 3 {
+		t.Fatalf("original 3 preset choices must remain preserved, got %+v", resolved.Choices)
+	}
+	if _, err := eng.ResolveAction(ctx, act.ID, "wecom", "2"); !errors.Is(err, store.ErrActionAlreadyResolved) {
+		t.Fatalf("expected ErrActionAlreadyResolved on second resolve, got %v", err)
+	}
+
+	// Verify SuperView exposes the resolved custom action & linked user entry.
+	snap := eng.Snapshot(ctx, model.MainThread)
+	if len(snap.Actions) != 0 {
+		t.Fatalf("expected 0 pending actions, got %+v", snap.Actions)
+	}
+	if ra := snap.ResolvedActions[act.ID]; ra == nil || ra.ChosenKey != "custom" || ra.ChosenLabel != customAnswer {
+		t.Fatalf("ResolvedActions[%s] mismatch: %+v", act.ID, ra)
+	}
+	var userReceipt *model.Entry
+	for _, en := range snap.Entries {
+		if en.Role == "user" && en.ActionID == act.ID {
+			userReceipt = en
+		}
+	}
+	if userReceipt == nil || userReceipt.Text != customAnswer || userReceipt.Re == nil || userReceipt.Re.Entry != qEntry.ID {
+		t.Fatalf("unexpected custom user receipt entry: %+v", userReceipt)
+	}
+
+	// Verify Router trigger includes structured decision-card context + preset options + custom answer.
+	trigs, err := st.ListThreadTriggers(ctx, model.MainThread, 10)
+	if err != nil || len(trigs) == 0 {
+		t.Fatalf("ListThreadTriggers failed: trigs=%v err=%v", trigs, err)
+	}
+	gotPrompt := trigs[0].Text
+	for _, sub := range []string{
+		"In reply to decision card",
+		"身份隔离与权限边界",
+		"1. 个人手机先用",
+		"2. 按共享服务设计",
+		"3. 暂不推进",
+		"custom answer",
+		customAnswer,
+	} {
+		if !strings.Contains(gotPrompt, sub) {
+			t.Fatalf("router trigger prompt missing %q:\n%s", sub, gotPrompt)
+		}
+	}
+
+	// Worker dialog must reject custom free-text input and stay pending.
+	dlg := &model.Action{
+		ID:        "a-dlg-custom-deny",
+		Kind:      model.ActionKindWorkerDialog,
+		Thread:    model.MainThread,
+		Title:     "Run command",
+		Choices:   []model.ActionChoice{{Key: "1", Label: "Allow"}},
+		Status:    model.ActionPending,
+		CreatedAt: time.Now(),
+	}
+	if err := st.InsertAction(ctx, dlg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.ResolveActionCustom(ctx, dlg.ID, "web", "随便输入"); err == nil {
+		t.Fatal("expected error when submitting custom free-text to worker_dialog")
+	}
+	if still, _ := st.GetAction(ctx, dlg.ID); still == nil || still.Status != model.ActionPending {
+		t.Fatalf("worker_dialog should remain pending after rejected custom input, got %+v", still)
+	}
+
+	// User quoting a long Corgi message preserves >120 runes (up to 240 runes) for expandable UI quote display.
+	longMsg := strings.Repeat("这是一段用于验证引用回复不被过早截断的长说明内容，包含上下文和关键验收细节。", 5)
+	longEntry, _, _, err := eng.Reply(ctx, model.MainThread, longMsg, "", nil, false)
+	if err != nil || longEntry == nil {
+		t.Fatalf("long Reply failed: %v", err)
+	}
+	quotedUser, _, err := eng.Say(ctx, SayRequest{
+		Thread:    model.MainThread,
+		Channel:   "web",
+		From:      "you",
+		Text:      "我引用你这段再确认下",
+		ReEntryID: longEntry.ID,
+	})
+	if err != nil || quotedUser == nil || quotedUser.Re == nil {
+		t.Fatalf("quoted Say failed: entry=%+v err=%v", quotedUser, err)
+	}
+	if quotedUser.Re.Entry != longEntry.ID || len([]rune(quotedUser.Re.Text)) <= 120 {
+		t.Fatalf("expected user quote to retain >120 runes (up to 240), got len=%d re=%+v", len([]rune(quotedUser.Re.Text)), quotedUser.Re)
+	}
+}

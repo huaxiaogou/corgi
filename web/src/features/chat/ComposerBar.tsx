@@ -133,11 +133,11 @@ export function ComposerBar({
         className={`max-w-[740px] mx-auto composer-box rounded-2xl px-4 pt-3 pb-2.5 space-y-2 transition-colors ${dragging ? "border-strong surface-rail" : ""}`}
       >
         {replyTo && (
-          <div className="flex items-center justify-between text-xs px-2.5 py-1 rounded-lg surface-rail text-secondary">
-            <span className="truncate">
+          <div className="flex items-start justify-between gap-2 text-xs px-2.5 py-1.5 rounded-lg surface-rail text-secondary">
+            <span className="line-clamp-2 break-words leading-relaxed">
               {replyTo.role === "user" && replyTo.action_id ? `补充说明（已选：${replyTo.text}）` : `引用：${replyTo.text}`}
             </span>
-            <button type="button" onClick={onClearReply} className="cursor-pointer ml-2">
+            <button type="button" onClick={onClearReply} className="cursor-pointer shrink-0 mt-0.5">
               <X className="w-3.5 h-3.5" />
             </button>
           </div>

@@ -612,6 +612,23 @@ func TestCompactButtonsPreserveChoiceKeysAndClickMapping(t *testing.T) {
 	if rt, _ := resolvedCard["replace_text"].(string); rt != "已选：按共享服务设计" {
 		t.Fatalf("resolved replace_text = %q, want 已选：按共享服务设计", rt)
 	}
+
+	// Custom long answer resolved on Web also refreshes WeCom card cleanly with full quote_area.
+	customAct := &model.Action{
+		ID:          "a556",
+		Kind:        model.ActionKindPatrolDigest,
+		Title:       "多用户接入方向确认",
+		Summary:     "多用户接入方向确认",
+		Status:      model.ActionResolved,
+		ResolvedBy:  "web",
+		ChosenKey:   "custom",
+		ChosenLabel: "先研究不接太湖，或一个太湖供大家共用，看看权限隔离和单实例怎么解",
+	}
+	customResolvedCard := BuildResolvedActionCard(customAct, "a556")
+	qa, ok := customResolvedCard["quote_area"].(map[string]any)
+	if !ok || qa["title"] != "已选方案" || !strings.Contains(qa["quote_text"].(string), "一个太湖供大家共用") {
+		t.Fatalf("custom resolved WeCom card missing full quote_area: %+v", customResolvedCard)
+	}
 }
 
 func TestParseCardEventCallbackVariants(t *testing.T) {
