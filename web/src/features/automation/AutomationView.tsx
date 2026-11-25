@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../../lib/api";
-import type { DeviceView, MemorySnapshot, PendingWeComUser, Policy, Settings, Timer, TriggerView } from "../../types/api";
+import type { DeviceView, Machine, MemorySnapshot, PendingWeComUser, Policy, Settings, Timer, TriggerView } from "../../types/api";
 import { DevicesTab } from "./DevicesTab";
 import { HooksTab } from "./HooksTab";
 import { MemoryTab } from "./MemoryTab";
@@ -41,6 +41,7 @@ export function AutomationView({ onToast }: { onToast: (msg: string) => void }) 
   const [memory, setMemory] = useState<MemorySnapshot | null>(null);
   const [timers, setTimers] = useState<Timer[]>([]);
   const [devices, setDevices] = useState<DeviceView[]>([]);
+  const [machines, setMachines] = useState<Machine[]>([]);
   const [pairResult, setPairResult] = useState<{ code: string; kind: string; pair_url: string; addr: string } | null>(null);
 
   const load = async () => {
@@ -60,7 +61,9 @@ export function AutomationView({ onToast }: { onToast: (msg: string) => void }) 
     } else if (tab === "timers") {
       setTimers((await api<{ timers: Timer[] }>("/api/super/timers")).timers ?? []);
     } else if (tab === "devices") {
-      setDevices((await api<{ devices: DeviceView[] }>("/api/devices")).devices ?? []);
+      const dr = await api<{ devices: DeviceView[]; machines: Machine[] }>("/api/devices");
+      setDevices(dr.devices ?? []);
+      setMachines(dr.machines ?? []);
     }
   };
 
@@ -166,9 +169,11 @@ export function AutomationView({ onToast }: { onToast: (msg: string) => void }) 
           {tab === "devices" && (
             <DevicesTab
               devices={devices}
+              machines={machines}
               pairResult={pairResult}
               onGenPair={genPair}
               onRevoke={(id) => runAction(() => api(`/api/devices/${encodeURIComponent(id)}/delete`, {}))}
+              onToast={onToast}
             />
           )}
         </div>

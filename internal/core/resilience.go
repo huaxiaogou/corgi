@@ -2,8 +2,6 @@ package core
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -94,7 +92,7 @@ func (e *Engine) handleRouterLifecycle(ctx context.Context, live map[string]live
 	}
 
 	st := e.Settings()
-	if li.status == "blocked" && !st.AskPermissions {
+	if !st.AskPermissions && (li.status == "blocked" || (li.status == "idle" && now.Sub(e.routerLaunchAt) < 2*time.Minute)) {
 		e.trustOwnDir(ctx, li.pane)
 	}
 
@@ -127,12 +125,11 @@ func (e *Engine) handleRouterLifecycle(ctx context.Context, live map[string]live
 	// 2. Router Watchdog: nudge once if screen hasn't changed for StallMinutes while working.
 	if li.status == "working" && st.StallMinutes > 0 {
 		stallDur := time.Duration(st.StallMinutes) * time.Minute
-		rr, err := e.fleet.Read(ctx, li.pane, "recent", "text", 30)
+		rr, err := e.fleet.Read(ctx, li.pane, "detection", "text", 0)
 		if err != nil {
 			return
 		}
-		sum := sha1.Sum([]byte(rr.Text))
-		h := hex.EncodeToString(sum[:8])
+		h := agent.ProgressHash(rr.Text)
 
 		e.mu.Lock()
 		mk, seen := e.lastScreen[model.RouterName]

@@ -280,3 +280,128 @@ func TestAgyParseTranscriptLines(t *testing.T) {
 		t.Fatalf("unexpected agy generic msg: ok=%v msgs=%+v", ok, gMsgs)
 	}
 }
+
+func TestCodeBuddyPreTrustWorkspaceIdempotent(t *testing.T) {
+	home := t.TempDir()
+	ws := filepath.Join(home, "corgi")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cbDir := filepath.Join(home, ".codebuddy")
+	if err := os.MkdirAll(cbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seed := `{"model":"hy4std","gateway":{"auth":"password"},"trustedDirectories":["/existing"]}` + "\n"
+	if err := os.WriteFile(filepath.Join(cbDir, "settings.json"), []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cb := &CodeBuddyAdapter{}
+	if err := cb.PreTrustWorkspace(home, ws); err != nil {
+		t.Fatalf("first PreTrustWorkspace: %v", err)
+	}
+	if err := cb.PreTrustWorkspace(home, ws); err != nil {
+		t.Fatalf("second PreTrustWorkspace: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(cbDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Model   string            `json:"model"`
+		Gateway map[string]string `json:"gateway"`
+		Trusted []string          `json:"trustedDirectories"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Model != "hy4std" || parsed.Gateway["auth"] != "password" {
+		t.Fatalf("existing settings clobbered: %+v", parsed)
+	}
+	if !slices.Contains(parsed.Trusted, "/existing") || !slices.Contains(parsed.Trusted, ws) {
+		t.Fatalf("unexpected trustedDirectories: %v", parsed.Trusted)
+	}
+}
+
+func TestAgyContextProtoProgressHashWizardAndPatch(t *testing.T) {
+	encodeVarint := func(v uint64) []byte {
+		var out []byte
+		for {
+			b := byte(v & 0x7f)
+			v >>= 7
+			if v != 0 {
+				b |= 0x80
+			}
+			out = append(out, b)
+			if v == 0 {
+				break
+			}
+		}
+		return out
+	}
+	encodeBytesField := func(fieldNum int, payload []byte) []byte {
+		tag := encodeVarint(uint64(fieldNum<<3 | 2))
+		ln := encodeVarint(uint64(len(payload)))
+		return append(append(tag, ln...), payload...)
+	}
+	encodeVarintField := func(fieldNum int, v uint64) []byte {
+		return append(encodeVarint(uint64(fieldNum<<3)), encodeVarint(v)...)
+	}
+
+	m10 := append(encodeVarintField(1, 54000), encodeVarintField(4, 200000)...)
+	blob := encodeBytesField(1, encodeBytesField(9, encodeBytesField(10, m10)))
+	usage, ok := parseAgyContextProto(blob)
+	if !ok || usage.Used != 54000 || usage.Window != 200000 || usage.Pct() != 27 {
+		t.Fatalf("unexpected agy proto usage: ok=%v usage=%+v", ok, usage)
+	}
+
+	// ProgressHash must ignore ticking spinner seconds and token counters.
+	h1 := ProgressHash("● Bash(corgi list)\n✹ Printing… (140s · streaming · ↓ 7.8k tokens · Task running for a while)")
+	h2 := ProgressHash("● Bash(corgi list)\n✹ Printing… (195s · streaming · ↓ 9.2k tokens · Task running for a while)")
+	h3 := ProgressHash("● Bash(corgi list)\n● Done! Replied to user.")
+	if h1 != h2 {
+		t.Fatalf("ProgressHash should ignore spinner ticks: %s vs %s", h1, h2)
+	}
+	if h1 == h3 {
+		t.Fatal("ProgressHash should change when real output lands")
+	}
+
+	// Wizard horizontal buttons "[Previous]  [Done]" detection and MoveKeys.
+	wiz := "Terms of Service & Data Use\nPress Enter to confirm.\n  [Previous]  [Done]"
+	if !ScreenAsks(wiz) {
+		t.Fatal("expected wizard screen to be recognized by ScreenAsks")
+	}
+	ap := ParseApproval(wiz)
+	if len(ap.Choices) != 2 || ap.Choices[1].Label != "Done" || !ap.Choices[1].Active {
+		t.Fatalf("unexpected wizard approval: %+v", ap)
+	}
+	if keys := MoveKeys(ap, 0); !slices.Equal(keys, []string{"up", "enter"}) {
+		t.Fatalf("unexpected MoveKeys to choice 0: %v", keys)
+	}
+
+	// MsgSync incremental patching + EarlierMessages.
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "big.jsonl")
+	var lines []string
+	for i := 0; i < 80; i++ {
+		lines = append(lines, `{"type":"assistant","message":{"role":"assistant","content":"msg-`+string(rune('A'+(i%26)))+`"}}`)
+	}
+	if err := os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewTranscriptReader(logPath, &ClaudeAdapter{}, "")
+	tr.OpenTail()
+	var syncer MsgSync
+	p1 := syncer.Patch(tr)
+	if p1 == nil || len(p1.Msgs) != 60 || p1.Earlier == 0 {
+		t.Fatalf("unexpected initial tail patch: %+v", p1)
+	}
+	if syncer.Patch(tr) != nil {
+		t.Fatal("expected nil patch when transcript unchanged")
+	}
+	older, nextCur := EarlierMessages(logPath, &ClaudeAdapter{}, "", p1.Earlier)
+	if len(older) != 20 || nextCur != 0 {
+		t.Fatalf("expected 20 older messages and cursor=0, got len=%d cur=%d", len(older), nextCur)
+	}
+}

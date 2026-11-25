@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kiperjing/corgi/internal/model"
+	"github.com/kiperjing/corgi/internal/runtime/agent"
 	"github.com/kiperjing/corgi/internal/runtime/herdr"
 )
 
@@ -26,6 +28,7 @@ type RemoteMachine struct {
 // Remote IDs carry "@<machine>" suffixes so callers address panes/workspaces transparently.
 type Fleet struct {
 	mu       sync.RWMutex
+	corgiDir string
 	local    model.Machine
 	localH   *herdr.Client
 	remotes  map[string]*RemoteMachine
@@ -56,6 +59,17 @@ func NewFleet(localHerdr *herdr.Client, hostname, home, version string, localAge
 		runs:    map[string][2]string{},
 		seenAt:  map[string]time.Time{},
 		doneAt:  map[string]time.Time{},
+	}
+}
+
+// SetCorgiDir configures on-disk custom-agent persistence for both local and remote herdr clients.
+func (f *Fleet) SetCorgiDir(dir string) {
+	f.mu.Lock()
+	f.corgiDir = dir
+	lh := f.localH
+	f.mu.Unlock()
+	if lh != nil && dir != "" {
+		lh.SetCustomStore(filepath.Join(dir, "custom_agents.json"))
 	}
 }
 
@@ -93,12 +107,21 @@ func JoinID(localID, machine string) string {
 func (f *Fleet) Attach(rm *RemoteMachine) {
 	f.mu.Lock()
 	old := f.remotes[rm.Info.ID]
+	dir := f.corgiDir
 	rm.Info.Online = true
 	rm.Info.Since = time.Now()
 	f.remotes[rm.Info.ID] = rm
 	cb := f.onChange
 	f.mu.Unlock()
 
+	if rm.Herdr != nil {
+		if dir != "" && rm.Info.ID != "" {
+			rm.Herdr.SetCustomStore(filepath.Join(dir, "custom_agents_"+rm.Info.ID+".json"))
+		}
+		if old != nil && old.Herdr != nil {
+			rm.Herdr.InheritCustom(old.Herdr)
+		}
+	}
 	if old != nil && old != rm && old.CloseFn != nil {
 		old.CloseFn()
 	}
@@ -157,6 +180,20 @@ func (f *Fleet) ResolveMachine(nameOrID string) string {
 		}
 	}
 	return n
+}
+
+// Machine looks up a connected machine ("" / "hub" / "local" for hub host, or remote node ID/name).
+func (f *Fleet) Machine(nameOrID string) (model.Machine, bool) {
+	id := f.ResolveMachine(nameOrID)
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if id == "" {
+		return f.local, true
+	}
+	if r, ok := f.remotes[id]; ok && r.Info.Online {
+		return r.Info, true
+	}
+	return model.Machine{}, false
 }
 
 // HTTPClient returns the tunneled HTTP client for a remote node.
@@ -410,11 +447,18 @@ func (f *Fleet) StartAgent(ctx context.Context, paneID, kind, name string, args 
 }
 
 // Prompt sends a prompt to target (agent name or suffixed pane ID).
+// If the target pane is currently showing an interactive startup/confirmation dialog,
+// Prompt returns agent_blocked instead of letting the dialog swallow the message.
 func (f *Fleet) Prompt(ctx context.Context, target, text string) error {
 	localTarget, machine := f.resolveTarget(target)
 	cl, err := f.clientFor(machine)
 	if err != nil {
 		return err
+	}
+	if strings.Contains(localTarget, ":") {
+		if rr, rErr := cl.Read(ctx, localTarget, "detection", "text", 0); rErr == nil && agent.ScreenAsks(rr.Text) {
+			return &herdr.Error{Code: "agent_blocked", Message: "agent is showing a confirmation dialog"}
+		}
 	}
 	return cl.Prompt(ctx, localTarget, text)
 }

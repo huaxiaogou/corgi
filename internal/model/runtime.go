@@ -141,6 +141,22 @@ type Message struct {
 	Input   string   `json:"input,omitempty"`
 	Output  string   `json:"output,omitempty"`
 	Error   bool     `json:"error,omitempty"`
+	At      int64    `json:"-"` // byte offset in transcript log for pagination
+}
+
+// MsgPatch delivers an incremental transcript update over SSE.
+type MsgPatch struct {
+	Base    int        `json:"base"`
+	From    int        `json:"from"`
+	Msgs    []*Message `json:"msgs"`
+	Earlier int64      `json:"earlier,omitempty"`
+}
+
+// PaneSession carries per-pane topic title, session ID, and launch model/effort from a machine.
+type PaneSession struct {
+	Title   string     `json:"title,omitempty"`
+	Session string     `json:"session,omitempty"`
+	Run     *[2]string `json:"run,omitempty"`
 }
 
 // Choice is one selectable option parsed from a terminal confirmation dialog.

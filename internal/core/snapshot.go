@@ -1,0 +1,185 @@
+package core
+
+import (
+	"context"
+	"slices"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/kiperjing/corgi/internal/model"
+	"github.com/kiperjing/corgi/internal/runtime/agent"
+	"github.com/kiperjing/corgi/internal/store"
+)
+
+// AddTimer creates and persists a new timer.
+func (e *Engine) AddTimer(ctx context.Context, spec, text, thread, target, owner string) (*model.Timer, error) {
+	next, err := ParseTimerSpec(spec, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	id, _, err := e.store.NextID(ctx, "tm")
+	if err != nil {
+		return nil, err
+	}
+	tm := &model.Timer{
+		ID:      id,
+		Spec:    strings.TrimSpace(spec),
+		Thread:  orStr(thread, model.MainThread),
+		Target:  strings.TrimSpace(target),
+		Text:    strings.TrimSpace(text),
+		NextRun: next,
+		Enabled: true,
+		Owner:   owner,
+	}
+	if err := e.store.UpsertTimer(ctx, tm); err != nil {
+		return nil, err
+	}
+	e.notifyChanged()
+	return tm, nil
+}
+
+// Show expands any ID (trigger, entry, thread, or worker) for `corgi show` (Chain of Recall).
+func (e *Engine) Show(ctx context.Context, id string) (any, error) {
+	if t, err := e.store.GetTrigger(ctx, id); err == nil {
+		return t, nil
+	}
+	if en, err := e.store.GetEntry(ctx, id); err == nil {
+		return en, nil
+	}
+	if w, err := e.store.GetWorker(ctx, id); err == nil {
+		trigs, _ := e.store.ListWorkerTriggers(ctx, w.Name, 15)
+		out := map[string]any{"worker": w, "triggers": trigs}
+		if !w.Ended && w.PaneID != "" {
+			out["last_message"] = e.lastWorkerSummary(ctx, w)
+		}
+		return out, nil
+	}
+	if th, err := e.store.GetThread(ctx, id); err == nil {
+		trigs, _ := e.store.ListThreadTriggers(ctx, id, 30)
+		return map[string]any{"thread": th, "triggers": trigs}, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+// MemorySnapshot returns the memory files, dream journals, budget metrics, and dream schedule.
+func (e *Engine) MemorySnapshot(ctx context.Context, displayDir string) MemorySnapshot {
+	snap := MemorySnapshot{
+		Dir:         displayDir,
+		Files:       e.memory.ListFiles(),
+		Dreams:      e.memory.ListDreams(),
+		UpFrontSize: e.memory.UpFrontSize(),
+		MsgSize:     e.memory.MessagesSize(),
+		Budget:      UpFrontBudgetBytes,
+		Dreaming:    e.Dreaming(),
+	}
+	if last := e.LastDream(ctx); !last.IsZero() {
+		snap.LastDream = &last
+	}
+	if next := e.NextDream(ctx, time.Now()); !next.IsZero() {
+		snap.NextDream = &next
+	}
+	return snap
+}
+
+// Snapshot builds the SuperView pushed to Web/PWA clients.
+func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
+	entries, earlier, _ := e.store.ListEntries(ctx, thread, 200)
+	actions, _ := e.store.ListPendingActions(ctx)
+	pinned, _ := e.store.ListPinnedEntries(ctx, 50)
+	workers, _ := e.store.ListWorkers(ctx)
+	threads, _ := e.store.ListThreads(ctx, 100)
+	queued, _ := e.store.ListQueuedTriggers(ctx)
+
+	var activeWorkers []*model.Worker
+	for _, w := range workers {
+		if !w.Ended || time.Since(w.CreatedAt) < 12*time.Hour {
+			activeWorkers = append(activeWorkers, w)
+		}
+	}
+	sort.Slice(activeWorkers, func(i, j int) bool { return activeWorkers[i].CreatedAt.After(activeWorkers[j].CreatedAt) })
+
+	qRouter := 0
+	for _, t := range queued {
+		if len(t.Targets) == 0 || slices.Contains(t.Targets, model.RouterName) {
+			qRouter++
+		}
+	}
+
+	e.mu.Lock()
+	st := e.settings
+	rv := model.RouterView{
+		Kind:     st.RouterKind,
+		Model:    st.RouterModel,
+		Effort:   st.RouterEffort,
+		Status:   "asleep",
+		Context:  e.routerUsage.Pct(),
+		RotateAt: e.rotatePctLocked(),
+		Handover: e.handover != nil,
+		Dreaming: e.dream != nil,
+	}
+	if e.routerLaunching {
+		rv.Status = "starting"
+	}
+	if e.dream != nil {
+		rv.Status = "dreaming"
+	}
+	askedAt := e.routerAskedAt
+	routerRun := e.routerRun
+	sink := e.sink
+	e.mu.Unlock()
+
+	if e.fleet != nil {
+		if live, err := e.fleet.Agents(ctx); err == nil {
+			for _, a := range live {
+				if a.Name != nil && *a.Name == model.RouterName {
+					rv.Alive = true
+					rv.PaneID = a.PaneID
+					rv.Status = a.AgentStatus
+					if a.Agent != nil && *a.Agent != "" {
+						rv.Kind = *a.Agent
+					}
+					if routerRun != nil {
+						rv.Model, rv.Effort = routerRun[0], routerRun[1]
+						rv.Pending = *routerRun != [2]string{st.RouterModel, st.RouterEffort} ||
+							agent.NormalizeKind(rv.Kind) != agent.NormalizeKind(st.RouterKind)
+					}
+					if rv.Status == "working" && !askedAt.IsZero() {
+						for i := len(entries) - 1; i >= 0 && !entries[i].At.Before(askedAt); i-- {
+							if r := entries[i].Role; r == "corgi" || r == "user" {
+								rv.Replied = r == "corgi"
+								break
+							}
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+
+	var follow *model.FollowView
+	if timers, err := e.store.ListTimers(ctx); err == nil {
+		for _, tm := range timers {
+			if tm.Enabled && !tm.NextRun.IsZero() && (strings.HasPrefix(tm.Spec, "in ") || strings.HasPrefix(tm.Spec, "at ")) && tm.Owner != "you" {
+				follow = &model.FollowView{Next: tm.NextRun, NextText: oneLineClip(tm.Text, 80)}
+				break
+			}
+		}
+	}
+
+	return model.SuperView{
+		Router:       rv,
+		Entries:      entries,
+		Earlier:      earlier,
+		Actions:      actions,
+		Pinned:       pinned,
+		Workers:      activeWorkers,
+		Threads:      threads,
+		Queued:       len(queued),
+		QueuedRouter: qRouter,
+		Paused:       st.Paused,
+		WeComOnline:  sink.WeComOnline(),
+		Follow:       follow,
+	}
+}

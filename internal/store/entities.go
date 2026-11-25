@@ -329,3 +329,19 @@ func (s *Store) ListEndedSessions(ctx context.Context, limit int) ([]*model.Ende
 	}
 	return out, rows.Err()
 }
+
+// DeleteEndedSession removes one archived session by ID.
+func (s *Store) DeleteEndedSession(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM ended_sessions WHERE id = ?`, id)
+	return err
+}
+
+// ForgetEndedSession removes an archived session once it becomes active again.
+func (s *Store) ForgetEndedSession(ctx context.Context, kind, machine, session string) error {
+	if session == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM ended_sessions WHERE kind = ? AND machine = ? AND session_id = ?`,
+		kind, machine, session)
+	return err
+}

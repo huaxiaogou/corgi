@@ -35,11 +35,13 @@ type DialFunc func(ctx context.Context) (net.Conn, error)
 
 // Client speaks herdr's newline-delimited JSON socket API.
 type Client struct {
-	dial     DialFunc
-	home     string
-	seq      atomic.Uint64
-	customMu sync.Mutex
-	custom   map[string]model.Agent // fallback-launched agents (e.g. codebuddy when herdr lacks native kind)
+	dial       DialFunc
+	home       string
+	seq        atomic.Uint64
+	customMu   sync.Mutex
+	customPath string
+	custom     map[string]model.Agent // fallback-launched agents (e.g. codebuddy when herdr lacks native kind)
+	revCache   map[string]paneRevStatus
 }
 
 // NewClient wraps an arbitrary dialer (used for remote yamux tunnel streams).
@@ -274,6 +276,7 @@ func (c *Client) Agents(ctx context.Context) ([]model.Agent, error) {
 			if lp.Title != nil {
 				ca.TerminalTitle = *lp.Title
 			}
+			ca.AgentStatus = c.inferCustomStatus(ctx, pid, lp.Revision)
 		}
 		r.Agents = append(r.Agents, ca)
 	}
@@ -281,8 +284,10 @@ func (c *Client) Agents(ctx context.Context) ([]model.Agent, error) {
 		c.customMu.Lock()
 		for _, pid := range stale {
 			delete(c.custom, pid)
+			delete(c.revCache, pid)
 		}
 		c.customMu.Unlock()
+		c.saveCustomSnapshot()
 	}
 	return r.Agents, nil
 }
@@ -366,8 +371,13 @@ func (c *Client) StartAgent(ctx context.Context, paneID, kind, name string, args
 	err := c.Call(ctx, "agent.start", p, nil)
 	if err == nil {
 		c.customMu.Lock()
+		_, had := c.custom[paneID]
 		delete(c.custom, paneID)
+		delete(c.revCache, paneID)
 		c.customMu.Unlock()
+		if had {
+			c.saveCustomSnapshot()
+		}
 		return nil
 	}
 	if !isUnsupportedKindErr(err) {
@@ -407,6 +417,7 @@ func (c *Client) StartAgent(ctx context.Context, paneID, kind, name string, args
 		Ready:        true,
 	}
 	c.customMu.Unlock()
+	c.saveCustomSnapshot()
 	return nil
 }
 
@@ -414,12 +425,15 @@ func (c *Client) StartAgent(ctx context.Context, paneID, kind, name string, args
 // Falls back to pane.send_text + enter for shell-fallback agents or when herdr
 // marks an already-idle agent as launch_pending / not_ready.
 func (c *Client) Prompt(ctx context.Context, target, text string) error {
+	if pid := c.lookupCustomPane(target); pid != "" {
+		if rr, rErr := c.Read(ctx, pid, "detection", "text", 0); rErr == nil && classifyCustomScreen(rr.Text) == "blocked" {
+			return &Error{Code: "agent_blocked", Message: "agent is waiting on a dialog"}
+		}
+		return c.SendText(ctx, pid, text, true)
+	}
 	err := c.Call(ctx, "agent.prompt", map[string]any{"target": target, "text": text}, nil)
 	if err == nil {
 		return nil
-	}
-	if pid := c.lookupCustomPane(target); pid != "" {
-		return c.SendText(ctx, pid, text, true)
 	}
 	var he *Error
 	if !errors.As(err, &he) || (he.Code != "agent_not_found" && he.Code != "agent_not_ready" && he.Code != "not_found") {
@@ -453,6 +467,9 @@ func (c *Client) Prompt(ctx context.Context, target, text string) error {
 		return &Error{Code: "agent_blocked", Message: "agent is " + info.Agent.Status}
 	default:
 		return err
+	}
+	if rr, rErr := c.Read(ctx, pane, "detection", "text", 0); rErr == nil && classifyCustomScreen(rr.Text) == "blocked" {
+		return &Error{Code: "agent_blocked", Message: "agent is waiting on a dialog"}
 	}
 	return c.SendText(ctx, pane, "\x1b[200~"+text+"\x1b[201~", true)
 }

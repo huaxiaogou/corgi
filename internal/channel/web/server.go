@@ -27,21 +27,24 @@ const cookieName = "corgi_token"
 
 // Server serves both the Hub HTTP/SSE/Web API and (when NodeOnly=true) the tunneled Node API.
 type Server struct {
-	Store      *store.Store
-	Engine     *core.Engine
-	Bus        *channel.Bus
-	WeCom      *wecom.Client
-	Fleet      *fleet.Fleet
-	Auth       *fleet.AuthManager
-	Agents     *agent.Registry
-	StaticFS   fs.FS
-	CorgiDir   string
-	Home       string
-	Version    string
-	Port       int
-	PublicURLs []string
-	NodeOnly   bool
-	Logger     *slog.Logger
+	Store          *store.Store
+	Engine         *core.Engine
+	Bus            *channel.Bus
+	WeCom          *wecom.Client
+	Fleet          *fleet.Fleet
+	Auth           *fleet.AuthManager
+	Agents         *agent.Registry
+	StaticFS       fs.FS
+	CorgiDir       string
+	Home           string
+	Version        string
+	Port           int
+	PublicURLs     []string
+	NodeOnly       bool
+	Logger         *slog.Logger
+	ReleaseRepoURL string
+	ExecutablePath string
+	ExecFn         func(exe string)
 
 	buildOnce sync.Once
 	buildTag  string
@@ -49,6 +52,16 @@ type Server struct {
 
 	startMu sync.Mutex
 	started map[string]time.Time
+
+	titleMu sync.Mutex
+	titles  map[string]*machineTitleCache
+
+	updateOnce    sync.Once
+	updateMu      sync.Mutex
+	latestTag     string
+	latestChecked time.Time
+	latestBusy    bool
+	selfUpdateMu  sync.Mutex
 }
 
 // Routes returns the full Hub HTTP handler.
@@ -68,6 +81,10 @@ func (s *Server) Routes() http.Handler {
 	api("GET /api/qr", s.handleQR)
 	api("GET /api/devices", s.handleListDevices)
 	api("POST /api/devices/{id}/delete", s.handleDeleteDevice)
+	api("GET /api/version", s.handleGetVersion)
+	api("GET /api/history", s.handleListHistory)
+	api("POST /api/history/{id}/resume", s.handleResumeHistory)
+	api("POST /api/history/{id}/delete", s.handleDeleteHistory)
 	mux.HandleFunc("GET /api/node/connect", s.handleNodeConnect)
 
 	s.registerMachineRoutes(mux, func(h http.HandlerFunc) http.Handler {
@@ -87,16 +104,21 @@ func (s *Server) NodeRoutes() http.Handler {
 
 func (s *Server) registerMachineRoutes(mux *http.ServeMux, wrap func(http.HandlerFunc) http.Handler) {
 	mux.Handle("GET /api/state", wrap(s.handleGetState))
+	mux.Handle("GET /api/titles", wrap(s.handleListTitles))
+	mux.Handle("POST /api/trust", wrap(s.handleTrustFolder))
+	mux.Handle("POST /api/update", wrap(s.handleSelfUpdate))
 	mux.Handle("GET /api/dirs", wrap(s.handleListDirs))
 	mux.Handle("GET /api/file", wrap(s.handleReadFile))
 	mux.Handle("POST /api/uploads", wrap(s.handleUpload))
 	mux.Handle("GET /api/models", wrap(s.handleListModels))
-	mux.Handle("GET /api/history", wrap(s.handleListHistory))
-	mux.Handle("POST /api/history/{id}/resume", wrap(s.handleResumeHistory))
+	mux.Handle("GET /api/transcript", wrap(s.handleGetTranscript))
 	mux.Handle("POST /api/agents", wrap(s.handleLaunchAgent))
 	mux.Handle("POST /api/agents/{target}/prompt", wrap(s.handlePromptAgent))
 	mux.Handle("GET /api/panes/{id}/stream", wrap(s.handleStreamPane))
 	mux.Handle("GET /api/panes/{id}/chat", wrap(s.handleStreamChat))
+	mux.Handle("GET /api/panes/{id}/earlier", wrap(s.handlePaneEarlier))
+	mux.Handle("GET /api/panes/{id}/last", wrap(s.handleLastMessage))
+	mux.Handle("GET /api/panes/{id}/ask", wrap(s.handlePaneAsk))
 	mux.Handle("POST /api/panes/{id}/text", wrap(s.handleSendText))
 	mux.Handle("POST /api/panes/{id}/keys", wrap(s.handleSendKeys))
 	mux.Handle("POST /api/workspaces/{id}/close", wrap(s.handleCloseWorkspace))
@@ -340,12 +362,17 @@ func (s *Server) routed(h http.HandlerFunc) http.HandlerFunc {
 			if v := r.PathValue(k); v != "" {
 				local, m := fleet.SplitID(v)
 				machine = m
-				reqPath = strings.Replace(reqPath, "/"+v+"/", "/"+local+"/", 1)
+				if strings.Contains(reqPath, "/"+v+"/") {
+					reqPath = strings.Replace(reqPath, "/"+v+"/", "/"+local+"/", 1)
+				} else if strings.HasSuffix(reqPath, "/"+v) {
+					reqPath = strings.TrimSuffix(reqPath, "/"+v) + "/" + local
+				}
 			}
 		}
 		var body []byte
 		switch {
-		case r.URL.Path == "/api/dirs", r.URL.Path == "/api/file", r.URL.Path == "/api/uploads", r.URL.Path == "/api/models":
+		case r.URL.Path == "/api/dirs", r.URL.Path == "/api/file", r.URL.Path == "/api/uploads",
+			r.URL.Path == "/api/models", r.URL.Path == "/api/transcript", r.URL.Path == "/api/update":
 			machine = s.Fleet.ResolveMachine(r.URL.Query().Get("machine"))
 		case r.URL.Path == "/api/agents" && r.Method == http.MethodPost:
 			body, _ = io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))

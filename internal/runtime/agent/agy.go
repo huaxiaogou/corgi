@@ -346,8 +346,126 @@ func cleanAgyToolOutput(raw string) string {
 	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
-func (a *AgyAdapter) ReadContextUsage(_ string, _ int) model.ContextUsage {
+func (a *AgyAdapter) ReadContextUsage(transcriptPath string, _ int) model.ContextUsage {
+	if transcriptPath == "" {
+		return model.ContextUsage{}
+	}
+	// Path shape: <root>/brain/<convID>/.system_generated/logs/transcript[_full].jsonl
+	convDir := filepath.Dir(filepath.Dir(filepath.Dir(transcriptPath)))
+	convID := filepath.Base(convDir)
+	if convID == "" || convID == "." || convID == "/" {
+		return model.ContextUsage{}
+	}
+	root := filepath.Dir(filepath.Dir(convDir))
+	dbPath := filepath.Join(root, "conversations", convID+".db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return model.ContextUsage{}
+	}
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(2000)")
+	if err != nil {
+		return model.ContextUsage{}
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT data FROM gen_metadata ORDER BY rowid DESC LIMIT 8`)
+	if err != nil {
+		return model.ContextUsage{}
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if rows.Scan(&raw) == nil {
+			if u, ok := parseAgyContextProto(raw); ok {
+				return u
+			}
+		}
+	}
 	return model.ContextUsage{}
+}
+
+func parseAgyContextProto(b []byte) (model.ContextUsage, bool) {
+	for _, f1 := range pbSubmessages(b, 1) {
+		for _, f9 := range pbSubmessages(f1, 9) {
+			for _, m := range pbSubmessages(f9, 10) {
+				used, window := pbVarintField(m, 1), pbVarintField(m, 4)
+				if used > 0 && window > 0 {
+					return model.ContextUsage{Used: used, Window: window}, true
+				}
+			}
+		}
+	}
+	return model.ContextUsage{}, false
+}
+
+func walkProtoFields(b []byte, fn func(num, wire int, val uint64, sub []byte)) {
+	readVarint := func() (uint64, bool) {
+		var v uint64
+		for shift := 0; shift < 64; shift += 7 {
+			if len(b) == 0 {
+				return 0, false
+			}
+			c := b[0]
+			b = b[1:]
+			v |= uint64(c&0x7f) << shift
+			if c < 0x80 {
+				return v, true
+			}
+		}
+		return 0, false
+	}
+	for len(b) > 0 {
+		tag, ok := readVarint()
+		if !ok {
+			return
+		}
+		num, wire := int(tag>>3), int(tag&7)
+		switch wire {
+		case 0:
+			v, ok := readVarint()
+			if !ok {
+				return
+			}
+			fn(num, wire, v, nil)
+		case 1:
+			if len(b) < 8 {
+				return
+			}
+			b = b[8:]
+		case 5:
+			if len(b) < 4 {
+				return
+			}
+			b = b[4:]
+		case 2:
+			n, ok := readVarint()
+			if !ok || uint64(len(b)) < n {
+				return
+			}
+			fn(num, wire, 0, b[:n])
+			b = b[n:]
+		default:
+			return
+		}
+	}
+}
+
+func pbSubmessages(b []byte, wantNum int) [][]byte {
+	var out [][]byte
+	walkProtoFields(b, func(num, wire int, _ uint64, sub []byte) {
+		if num == wantNum && wire == 2 {
+			out = append(out, sub)
+		}
+	})
+	return out
+}
+
+func pbVarintField(b []byte, wantNum int) int {
+	var out int
+	walkProtoFields(b, func(num, wire int, val uint64, _ []byte) {
+		if num == wantNum && wire == 0 {
+			out = int(val)
+		}
+	})
+	return out
 }
 
 func (a *AgyAdapter) LookupTitle(home, sessionID, terminalTitle string) string {

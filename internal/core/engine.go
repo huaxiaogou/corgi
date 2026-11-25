@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,7 +105,9 @@ type Engine struct {
 	lastScreen       map[string]screenMark
 	lastAnswer       map[string]time.Time
 	lastTrust        map[string]time.Time
+	idleCheckAt      map[string]time.Time
 	noAgent          map[string]time.Time
+	rereadTrigID     string
 }
 
 // NewEngine constructs a Super-Agent Engine initialized from SQLite.
@@ -127,21 +128,22 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		logger = slog.Default()
 	}
 	return &Engine{
-		store:      st,
-		fleet:      fl,
-		agents:     reg,
-		memory:     mem,
-		sink:       NopSink{},
-		logger:     logger,
-		corgiDir:   corgiDir,
-		home:       home,
-		binPath:    binPath,
-		settings:   settings,
-		policies:   policies,
-		lastScreen: map[string]screenMark{},
-		lastAnswer: map[string]time.Time{},
-		lastTrust:  map[string]time.Time{},
-		noAgent:    map[string]time.Time{},
+		store:       st,
+		fleet:       fl,
+		agents:      reg,
+		memory:      mem,
+		sink:        NopSink{},
+		logger:      logger,
+		corgiDir:    corgiDir,
+		home:        home,
+		binPath:     binPath,
+		settings:    settings,
+		policies:    policies,
+		lastScreen:  map[string]screenMark{},
+		lastAnswer:  map[string]time.Time{},
+		lastTrust:   map[string]time.Time{},
+		idleCheckAt: map[string]time.Time{},
+		noAgent:     map[string]time.Time{},
 	}, nil
 }
 
@@ -237,7 +239,9 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 		if err := e.store.SaveSettings(ctx, curSettings); err != nil {
 			return err
 		}
-		_ = e.memory.WriteRouterDocs(e.binPath, curSettings)
+		if docChanged, err := e.memory.WriteRouterDocsChanged(e.binPath, curSettings); err == nil && docChanged && !routerChanged {
+			e.queueRouterDocReread(ctx)
+		}
 	}
 	if pols != nil {
 		if err := e.store.SavePolicies(ctx, curPolicies); err != nil {
@@ -532,170 +536,22 @@ func (e *Engine) policyFor(source string) model.Policy {
 	return model.Policy{Source: source, Action: "candidate"}
 }
 
-// Spawn launches (or resumes) an isolated worker in herdr and records it in SQLite.
-
-func (e *Engine) AddTimer(ctx context.Context, spec, text, thread, target, owner string) (*model.Timer, error) {
-	next, err := ParseTimerSpec(spec, time.Now())
-	if err != nil {
-		return nil, err
-	}
-	id, _, err := e.store.NextID(ctx, "tm")
-	if err != nil {
-		return nil, err
-	}
-	tm := &model.Timer{
-		ID:      id,
-		Spec:    strings.TrimSpace(spec),
-		Thread:  orStr(thread, model.MainThread),
-		Target:  strings.TrimSpace(target),
-		Text:    strings.TrimSpace(text),
-		NextRun: next,
-		Enabled: true,
-		Owner:   owner,
-	}
-	if err := e.store.UpsertTimer(ctx, tm); err != nil {
-		return nil, err
-	}
-	e.notifyChanged()
-	return tm, nil
-}
-
-// Show expands any ID (trigger, entry, thread, or worker) for `corgi show` (Chain of Recall).
-func (e *Engine) Show(ctx context.Context, id string) (any, error) {
-	if t, err := e.store.GetTrigger(ctx, id); err == nil {
-		return t, nil
-	}
-	if en, err := e.store.GetEntry(ctx, id); err == nil {
-		return en, nil
-	}
-	if w, err := e.store.GetWorker(ctx, id); err == nil {
-		trigs, _ := e.store.ListWorkerTriggers(ctx, w.Name, 15)
-		return map[string]any{"worker": w, "triggers": trigs}, nil
-	}
-	if th, err := e.store.GetThread(ctx, id); err == nil {
-		trigs, _ := e.store.ListThreadTriggers(ctx, id, 30)
-		return map[string]any{"thread": th, "triggers": trigs}, nil
-	}
-	return nil, store.ErrNotFound
-}
-
-// MemorySnapshot returns the memory files, dream journals, budget metrics, and dream schedule.
-func (e *Engine) MemorySnapshot(ctx context.Context, displayDir string) MemorySnapshot {
-	snap := MemorySnapshot{
-		Dir:         displayDir,
-		Files:       e.memory.ListFiles(),
-		Dreams:      e.memory.ListDreams(),
-		UpFrontSize: e.memory.UpFrontSize(),
-		MsgSize:     e.memory.MessagesSize(),
-		Budget:      UpFrontBudgetBytes,
-		Dreaming:    e.Dreaming(),
-	}
-	if last := e.LastDream(ctx); !last.IsZero() {
-		snap.LastDream = &last
-	}
-	if next := e.NextDream(ctx, time.Now()); !next.IsZero() {
-		snap.NextDream = &next
-	}
-	return snap
-}
-
-// Snapshot builds the SuperView pushed to Web/PWA clients.
-func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
-	entries, earlier, _ := e.store.ListEntries(ctx, thread, 200)
-	actions, _ := e.store.ListPendingActions(ctx)
-	pinned, _ := e.store.ListPinnedEntries(ctx, 50)
-	workers, _ := e.store.ListWorkers(ctx)
-	threads, _ := e.store.ListThreads(ctx, 100)
-	queued, _ := e.store.ListQueuedTriggers(ctx)
-
-	var activeWorkers []*model.Worker
-	for _, w := range workers {
-		if !w.Ended || time.Since(w.CreatedAt) < 12*time.Hour {
-			activeWorkers = append(activeWorkers, w)
-		}
-	}
-	sort.Slice(activeWorkers, func(i, j int) bool { return activeWorkers[i].CreatedAt.After(activeWorkers[j].CreatedAt) })
-
-	qRouter := 0
-	for _, t := range queued {
-		if len(t.Targets) == 0 || slices.Contains(t.Targets, model.RouterName) {
-			qRouter++
-		}
-	}
-
+func (e *Engine) queueRouterDocReread(ctx context.Context) {
 	e.mu.Lock()
-	st := e.settings
-	rv := model.RouterView{
-		Kind:     st.RouterKind,
-		Model:    st.RouterModel,
-		Effort:   st.RouterEffort,
-		Status:   "asleep",
-		Context:  e.routerUsage.Pct(),
-		RotateAt: e.rotatePctLocked(),
-		Handover: e.handover != nil,
-		Dreaming: e.dream != nil,
-	}
-	if e.routerLaunching {
-		rv.Status = "starting"
-	}
-	if e.dream != nil {
-		rv.Status = "dreaming"
-	}
-	askedAt := e.routerAskedAt
-	routerRun := e.routerRun
-	sink := e.sink
+	prevID := e.rereadTrigID
 	e.mu.Unlock()
-
-	if live, err := e.fleet.Agents(ctx); err == nil {
-		for _, a := range live {
-			if a.Name != nil && *a.Name == model.RouterName {
-				rv.Alive = true
-				rv.PaneID = a.PaneID
-				rv.Status = a.AgentStatus
-				if a.Agent != nil && *a.Agent != "" {
-					rv.Kind = *a.Agent
-				}
-				if routerRun != nil {
-					rv.Model, rv.Effort = routerRun[0], routerRun[1]
-					rv.Pending = *routerRun != [2]string{st.RouterModel, st.RouterEffort} ||
-						agent.NormalizeKind(rv.Kind) != agent.NormalizeKind(st.RouterKind)
-				}
-				if rv.Status == "working" && !askedAt.IsZero() {
-					for i := len(entries) - 1; i >= 0 && !entries[i].At.Before(askedAt); i-- {
-						if r := entries[i].Role; r == "corgi" || r == "user" {
-							rv.Replied = r == "corgi"
-							break
-						}
-					}
-				}
-				break
-			}
+	if prevID != "" {
+		if prev, err := e.store.GetTrigger(ctx, prevID); err == nil && prev.Status == "queued" {
+			return
 		}
 	}
-
-	var follow *model.FollowView
-	if timers, err := e.store.ListTimers(ctx); err == nil {
-		for _, tm := range timers {
-			if tm.Enabled && !tm.NextRun.IsZero() {
-				follow = &model.FollowView{Next: tm.NextRun, NextText: oneLineClip(tm.Text, 80)}
-				break // ListTimers is ordered by next_run ASC
-			}
-		}
-	}
-
-	return model.SuperView{
-		Router:       rv,
-		Entries:      entries,
-		Earlier:      earlier,
-		Actions:      actions,
-		Pinned:       pinned,
-		Workers:      activeWorkers,
-		Threads:      threads,
-		Queued:       len(queued),
-		QueuedRouter: qRouter,
-		Paused:       st.Paused,
-		WeComOnline:  sink.WeComOnline(),
-		Follow:       follow,
+	trig, err := e.Ingest(ctx, "system", model.MainThread, "corgi",
+		"CORGI.md changed (new Corgi build or updated settings). Re-read CORGI.md now and follow it from here on. Nothing to tell the human.",
+		"", model.RouterName, "")
+	if err == nil && trig != nil {
+		e.mu.Lock()
+		e.rereadTrigID = trig.ID
+		e.mu.Unlock()
 	}
 }
 
@@ -773,8 +629,8 @@ func orStr(a, b string) string {
 	return b
 }
 
-func machineTag(m string) string {
-	if m == "" {
+func machineTag(m string, local bool) string {
+	if local || m == "" {
 		return ""
 	}
 	return " · " + m

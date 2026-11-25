@@ -235,11 +235,26 @@ export interface DeviceView {
   kind: "browser" | "machine";
   name: string;
   os?: string;
+  version?: string;
+  home?: string;
   created_at: string;
   last_seen: string;
   online: boolean;
   current: boolean;
   agents?: string[];
+}
+
+export interface VersionStatus {
+  version: string;
+  latest: string;
+  outdated: { id: string; name: string; version: string }[];
+}
+
+export interface MsgPatch {
+  base: number;
+  from: number;
+  msgs: ChatMessage[];
+  earlier?: number;
 }
 
 export interface ChatMessage {

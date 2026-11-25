@@ -5,11 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -47,7 +50,61 @@ func (c *CodeBuddyAdapter) ResumeArgs(sessionID string) []string {
 	return []string{"--resume", sessionID}
 }
 
-func (c *CodeBuddyAdapter) PreTrustWorkspace(_, _ string) error { return nil }
+// PreTrustWorkspace writes cwd (and its resolved symlink target) into CodeBuddy's
+// ~/.codebuddy/settings.json trustedDirectories while preserving all other fields.
+func (c *CodeBuddyAdapter) PreTrustWorkspace(home, cwd string) error {
+	if cwd == "" || !filepath.IsAbs(cwd) {
+		return fmt.Errorf("workspace path must be absolute: %q", cwd)
+	}
+	want := []string{filepath.Clean(cwd)}
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil && resolved != want[0] {
+		want = append(want, resolved)
+	}
+
+	settingsFile := filepath.Join(codebuddyHome(home), "settings.json")
+	cfg := map[string]json.RawMessage{}
+	if b, err := os.ReadFile(settingsFile); err == nil {
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			return fmt.Errorf("parse %s: %w", settingsFile, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", settingsFile, err)
+	}
+
+	var trusted []string
+	if raw, ok := cfg["trustedDirectories"]; ok {
+		if err := json.Unmarshal(raw, &trusted); err != nil {
+			return fmt.Errorf("parse trustedDirectories in %s: %w", settingsFile, err)
+		}
+	}
+	added := false
+	for _, p := range want {
+		if !slices.Contains(trusted, p) {
+			trusted = append(trusted, p)
+			added = true
+		}
+	}
+	if !added {
+		return nil
+	}
+	encoded, err := json.Marshal(trusted)
+	if err != nil {
+		return err
+	}
+	cfg["trustedDirectories"] = encoded
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(settingsFile), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(settingsFile), err)
+	}
+	tmp := settingsFile + ".corgi-tmp"
+	if err := os.WriteFile(tmp, append(out, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	return os.Rename(tmp, settingsFile)
+}
 
 func (c *CodeBuddyAdapter) DiscoverModels(ctx context.Context, home string) (*model.ModelCatalog, error) {
 	cat := &model.ModelCatalog{

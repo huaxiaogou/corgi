@@ -47,12 +47,18 @@ func (s *Server) buildPaneState(ctx context.Context) model.PaneState {
 	}
 
 	st := model.PaneState{OK: true, Agents: []model.AgentView{}, Shells: []model.AgentView{}, Machines: machines}
+	titlesByMachine := map[string]map[string]model.PaneSession{"": s.titlesForMachine(ctx, "")}
+	for _, m := range machines {
+		if !m.Local && m.Online {
+			titlesByMachine[m.ID] = s.titlesForMachine(ctx, m.ID)
+		}
+	}
 	for _, p := range panes {
 		cwd := deref(p.ForegroundCwd)
 		if cwd == "" {
 			cwd = deref(p.Cwd)
 		}
-		_, machine := fleet.SplitID(p.ID)
+		localPane, machine := fleet.SplitID(p.ID)
 		v := model.AgentView{
 			PaneID:         p.ID,
 			WorkspaceID:    p.WorkspaceID,
@@ -67,7 +73,7 @@ func (s *Server) buildPaneState(ctx context.Context) model.PaneState {
 		if ag, ok := agentMap[p.ID]; ok {
 			v.Name = deref(ag.Name)
 			if ag.Session != nil {
-				v.Session = ag.Session.Value
+				v.Session = extractSessionToken(ag.Session.Kind, ag.Session.Value)
 			}
 		}
 		if v.Name == "" {
@@ -77,10 +83,16 @@ func (s *Server) buildPaneState(ctx context.Context) model.PaneState {
 			if r, ok := s.Fleet.Run(p.ID); ok {
 				v.Run = r
 			}
-			v.Status = s.Fleet.EffectiveStatus(p.ID, v.Status)
-			if ad, err := s.Agents.Get(v.Kind); err == nil && machine == "" {
-				v.Topic = ad.LookupTitle(s.Home, v.Session, v.Title)
+			if ps, ok := titlesByMachine[machine][localPane]; ok {
+				v.Topic = ps.Title
+				if v.Session == "" {
+					v.Session = ps.Session
+				}
+				if v.Run == nil && ps.Run != nil {
+					v.Run = ps.Run
+				}
 			}
+			v.Status = s.Fleet.EffectiveStatus(p.ID, v.Status)
 			st.Agents = append(st.Agents, v)
 		} else {
 			v.Status = "shell"
@@ -327,6 +339,77 @@ func (s *Server) handleStreamPane(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleLastMessage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if tr, _ := s.readerForPane(ctx, id); tr != nil {
+		tr.OpenTail()
+		if last := tr.LastAssistant(1200); last != "" {
+			writeJSON(w, http.StatusOK, map[string]any{"text": last})
+			return
+		}
+	}
+	if rr, err := s.Fleet.Read(ctx, id, "detection", "text", 0); err == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"text": agent.TailLines(rr.Text, 14)})
+		return
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "pane not found"})
+}
+
+func (s *Server) handlePaneAsk(w http.ResponseWriter, r *http.Request) {
+	rr, err := s.Fleet.Read(r.Context(), r.PathValue("id"), "detection", "text", 0)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	if !agent.ScreenAsks(rr.Text) {
+		writeJSON(w, http.StatusOK, map[string]any{"asking": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"asking": true, "approval": agent.ParseApproval(rr.Text)})
+}
+
+func (s *Server) handlePaneEarlier(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	tr, ad := s.readerForPane(ctx, id)
+	if tr == nil || ad == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "当前窗格暂无结构化对话记录"})
+		return
+	}
+	msgs, cur := agent.EarlierMessages(tr.Path(), ad, filepath.Join(s.CorgiDir, "images"), before)
+	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "earlier": cur})
+}
+
+func (s *Server) readerForPane(ctx context.Context, id string) (*agent.TranscriptReader, agent.Adapter) {
+	agents, err := s.Fleet.Agents(ctx)
+	if err != nil {
+		return nil, nil
+	}
+	for _, a := range agents {
+		if a.PaneID != id || a.Agent == nil {
+			continue
+		}
+		ad, gErr := s.Agents.Get(*a.Agent)
+		if gErr != nil {
+			return nil, nil
+		}
+		sess := ""
+		if a.Session != nil {
+			sess = extractSessionToken(a.Session.Kind, a.Session.Value)
+		}
+		p := ad.LocateTranscript(s.Home, deref(a.Cwd), sess, s.startedAt(id))
+		if p == "" {
+			return nil, nil
+		}
+		return agent.NewTranscriptReader(p, ad, filepath.Join(s.CorgiDir, "images")), ad
+	}
+	return nil, nil
+}
+
 func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sse, ok := newSSE(w)
@@ -334,10 +417,15 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var (
-		reader   *agent.TranscriptReader
-		lastLive string
-		lastLog  string
-		beat     = time.Now()
+		reader    *agent.TranscriptReader
+		curAd     agent.Adapter
+		ms        agent.MsgSync
+		lastPath  string
+		lastLive  string
+		lastLog   string
+		usagePct  int
+		usageRead time.Time
+		beat      = time.Now()
 	)
 	imgDir := filepath.Join(s.CorgiDir, "images")
 	for {
@@ -355,27 +443,38 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request) {
 		if cur != nil && cur.Agent != nil {
 			kind = *cur.Agent
 			status = cur.AgentStatus
-			if reader == nil {
-				if ad, err := s.Agents.Get(kind); err == nil {
-					sess := ""
-					if cur.Session != nil {
-						sess = cur.Session.Value
-					}
-					if p := ad.LocateTranscript(s.Home, deref(cur.Cwd), sess, s.startedAt(id)); p != "" {
-						reader = agent.NewTranscriptReader(p, ad, imgDir)
-					}
+			if ad, err := s.Agents.Get(kind); err == nil {
+				curAd = ad
+				sess := ""
+				if cur.Session != nil {
+					sess = extractSessionToken(cur.Session.Kind, cur.Session.Value)
+				}
+				if p := ad.LocateTranscript(s.Home, deref(cur.Cwd), sess, s.startedAt(id)); p != "" && p != lastPath {
+					lastPath = p
+					reader = agent.NewTranscriptReader(p, ad, imgDir)
+					reader.OpenTail()
+					ms = agent.MsgSync{}
+					lastLog = ""
+					_ = sse.send("reset", []byte(`{}`))
 				}
 			}
 		}
 		if reader != nil {
-			if reader.Poll() || lastLog == "" {
+			changed := reader.Poll()
+			if changed || lastLog == "" {
 				lastLog = "-"
-				b, _ := json.Marshal(map[string]any{"messages": reader.Messages(), "structured": true})
-				if sse.send("messages", b) != nil {
-					cancel()
-					return
+				if patch := ms.Patch(reader); patch != nil {
+					b, _ := json.Marshal(patch)
+					if sse.send("patch", b) != nil {
+						cancel()
+						return
+					}
+					beat = time.Now()
 				}
-				beat = time.Now()
+			}
+			if curAd != nil && (changed || time.Since(usageRead) > 6*time.Second) {
+				usageRead = time.Now()
+				usagePct = curAd.ReadContextUsage(reader.Path(), 200000).Pct()
 			}
 		} else if rr, err := s.Fleet.Read(ctx, id, "recent_unwrapped", "text", 300); err == nil && rr.Text != lastLog {
 			lastLog = rr.Text
@@ -388,10 +487,21 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request) {
 		}
 
 		live := map[string]any{"status": status, "kind": kind}
+		if usagePct > 0 {
+			live["context"] = usagePct
+		}
 		if rr, err := s.Fleet.Read(ctx, id, "detection", "text", 0); err == nil {
 			if status == "blocked" || (status == "idle" && agent.ScreenAsks(rr.Text)) {
 				live["status"] = "blocked"
 				live["approval"] = agent.ParseApproval(rr.Text)
+			} else if status == "working" {
+				tail, meta := agent.ActivityLine(rr.Text)
+				if tail != "" {
+					live["tail"] = tail
+				}
+				if meta != "" {
+					live["meta"] = meta
+				}
 			} else if (status == "done" || status == "idle") && agent.HasBackgroundTask(rr.Text) {
 				live["status"] = "waiting"
 			}

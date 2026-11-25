@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -302,3 +304,126 @@ func TestResilienceBareShellRouterRetryAndDismiss(t *testing.T) {
 		t.Fatalf("expected Follow populated from timer, got %+v", snap.Follow)
 	}
 }
+
+func TestWorkerAutoSummarySpawnPreflightAndDocHotReload(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	var trustedCalls int
+	nodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/trust":
+			trustedCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/api/panes/w1:p1/last":
+			_ = json.NewEncoder(w).Encode(map[string]any{"text": "已完成多媒体上传重构并通过全部测试"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer nodeSrv.Close()
+
+	remoteHerdr := newFakeHerdrClient(func(method string, params map[string]any) (any, *herdr.Error) {
+		switch method {
+		case "workspace.create":
+			if gotCwd, _ := params["cwd"].(string); gotCwd != "/Users/alice/proj" {
+				return nil, &herdr.Error{Code: "bad_cwd", Message: "got cwd " + gotCwd}
+			}
+			return map[string]any{
+				"workspace": map[string]any{"workspace_id": "w1"},
+				"root_pane": map[string]any{"pane_id": "w1:p1"},
+			}, nil
+		case "pane.read":
+			return map[string]any{"read": map[string]any{"text": "> "}}, nil
+		}
+		return map[string]any{}, nil
+	})
+
+	fl := fleet.NewFleet(nil, "hub", dir, "v0.1.14", []string{"codebuddy"})
+	// Route node HTTP calls to nodeSrv.
+	fl.Attach(&fleet.RemoteMachine{
+		Info: model.Machine{
+			ID:     "mac-1",
+			Name:   "MacBook",
+			Home:   "/Users/alice",
+			Agents: []string{"agy", "codebuddy"},
+			Online: true,
+		},
+		Herdr: remoteHerdr,
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				u := *req.URL
+				u.Scheme = "http"
+				u.Host = strings.TrimPrefix(nodeSrv.URL, "http://")
+				r2 := req.Clone(req.Context())
+				r2.URL = &u
+				return http.DefaultTransport.RoundTrip(r2)
+			}),
+		},
+	})
+
+	ctx := context.Background()
+	eng, err := NewEngine(ctx, st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Pre-flight check rejects uninstalled agent on MacBook immediately.
+	if _, err := eng.Spawn(ctx, SpawnRequest{
+		Kind: "claude", Machine: "MacBook", Task: "test task",
+	}); err == nil || !strings.Contains(err.Error(), "no claude installed") {
+		t.Fatalf("expected missing-agent preflight error, got %v", err)
+	}
+
+	// 2. Spawn on MacBook expands ~/proj against MacBook's /Users/alice and calls remote /api/trust.
+	wk, err := eng.Spawn(ctx, SpawnRequest{
+		Kind: "agy", Machine: "MacBook", Cwd: "~/proj", Name: "mac-worker", Task: "implement feature",
+	})
+	if err != nil {
+		t.Fatalf("Spawn on MacBook failed: %v", err)
+	}
+	if wk.Cwd != "/Users/alice/proj" || trustedCalls != 1 {
+		t.Fatalf("expected cwd=/Users/alice/proj and trustedCalls=1, got cwd=%q trustedCalls=%d", wk.Cwd, trustedCalls)
+	}
+
+	// 3. Turn completion automatically pulls summary via /api/panes/{id}/last into Router trigger.
+	wk.PaneID = "w1:p1@mac-1"
+	eng.handleWorkerTurnDone(ctx, wk)
+	trigs, _ := st.ListQueuedTriggers(ctx)
+	foundSummary := false
+	for _, tr := range trigs {
+		if strings.Contains(tr.Text, "Last message:\n已完成多媒体上传重构并通过全部测试") {
+			foundSummary = true
+		}
+	}
+	if !foundSummary {
+		t.Fatalf("expected worker turn-done trigger to embed remote summary, got %+v", trigs)
+	}
+
+	// 4. CORGI.md change queues a hot-reload trigger when Router already read previous CORGI.md.
+	_ = eng.memory.WriteRouterDocs("corgi", eng.Settings())
+	eng.memory.MarkRouterDocsRead()
+	cfg := eng.Settings()
+	cfg.ReplyChars = 180
+	if err := eng.SaveConfig(ctx, &cfg, nil); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	trigs2, _ := st.ListQueuedTriggers(ctx)
+	foundReread := false
+	for _, tr := range trigs2 {
+		if strings.Contains(tr.Text, "CORGI.md changed") {
+			foundReread = true
+		}
+	}
+	if !foundReread {
+		t.Fatal("expected CORGI.md hot-reload trigger queued after SaveConfig")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

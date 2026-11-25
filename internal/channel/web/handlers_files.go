@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -83,10 +84,23 @@ func (s *Server) handleResumeHistory(w http.ResponseWriter, r *http.Request) {
 	if s.Engine != nil {
 		askPerm = s.Engine.Settings().AskPermissions
 	}
-	if target.Machine == "" && !askPerm {
-		_ = ad.PreTrustWorkspace(s.Home, target.Cwd)
+	if !askPerm {
+		if target.Machine == "" {
+			_ = ad.PreTrustWorkspace(s.Home, target.Cwd)
+		} else if s.Fleet != nil {
+			if hc, err := s.Fleet.HTTPClient(target.Machine); err == nil {
+				tb, _ := json.Marshal(map[string]string{"kind": ad.Kind(), "dir": target.Cwd})
+				if req, rErr := http.NewRequestWithContext(r.Context(), http.MethodPost, "http://node/api/trust", bytes.NewReader(tb)); rErr == nil {
+					req.Header.Set("Content-Type", "application/json")
+					if resp, dErr := hc.Do(req); dErr == nil {
+						_ = resp.Body.Close()
+					}
+				}
+			}
+		}
 	}
-	args := append(ad.LaunchArgs("", "", !askPerm), ad.ResumeArgs(target.Session)...)
+	// Note: Codex `resume <id>` is a subcommand and must precede launch flags.
+	args := append(ad.ResumeArgs(target.Session), ad.LaunchArgs("", "", !askPerm)...)
 	name := target.Name
 	if name == "" || name == model.RouterName {
 		name = ad.Kind() + "-" + fleet.RandomToken()[:4]
@@ -105,6 +119,7 @@ func (s *Server) handleResumeHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Fleet.RememberName(paneID, name)
 	s.markStarted(paneID)
+	_ = s.Store.ForgetEndedSession(r.Context(), target.Kind, target.Machine, target.Session)
 	writeJSON(w, http.StatusOK, map[string]any{"pane_id": paneID, "workspace_id": wsID, "name": name})
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,8 +27,11 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		if err != nil {
 			return nil, fmt.Errorf("cannot resume worker %q: %w", req.Resume, err)
 		}
+		if !old.Ended {
+			return nil, fmt.Errorf("worker %q is still running; use `send` instead", req.Resume)
+		}
 		if old.Session == "" {
-			return nil, fmt.Errorf("worker %q has no saved session id to resume", req.Resume)
+			return nil, fmt.Errorf("worker %q has no saved session id to resume; spawn a fresh worker", req.Resume)
 		}
 		req.Kind, req.Cwd, req.Machine, sessionID = old.Kind, old.Cwd, old.Machine, old.Session
 		if req.Name == "" {
@@ -52,10 +56,42 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	if req.Machine != "" {
 		machine = e.fleet.ResolveMachine(req.Machine)
 	}
+	mc, ok := e.fleet.Machine(machine)
+	if !ok {
+		return nil, fmt.Errorf("machine %q is not connected", orStr(req.Machine, machine))
+	}
+	machine = mc.ID
+
+	// Pre-flight check that the target computer has the requested agent CLI installed.
+	have := mc.Agents
+	if mc.Local {
+		have = e.agents.DetectInstalled(e.home, false)
+		if len(have) == 0 {
+			if chkErr := e.agents.CheckInstalled(e.home, kind); chkErr != nil {
+				return nil, chkErr
+			}
+		}
+	}
+	if len(have) > 0 && !slices.Contains(have, kind) {
+		return nil, fmt.Errorf("%s has no %s installed (available: %s); pick another computer or agent kind",
+			mc.Name, kind, strings.Join(have, ", "))
+	}
+
 	cwd := strings.TrimSpace(req.Cwd)
-	if cwd == "" {
+	if cwd == "" && (mc.ID == st.WorkerMachine || (mc.Local && st.WorkerMachine == "")) {
 		cwd = st.WorkerCwd
 	}
+	targetHome := mc.Home
+	if mc.Local && targetHome == "" {
+		targetHome = e.home
+	}
+	cwd = expandInHome(targetHome, cwd)
+	if mc.Local && cwd != "" {
+		if fi, statErr := os.Stat(cwd); statErr != nil || !fi.IsDir() {
+			return nil, fmt.Errorf("directory not found on %s: %s", mc.Name, cwd)
+		}
+	}
+
 	thread := strings.TrimSpace(req.Thread)
 	if thread == "" {
 		thread = model.MainThread
@@ -68,54 +104,34 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	if !workerNameRe.MatchString(name) || name == model.RouterName {
 		return nil, fmt.Errorf("invalid worker name %q", name)
 	}
+	if existing, gErr := e.store.GetWorker(ctx, name); gErr == nil && !existing.Ended {
+		return nil, fmt.Errorf("worker %s is already running", name)
+	}
+
 	modelName, effort := req.Model, req.Effort
-	if modelName == "" && kind == agent.NormalizeKind(st.WorkerKind) {
-		modelName, effort = st.WorkerModel, st.WorkerEffort
-	}
-
-	if machine == "" {
-		if err := e.agents.CheckInstalled(e.home, kind); err != nil {
-			return nil, err
+	if kind == agent.NormalizeKind(st.WorkerKind) {
+		if modelName == "" {
+			modelName = st.WorkerModel
 		}
-		if !st.AskPermissions {
-			_ = ad.PreTrustWorkspace(e.home, cwd)
+		if effort == "" {
+			effort = st.WorkerEffort
 		}
 	}
-
-	args := ad.LaunchArgs(modelName, effort, !st.AskPermissions)
-	if sessionID != "" {
-		args = append(args, ad.ResumeArgs(sessionID)...)
-	}
-
-	wsID, paneID, err := e.fleet.CreateWorkspace(ctx, machine, cwd, "corgi · "+name)
-	if err != nil {
-		return nil, fmt.Errorf("create workspace: %w", err)
-	}
-	if err := e.fleet.StartAgent(ctx, paneID, kind, name, args); err != nil {
-		var he *herdr.Error
-		if !(errors.As(err, &he) && he.Code == "agent_not_ready") {
-			return nil, fmt.Errorf("start agent %s: %w", name, err)
-		}
-	}
-	e.fleet.RememberName(paneID, name)
-	e.fleet.RememberRun(paneID, modelName, effort)
 
 	wk := &model.Worker{
-		Name:        name,
-		Kind:        kind,
-		Machine:     machine,
-		Cwd:         cwd,
-		Task:        req.Task,
-		Thread:      thread,
-		PaneID:      paneID,
-		WorkspaceID: wsID,
-		CreatedBy:   orStr(req.By, model.RouterName),
-		CreatedAt:   time.Now(),
-		Model:       modelName,
-		Effort:      effort,
-		Run:         &[2]string{modelName, effort},
-		Status:      "starting",
-		Session:     sessionID,
+		Name:      name,
+		Kind:      kind,
+		Machine:   machine,
+		Cwd:       cwd,
+		Task:      req.Task,
+		Thread:    thread,
+		CreatedBy: orStr(req.By, model.RouterName),
+		CreatedAt: time.Now(),
+		Model:     modelName,
+		Effort:    effort,
+		Run:       &[2]string{modelName, effort},
+		Status:    "starting",
+		Session:   sessionID,
 	}
 	if err := e.store.UpsertWorker(ctx, wk); err != nil {
 		return nil, err
@@ -127,13 +143,94 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	if sub {
 		_ = e.Subscribe(ctx, name, thread, false)
 	}
-
-	brief := fmt.Sprintf("[corgi task · worker=%s · thread=%s]\n%s\n\nWhen finished or blocked, report back with:\n  %s report \"summary or BLOCKED: question\"",
-		name, thread, req.Task, e.binPath)
-	_, _ = e.Ingest(ctx, "router", thread, model.RouterName, brief, "", name, name)
-	e.addEvent(ctx, thread, fmt.Sprintf("派出 %s（%s%s）", name, kind, machineTag(machine)), name, "spawn")
+	verb := "派出"
+	if sessionID != "" {
+		verb = "续接"
+	}
+	e.addEvent(ctx, thread, fmt.Sprintf("%s %s（%s%s）", verb, name, kind, machineTag(mc.Name, mc.Local)), name, "spawn")
 	e.notifyChanged()
-	return wk, nil
+
+	workerBin := e.binPath
+	if !mc.Local || workerBin == "" {
+		workerBin = "corgi"
+	}
+	// Note: Codex `resume <id>` is a subcommand and MUST precede launch flags.
+	args := append(ad.ResumeArgs(sessionID), ad.LaunchArgs(modelName, effort, !st.AskPermissions)...)
+	if kind == "claude" {
+		args = append(args, "--allowedTools", fmt.Sprintf("Bash(%s report:*),Bash(corgi report:*)", workerBin))
+	}
+
+	started := make(chan error, 1)
+	go func() {
+		lctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		if !st.AskPermissions {
+			e.preTrustWorkspace(lctx, machine, kind, cwd)
+		}
+		wsID, paneID, cErr := e.fleet.CreateWorkspace(lctx, machine, cwd, "corgi · "+name)
+		if cErr != nil {
+			e.failSpawnedWorker(lctx, wk, "", "", fmt.Errorf("create workspace: %w", cErr), started)
+			return
+		}
+		sErr := e.fleet.StartAgent(lctx, paneID, kind, name, args)
+		var he *herdr.Error
+		blockedOnStart := sErr != nil && errors.As(sErr, &he) && he.Code == "agent_not_ready"
+		if sErr != nil && !blockedOnStart {
+			_ = e.fleet.CloseWorkspace(lctx, wsID)
+			e.failSpawnedWorker(lctx, wk, paneID, wsID, fmt.Errorf("start agent %s: %w", name, sErr), started)
+			return
+		}
+
+		e.fleet.RememberName(paneID, name)
+		e.fleet.RememberRun(paneID, modelName, effort)
+
+		wk.PaneID = paneID
+		wk.WorkspaceID = wsID
+		wk.Status = "idle"
+		if blockedOnStart {
+			wk.Status = "blocked"
+		}
+		_ = e.store.UpsertWorker(lctx, wk)
+		e.notifyChanged()
+
+		select {
+		case started <- nil:
+		default:
+		}
+
+		brief := fmt.Sprintf("[corgi task · worker=%s · thread=%s]\n%s\n\nHow this works:\n- Report completion with `%s report \"outcome summary & file paths\"`.\n- If blocked on a decision only the human can make or repeated failures, report `BLOCKED: <need> · tried: <attempts> · recommendation: <choice>`.",
+			name, thread, strings.TrimSpace(req.Task), workerBin)
+		_, _ = e.Ingest(lctx, "router", thread, model.RouterName, brief, "", name, name)
+	}()
+
+	select {
+	case sErr := <-started:
+		if sErr != nil {
+			return nil, sErr
+		}
+		return wk, nil
+	case <-time.After(8 * time.Second):
+		return wk, nil
+	case <-ctx.Done():
+		return wk, nil
+	}
+}
+
+func (e *Engine) failSpawnedWorker(ctx context.Context, wk *model.Worker, paneID, wsID string, err error, started chan<- error) {
+	wk.PaneID = paneID
+	wk.WorkspaceID = wsID
+	wk.Ended = true
+	wk.Status = "failed"
+	_ = e.store.UpsertWorker(ctx, wk)
+	e.addEvent(ctx, wk.Thread, wk.Name+" 启动失败："+err.Error(), wk.Name, "error")
+	e.notifyChanged()
+	select {
+	case started <- err:
+	default:
+		_, _ = e.Ingest(ctx, "worker", wk.Thread, wk.Name,
+			fmt.Sprintf("worker %s failed to start: %v", wk.Name, err), "", model.RouterName, wk.Name)
+	}
 }
 
 // SendToWorker queues a steering message for an active worker, or adopts a live
@@ -201,7 +298,7 @@ func (e *Engine) adoptLiveAgent(ctx context.Context, target, thread, task string
 			return nil, err
 		}
 		e.fleet.RememberName(a.PaneID, name)
-		e.addEvent(ctx, thread, fmt.Sprintf("接管已有会话 %s（%s%s）", name, kind, machineTag(machine)), name, "spawn")
+		e.addEvent(ctx, thread, fmt.Sprintf("接管已有会话 %s（%s%s）", name, kind, machineTag(machine, machine == "")), name, "spawn")
 		e.notifyChanged()
 		return wk, nil
 	}
@@ -262,13 +359,31 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 	if err != nil {
 		return fmt.Errorf("worker %q not found", workerName)
 	}
-	if wk.WorkspaceID != "" {
+	if wk.Session == "" && wk.PaneID != "" {
+		if sess := e.lookupRemoteSession(ctx, wk.PaneID); sess != "" {
+			wk.Session = sess
+		}
+	}
+	if wk.PaneID != "" && e.fleet != nil {
+		// Press Esc first so any running turn (especially Codex's shared daemon) aborts cleanly before close.
+		_ = e.fleet.SendKeys(ctx, wk.PaneID, "esc")
+		time.Sleep(600 * time.Millisecond)
+	}
+	if wk.WorkspaceID != "" && e.fleet != nil {
 		_ = e.fleet.CloseWorkspace(ctx, wk.WorkspaceID)
 	}
 	wk.Ended = true
 	wk.Status = "done"
 	if err := e.store.UpsertWorker(ctx, wk); err != nil {
 		return err
+	}
+	if threads, tErr := e.store.ListThreads(ctx, 200); tErr == nil {
+		for _, th := range threads {
+			if slices.Contains(th.Subscribers, wk.Name) {
+				th.Subscribers = removeStr(th.Subscribers, wk.Name)
+				_ = e.store.UpsertThread(ctx, th)
+			}
+		}
 	}
 	_ = e.store.ExpireWorkerActions(ctx, wk.Name)
 	if wk.Session != "" {
@@ -381,6 +496,12 @@ func (e *Engine) sendDialogAnswer(ctx context.Context, paneID, key string, curso
 		return e.fleet.SendKeys(ctx, paneID, "esc")
 	}
 	if cursor > 0 && key == "" {
+		if rr, err := e.fleet.Read(ctx, paneID, "detection", "text", 0); err == nil {
+			ap := agent.ParseApproval(rr.Text)
+			if cursor-1 < len(ap.Choices) {
+				return e.fleet.SendKeys(ctx, paneID, agent.MoveKeys(ap, cursor-1)...)
+			}
+		}
 		keys := make([]string, 0, cursor)
 		for i := 1; i < cursor; i++ {
 			keys = append(keys, "down")

@@ -1,13 +1,21 @@
 import { Terminal } from "lucide-react";
+import { StatusDot } from "../../components/CorgiMark";
 import { MarkdownText } from "../../components/MarkdownText";
 import type { Approval, ChatMessage } from "../../types/api";
 
 interface Props {
   messages: ChatMessage[];
+  earlierCursor: number;
+  loadingEarlier: boolean;
   approval: Approval | null;
+  liveStatus: string;
+  liveTail: string;
+  liveMeta: string;
   setupHint: boolean;
   isAgent: boolean;
-  onAnswerApproval: (choice: Approval["choices"][number]) => void;
+  onLoadEarlier: () => void;
+  onPickAskOption: (opt: string) => void;
+  onAnswerApproval: (choice: Approval["choices"][number], index: number) => void;
   onCancelApproval: () => void;
   onSwitchToScreen: () => void;
   onOpenFile?: (path: string) => void;
@@ -15,15 +23,22 @@ interface Props {
 
 export function AgentChatThread({
   messages,
+  earlierCursor,
+  loadingEarlier,
   approval,
+  liveStatus,
+  liveTail,
+  liveMeta,
   setupHint,
   isAgent,
+  onLoadEarlier,
+  onPickAskOption,
   onAnswerApproval,
   onCancelApproval,
   onSwitchToScreen,
   onOpenFile,
 }: Props) {
-  if (messages.length === 0 && !approval) {
+  if (messages.length === 0 && !approval && liveStatus !== "working") {
     return (
       <div className="max-w-[740px] mx-auto py-16 text-center space-y-3">
         <p className="text-sm text-secondary">
@@ -45,6 +60,19 @@ export function AgentChatThread({
 
   return (
     <div className="max-w-[740px] mx-auto space-y-4">
+      {earlierCursor > 0 && (
+        <div className="text-center">
+          <button
+            type="button"
+            disabled={loadingEarlier}
+            onClick={onLoadEarlier}
+            className="px-3.5 py-1 rounded-full text-xs border border-strong text-secondary surface-hover cursor-pointer disabled:opacity-50"
+          >
+            {loadingEarlier ? "加载中…" : "加载更早消息"}
+          </button>
+        </div>
+      )}
+
       {messages.map((m, idx) => {
         if (m.kind === "user") {
           return (
@@ -70,12 +98,43 @@ export function AgentChatThread({
             </details>
           );
         }
+        if (m.kind === "ask") {
+          return (
+            <div key={idx} className="card-floating rounded-2xl p-4 space-y-2.5">
+              <div className="text-sm font-medium text-primary whitespace-pre-wrap">{m.text}</div>
+              {m.options && m.options.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {m.options.map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      onClick={() => onPickAskOption(opt)}
+                      className="px-3 py-1.5 rounded-xl text-xs border border-strong surface-bg surface-hover cursor-pointer"
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        }
         return (
           <div key={idx} className="text-[14.5px]">
             <MarkdownText text={m.text ?? ""} onOpenFile={onOpenFile} />
           </div>
         );
       })}
+
+      {liveStatus === "working" && (
+        <div className="flex items-center justify-between gap-2 px-3.5 py-2 rounded-xl surface-rail border border-hairline text-xs text-secondary">
+          <div className="flex items-center gap-2 min-w-0">
+            <StatusDot status="working" />
+            <span className="truncate">{liveTail || "正在执行中…"}</span>
+          </div>
+          {liveMeta && <span className="font-mono-code text-[11px] text-muted shrink-0">{liveMeta}</span>}
+        </div>
+      )}
 
       {approval && approval.choices.length > 0 && (
         <div className="card-floating rounded-2xl overflow-hidden">
@@ -92,7 +151,7 @@ export function AgentChatThread({
               <button
                 key={i}
                 type="button"
-                onClick={() => onAnswerApproval(c)}
+                onClick={() => onAnswerApproval(c, i)}
                 className="w-full px-5 py-3 flex items-center gap-3 text-left text-[13.5px] border-b border-hairline surface-hover cursor-pointer"
               >
                 <span className="w-5 h-5 rounded border border-strong font-mono-code text-[11px] flex items-center justify-center text-secondary">
@@ -102,11 +161,7 @@ export function AgentChatThread({
               </button>
             ))}
             <div className="px-5 py-2.5">
-              <button
-                type="button"
-                onClick={onCancelApproval}
-                className="px-2.5 py-1 rounded-lg text-xs border border-strong text-secondary surface-hover cursor-pointer"
-              >
+              <button type="button" onClick={onCancelApproval} className="px-2.5 py-1 rounded-lg text-xs border border-strong text-secondary surface-hover cursor-pointer">
                 Esc 取消
               </button>
             </div>

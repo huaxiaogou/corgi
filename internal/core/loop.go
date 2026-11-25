@@ -2,8 +2,6 @@ package core
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -18,8 +16,10 @@ import (
 
 // Run drives the periodic Super-Agent scheduling loop until ctx is canceled.
 func (e *Engine) Run(ctx context.Context) {
-	if err := e.memory.WriteRouterDocs(e.binPath, e.Settings()); err != nil {
+	if changed, err := e.memory.WriteRouterDocsChanged(e.binPath, e.Settings()); err != nil {
 		e.logger.Warn("write router docs", "err", err)
+	} else if changed {
+		e.queueRouterDocReread(ctx)
 	}
 	tick := time.NewTicker(1500 * time.Millisecond)
 	defer tick.Stop()
@@ -141,6 +141,13 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, now 
 		if li.session != "" && li.session != w.Session {
 			w.Session = li.session
 		}
+		// herdr reports "idle" while an agent sits on a first-run wizard or folder trust prompt.
+		if li.status == "idle" && e.shouldCheckIdleDialog(li.pane, now) {
+			if rr, rErr := e.fleet.Read(ctx, li.pane, "detection", "text", 0); rErr == nil && agent.ScreenAsks(rr.Text) {
+				li.status = "blocked"
+				live[w.Name] = li
+			}
+		}
 		prev := w.Status
 		if li.status == prev && li.pane == w.PaneID {
 			continue
@@ -167,6 +174,19 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, now 
 	}
 }
 
+func (e *Engine) shouldCheckIdleDialog(paneID string, now time.Time) bool {
+	if paneID == "" {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if now.Sub(e.idleCheckAt[paneID]) < 4500*time.Millisecond {
+		return false
+	}
+	e.idleCheckAt[paneID] = now
+	return true
+}
+
 func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 	rr, err := e.fleet.Read(ctx, w.PaneID, "detection", "text", 0)
 	if err != nil {
@@ -175,6 +195,16 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 	ap := agent.ParseApproval(rr.Text)
 	if len(ap.Choices) == 0 {
 		return
+	}
+	if e.answerWorkerTrust(ctx, w, ap) {
+		return
+	}
+	if pending, err := e.store.ListPendingActions(ctx); err == nil {
+		for _, p := range pending {
+			if p.Kind == model.ActionKindWorkerDialog && p.TargetWorker == w.Name && p.Title == ap.Title {
+				return
+			}
+		}
 	}
 	aid, _, err := e.store.NextID(ctx, "a")
 	if err != nil {
@@ -196,9 +226,12 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 	if err := e.store.InsertAction(ctx, act); err != nil {
 		return
 	}
+	summary := e.lastWorkerSummary(ctx, w)
+	choices := formatChoicesText(ap)
 	e.addEvent(ctx, w.Thread, w.Name+" 等你确认："+ap.Title, w.Name, "blocked")
 	_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name,
-		fmt.Sprintf("worker %s is BLOCKED on a dialog (%s). Answer routine dialogs with `corgi answer %s <choice>`, or leave high-risk choices to the human.", w.Name, ap.Title, w.Name),
+		fmt.Sprintf("worker %s is BLOCKED on a terminal dialog (also shown as a card in chat).\nScreen:\n%s%s\nIf the answer follows from the task or is routine, answer it yourself: `%s answer %s <choice>`. Leave high-risk choices to the human.",
+			w.Name, summary, choices, e.binPath, w.Name),
 		"", model.RouterName, w.Name)
 
 	e.mu.Lock()
@@ -209,19 +242,24 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 }
 
 func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
+	summary := e.lastWorkerSummary(ctx, w)
 	screen := ""
 	if rr, err := e.fleet.Read(ctx, w.PaneID, "recent", "text", 40); err == nil {
 		screen = rr.Text
 	}
-	if qErr := agent.ExtractQuotaError(screen, w.LastReport); qErr != "" {
+	checkAgainst := summary
+	if w.LastReport != "" {
+		checkAgainst += "\n" + w.LastReport
+	}
+	if qErr := agent.ExtractQuotaError(screen, checkAgainst); qErr != "" {
 		_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name,
-			fmt.Sprintf("worker %s stopped on an agent/provider error (not finished): %s\nHand the job to another kind of agent and inform the human.", w.Name, qErr),
+			fmt.Sprintf("worker %s stopped on an agent/provider error (not finished): %s\nLast message before it:\n%s\nHand the job to another kind of agent or computer and inform the human in one line.", w.Name, qErr, summary),
 			"", model.RouterName, w.Name)
 		e.addEvent(ctx, w.Thread, w.Name+" 出错了："+qErr, w.Name, "error")
 		return
 	}
 	_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name,
-		fmt.Sprintf("worker %s finished a turn.", w.Name), "", model.RouterName, w.Name)
+		fmt.Sprintf("worker %s finished a turn. Last message:\n%s", w.Name, summary), "", model.RouterName, w.Name)
 	e.addEvent(ctx, w.Thread, w.Name+" 完成了一轮", w.Name, "done")
 }
 
@@ -386,6 +424,9 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 
 // ensureRouter launches the resident Router session on the hub machine if absent.
 func (e *Engine) ensureRouter(ctx context.Context) {
+	if e.fleet == nil {
+		return
+	}
 	e.mu.Lock()
 	if e.routerLaunching {
 		e.mu.Unlock()
@@ -425,6 +466,17 @@ func (e *Engine) ensureRouter(ctx context.Context) {
 		}
 		if err := e.memory.WriteRouterDocs(e.binPath, st); err != nil {
 			e.logger.Warn("write router docs", "err", err)
+		}
+		e.memory.MarkRouterDocsRead()
+		e.mu.Lock()
+		rereadID := e.rereadTrigID
+		e.rereadTrigID = ""
+		e.mu.Unlock()
+		if rereadID != "" {
+			if tr, err := e.store.GetTrigger(bg, rereadID); err == nil && tr.Status == "queued" {
+				tr.Status = "ignored"
+				_ = e.store.UpdateTrigger(bg, tr)
+			}
 		}
 		if !st.AskPermissions {
 			_ = ad.PreTrustWorkspace(e.home, e.memory.RouterDir())
@@ -492,12 +544,11 @@ func (e *Engine) checkStalls(ctx context.Context, live map[string]liveInfo, now 
 			e.mu.Unlock()
 			continue
 		}
-		rr, err := e.fleet.Read(ctx, li.pane, "recent", "text", 30)
+		rr, err := e.fleet.Read(ctx, li.pane, "detection", "text", 0)
 		if err != nil {
 			continue
 		}
-		sum := sha1.Sum([]byte(rr.Text))
-		h := hex.EncodeToString(sum[:8])
+		h := agent.ProgressHash(rr.Text)
 
 		e.mu.Lock()
 		mk, seen := e.lastScreen[w.Name]

@@ -4,11 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -243,5 +247,82 @@ func TestHistoryResumeEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(gotArgs, " "), "--resume sess-xyz") {
 		t.Fatalf("expected --resume sess-xyz in launch args, got %v", gotArgs)
+	}
+}
+
+func TestSelfUpdateVersionCheckAndTrustEndpoint(t *testing.T) {
+	srv, master := newTestServer(t)
+	srv.Version = "v0.1.13"
+
+	assetName := "corgi-" + runtime.GOOS + "-" + runtime.GOARCH
+	fakeBinary := []byte("#!/bin/sh\necho \"corgi v0.1.14\"\n")
+	sum := sha256.Sum256(fakeBinary)
+	sumHex := hex.EncodeToString(sum[:])
+
+	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/releases/latest":
+			w.Header().Set("Location", "https://example.invalid/huaxiaogou/corgi/releases/tag/v0.1.14")
+			w.WriteHeader(http.StatusFound)
+		case "/releases/download/v0.1.14/SHA256SUMS.txt":
+			_, _ = w.Write([]byte(sumHex + "  " + assetName + "\n"))
+		case "/releases/download/v0.1.14/" + assetName:
+			_, _ = w.Write(fakeBinary)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ghSrv.Close()
+
+	targetExe := filepath.Join(t.TempDir(), "corgi")
+	if err := os.WriteFile(targetExe, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	execCalled := make(chan string, 1)
+	srv.ReleaseRepoURL = ghSrv.URL
+	srv.ExecutablePath = targetExe
+	srv.ExecFn = func(exe string) { execCalled <- exe }
+
+	h := srv.Routes()
+
+	// 1. /api/version detects outdated v0.1.13 vs v0.1.14.
+	vReq := httptest.NewRequest(http.MethodGet, "/api/version", nil)
+	vReq.Header.Set("Authorization", "Bearer "+master)
+	vRec := httptest.NewRecorder()
+	h.ServeHTTP(vRec, vReq)
+	if vRec.Code != http.StatusOK || !bytes.Contains(vRec.Body.Bytes(), []byte(`"latest":"v0.1.14"`)) {
+		t.Fatalf("unexpected /api/version: code=%d body=%s", vRec.Code, vRec.Body.String())
+	}
+
+	// 2. POST /api/update verifies SHA-256, smoke-tests version, replaces binary, and calls ExecFn.
+	uReq := httptest.NewRequest(http.MethodPost, "/api/update", bytes.NewBufferString(`{}`))
+	uReq.Header.Set("Authorization", "Bearer "+master)
+	uRec := httptest.NewRecorder()
+	h.ServeHTTP(uRec, uReq)
+	if uRec.Code != http.StatusOK || !bytes.Contains(uRec.Body.Bytes(), []byte(`"version":"v0.1.14"`)) {
+		t.Fatalf("self-update failed: code=%d body=%s", uRec.Code, uRec.Body.String())
+	}
+	select {
+	case gotExe := <-execCalled:
+		if gotExe != targetExe {
+			t.Fatalf("ExecFn got %q want %q", gotExe, targetExe)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected ExecFn to be invoked")
+	}
+	updatedBytes, err := os.ReadFile(targetExe)
+	if err != nil || !bytes.Equal(updatedBytes, fakeBinary) {
+		t.Fatalf("binary was not atomically replaced")
+	}
+
+	// 3. POST /api/trust pre-trusts CodeBuddy directory.
+	wsDir := filepath.Join(srv.Home, "work")
+	_ = os.MkdirAll(wsDir, 0o755)
+	tReq := httptest.NewRequest(http.MethodPost, "/api/trust", bytes.NewBufferString(`{"kind":"codebuddy","dir":"`+wsDir+`"}`))
+	tReq.Header.Set("Authorization", "Bearer "+master)
+	tRec := httptest.NewRecorder()
+	h.ServeHTTP(tRec, tReq)
+	if tRec.Code != http.StatusOK {
+		t.Fatalf("/api/trust failed: code=%d body=%s", tRec.Code, tRec.Body.String())
 	}
 }

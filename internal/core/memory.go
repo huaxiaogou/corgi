@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/kiperjing/corgi/internal/model"
 )
+
+const routerReadSnapshotFile = ".corgi-read.md"
 
 // UpFrontBudgetBytes caps the files loaded at every fresh Router session start (~10 KB).
 const UpFrontBudgetBytes = 10 << 10
@@ -204,23 +207,42 @@ func (m *MemoryManager) SaveFile(relPath, content string) error {
 
 // WriteRouterDocs writes CORGI.md and mirrors it to CLAUDE.md / AGENTS.md / GEMINI.md / CODEBUDDY.md.
 func (m *MemoryManager) WriteRouterDocs(binPath string, st model.Settings) error {
+	_, err := m.WriteRouterDocsChanged(binPath, st)
+	return err
+}
+
+// WriteRouterDocsChanged writes CORGI.md and reports whether an already-read Router manual changed.
+func (m *MemoryManager) WriteRouterDocsChanged(binPath string, st model.Settings) (bool, error) {
 	if err := m.Ensure(); err != nil {
-		return err
+		return false, err
 	}
-	doc := strings.NewReplacer(
+	doc := []byte(strings.NewReplacer(
 		"{{BIN}}", binPath,
 		"{{CHARS}}", fmt.Sprint(st.ReplyChars),
 		"{{WKIND}}", st.WorkerKind,
 		"{{WCWD}}", st.WorkerCwd,
 		"{{BUDGET}}", fmt.Sprint(UpFrontBudgetBytes>>10),
 		"{{LAYOUT}}", memoryLayout,
-	).Replace(routerManualTemplate)
+	).Replace(routerManualTemplate))
 	for _, name := range []string{"CORGI.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md", "CODEBUDDY.md"} {
-		if err := os.WriteFile(filepath.Join(m.routerDir, name), []byte(doc), 0o600); err != nil {
-			return fmt.Errorf("write %s: %w", name, err)
+		if err := os.WriteFile(filepath.Join(m.routerDir, name), doc, 0o600); err != nil {
+			return false, fmt.Errorf("write %s: %w", name, err)
 		}
 	}
-	return nil
+	snapPath := filepath.Join(m.routerDir, routerReadSnapshotFile)
+	prev, err := os.ReadFile(snapPath)
+	if err != nil || bytes.Equal(prev, doc) {
+		return false, nil
+	}
+	_ = os.WriteFile(snapPath, doc, 0o600)
+	return true, nil
+}
+
+// MarkRouterDocsRead records that a newly-launched Router session has read the current CORGI.md.
+func (m *MemoryManager) MarkRouterDocsRead() {
+	if b, err := os.ReadFile(filepath.Join(m.routerDir, "CORGI.md")); err == nil {
+		_ = os.WriteFile(filepath.Join(m.routerDir, routerReadSnapshotFile), b, 0o600)
+	}
 }
 
 // SessionStartPreamble builds the preamble prepended to a fresh Router session's first turn.
@@ -304,10 +326,10 @@ Update memory as you go:
 - ` + "`{{BIN}} answer WORKER CHOICE`" + ` — answer a blocked worker's terminal dialog by choice key, label words, or ` + "`esc`" + `.
 - ` + "`{{BIN}} subscribe [--off] WORKER THREAD`" + ` — route a thread's future events (e.g. GitHub PR or WeCom topic) straight to that worker; ` + "`chat:main`" + ` always stays with you.
 - ` + "`{{BIN}} stop WORKER`" + ` — close a worker's terminal while keeping its session ID so ` + "`{{BIN}} spawn --resume WORKER \"next\"`" + ` can continue with full context later.
-- ` + "`{{BIN}} show ID`" + ` — expand any spilled trigger, entry, thread, or worker. Results carry further IDs: follow them hop by hop (Chain of Recall) to recover older context.
+- ` + "`{{BIN}} show ID`" + ` — expand any spilled trigger, entry, thread, or worker (including a live worker's latest message/summary across any connected computer). Results carry further IDs: follow them hop by hop (Chain of Recall) to recover older context.
 - ` + "`{{BIN}} list`" + ` — inspect online machines, live manual agents (with machine & cwd), managed workers, threads, and timers.
 - ` + "`{{BIN}} timer add [--thread T] [--to WORKER] \"in 30m|every 2h|daily 09:00|weekdays 09:00|weekly mon,thu 09:00|at YYYY-MM-DD HH:MM\" \"text\"`" + ` (` + "`timer ls`" + ` / ` + "`timer rm ID`" + `).
-- Inspect a worker's live terminal when needed: ` + "`herdr agent read WORKER --source recent-unwrapped --lines 80`" + `.
+- Note: worker turn completions and blocked dialogs automatically carry their latest summary and numbered choices in the event text; never invoke local ` + "`herdr`" + ` commands directly (workers may run on remote computers).
 
 ## Handling Events
 - ` + "`candidate`" + ` events (unsolicited webhooks): act only if covered by ` + "`memory/instructions.md`" + ` or prior human instruction; otherwise stay silent.

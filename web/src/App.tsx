@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Menu, Plus } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Menu, Plus, RefreshCw } from "lucide-react";
 import { CorgiMark, StatusDot } from "./components/CorgiMark";
 import { Sidebar, type AppRoute } from "./components/Sidebar";
 import { AgentPaneView } from "./features/agents/AgentPaneView";
@@ -9,6 +9,7 @@ import { CorgiChatView } from "./features/chat/CorgiChatView";
 import { FileDrawer } from "./features/files/FileDrawer";
 import { LauncherModal } from "./features/launcher/LauncherModal";
 import { useCorgiStream } from "./hooks/useCorgiStream";
+import { onWebBuildChange } from "./lib/api";
 
 export function App() {
   const [route, setRoute] = useState<AppRoute>({ view: "corgi", thread: "chat:main" });
@@ -16,7 +17,10 @@ export function App() {
   const [launchOpen, setLaunchOpen] = useState(false);
   const [fileTarget, setFileTarget] = useState<{ path: string; machine?: string } | null>(null);
   const [toastMsg, setToastMsg] = useState("");
+  const [webOutdated, setWebOutdated] = useState(false);
   const [dark, setDark] = useState(() => document.documentElement.dataset.theme === "dark");
+
+  useEffect(() => onWebBuildChange(() => setWebOutdated(true)), []);
 
   const activeThread = route.view === "corgi" ? route.thread : "chat:main";
   const { authed, connected, superView, paneState, refreshAuth } = useCorgiStream(activeThread);
@@ -41,97 +45,104 @@ export function App() {
     return <LoginView onSuccess={refreshAuth} />;
   }
 
-  const agents = (paneState?.agents ?? []).filter((a) => a.name !== "corgi");
+  const allAgents = paneState?.agents ?? [];
+  const agents = allAgents.filter((a) => a.name !== "corgi" && a.name !== "corgi-dream");
   const shells = paneState?.shells ?? [];
   const machines = paneState?.machines ?? [];
   const pendingCount = (superView?.actions ?? []).filter((a) => a.status === "pending").length;
   const selectedPane =
-    route.view === "agent" ? [...agents, ...shells].find((p) => p.pane_id === route.paneId) ?? null : null;
+    route.view === "agent" ? [...allAgents, ...shells].find((p) => p.pane_id === route.paneId) ?? null : null;
 
   return (
-    <div className="h-full flex flex-col md:flex-row overflow-hidden surface-bg text-primary">
-      <div className="md:hidden h-12 px-3 flex items-center justify-between border-b border-hairline surface-rail shrink-0">
-        <button
-          type="button"
-          onClick={() => setDrawerOpen(true)}
-          className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer"
-          title="打开侧栏"
-        >
-          <Menu className="w-4 h-4" />
-        </button>
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <CorgiMark className="w-4 h-4" />
-          <span>Corgi</span>
-          {pendingCount > 0 && <StatusDot status="blocked" />}
-        </div>
-        <button
-          type="button"
-          onClick={() => setLaunchOpen(true)}
-          className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer"
-          title="手动新建"
-        >
-          <Plus className="w-4 h-4" />
-        </button>
-      </div>
-
-      <Sidebar
-        route={route}
-        superView={superView}
-        agents={agents}
-        shells={shells}
-        machines={machines}
-        connected={connected}
-        dark={dark}
-        onSelect={setRoute}
-        onOpenLauncher={() => setLaunchOpen(true)}
-        onToggleTheme={toggleTheme}
-        onToast={toast}
-      />
-
-      {drawerOpen && (
-        <div className="fixed inset-0 z-40 md:hidden flex" style={{ background: "rgba(0,0,0,0.35)" }} onClick={() => setDrawerOpen(false)}>
-          <div onClick={(e) => e.stopPropagation()} className="h-full">
-            <Sidebar
-              mobile
-              route={route}
-              superView={superView}
-              agents={agents}
-              shells={shells}
-              machines={machines}
-              connected={connected}
-              dark={dark}
-              onSelect={setRoute}
-              onOpenLauncher={() => setLaunchOpen(true)}
-              onToggleTheme={toggleTheme}
-              onCloseMobile={() => setDrawerOpen(false)}
-              onToast={toast}
-            />
-          </div>
+    <div className="h-full flex flex-col overflow-hidden surface-bg text-primary">
+      {webOutdated && (
+        <div className="px-4 py-1.5 border-b border-hairline surface-rail flex items-center justify-center gap-3 text-xs shrink-0">
+          <span className="text-secondary">Corgi 控制台已更新到新版本</span>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md btn-accent cursor-pointer"
+          >
+            <RefreshCw className="w-3 h-3" />
+            <span>立即刷新</span>
+          </button>
         </div>
       )}
 
-      <main className="flex-1 flex min-w-0 min-h-0">
-        {route.view === "corgi" && (
-          <CorgiChatView
-            data={superView}
-            machines={machines}
-            thread={route.thread}
-            onSelectWorker={(paneId) => setRoute({ view: "agent", paneId })}
-            onOpenFile={(p, m) => setFileTarget({ path: p, machine: m })}
-            onToast={toast}
-          />
+      <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">
+        <div className="md:hidden h-12 px-3 flex items-center justify-between border-b border-hairline surface-rail shrink-0">
+          <button type="button" onClick={() => setDrawerOpen(true)} className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer" title="打开侧栏">
+            <Menu className="w-4 h-4" />
+          </button>
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <CorgiMark className="w-4 h-4" />
+            <span>Corgi</span>
+            {pendingCount > 0 && <StatusDot status="blocked" />}
+          </div>
+          <button type="button" onClick={() => setLaunchOpen(true)} className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer" title="手动新建">
+            <Plus className="w-4 h-4" />
+          </button>
+        </div>
+
+        <Sidebar
+          route={route}
+          superView={superView}
+          agents={agents}
+          shells={shells}
+          machines={machines}
+          connected={connected}
+          dark={dark}
+          onSelect={setRoute}
+          onOpenLauncher={() => setLaunchOpen(true)}
+          onToggleTheme={toggleTheme}
+          onToast={toast}
+        />
+
+        {drawerOpen && (
+          <div className="fixed inset-0 z-40 md:hidden flex" style={{ background: "rgba(0,0,0,0.35)" }} onClick={() => setDrawerOpen(false)}>
+            <div onClick={(e) => e.stopPropagation()} className="h-full">
+              <Sidebar
+                mobile
+                route={route}
+                superView={superView}
+                agents={agents}
+                shells={shells}
+                machines={machines}
+                connected={connected}
+                dark={dark}
+                onSelect={setRoute}
+                onOpenLauncher={() => setLaunchOpen(true)}
+                onToggleTheme={toggleTheme}
+                onCloseMobile={() => setDrawerOpen(false)}
+                onToast={toast}
+              />
+            </div>
+          </div>
         )}
-        {route.view === "agent" && selectedPane && (
-          <AgentPaneView
-            pane={selectedPane}
-            onClosed={() => setRoute({ view: "corgi", thread: "chat:main" })}
-            onOpenFile={(p) => setFileTarget({ path: p, machine: selectedPane.machine })}
-            onToast={toast}
-          />
-        )}
-        {route.view === "auto" && <AutomationView onToast={toast} />}
-        <FileDrawer target={fileTarget} onClose={() => setFileTarget(null)} />
-      </main>
+
+        <main className="flex-1 flex min-w-0 min-h-0">
+          {route.view === "corgi" && (
+            <CorgiChatView
+              data={superView}
+              machines={machines}
+              thread={route.thread}
+              onSelectWorker={(paneId) => setRoute({ view: "agent", paneId })}
+              onOpenFile={(p, m) => setFileTarget({ path: p, machine: m })}
+              onToast={toast}
+            />
+          )}
+          {route.view === "agent" && selectedPane && (
+            <AgentPaneView
+              pane={selectedPane}
+              onClosed={() => setRoute({ view: "corgi", thread: "chat:main" })}
+              onOpenFile={(p) => setFileTarget({ path: p, machine: selectedPane.machine })}
+              onToast={toast}
+            />
+          )}
+          {route.view === "auto" && <AutomationView onToast={toast} />}
+          <FileDrawer target={fileTarget} onClose={() => setFileTarget(null)} />
+        </main>
+      </div>
 
       <LauncherModal
         open={launchOpen}

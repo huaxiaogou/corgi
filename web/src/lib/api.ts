@@ -6,6 +6,26 @@ export class ApiError extends Error {
   }
 }
 
+let initialBuildTag = "";
+const buildListeners = new Set<() => void>();
+
+function checkBuildHeader(res: Response) {
+  const tag = res.headers.get("X-Corgi-Web");
+  if (!tag) return;
+  if (!initialBuildTag) {
+    initialBuildTag = tag;
+  } else if (tag !== initialBuildTag) {
+    buildListeners.forEach((fn) => fn());
+  }
+}
+
+export function onWebBuildChange(fn: () => void): () => void {
+  buildListeners.add(fn);
+  return () => {
+    buildListeners.delete(fn);
+  };
+}
+
 export async function api<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method: body !== undefined ? "POST" : "GET",
@@ -13,6 +33,7 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
     body: body !== undefined ? JSON.stringify(body) : undefined,
     credentials: "same-origin",
   });
+  checkBuildHeader(res);
   let data: Record<string, unknown> = {};
   try {
     data = (await res.json()) as Record<string, unknown>;
@@ -34,6 +55,7 @@ export async function uploadFile(file: File, machine?: string): Promise<{ path: 
     body: file,
     credentials: "same-origin",
   });
+  checkBuildHeader(res);
   const data = (await res.json()) as { path?: string; name?: string; size?: number; error?: string };
   if (!res.ok || !data.path) {
     throw new ApiError(res.status, data.error ?? "上传失败");

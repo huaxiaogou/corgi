@@ -90,6 +90,7 @@ func runHub(dir string) {
 	host = strings.TrimSuffix(host, ".local")
 	herdrClient := herdr.NewUnixClient(*sock, home, logger)
 	fl := fleet.NewFleet(herdrClient, host, home, version, reg.DetectInstalled(home, true))
+	fl.SetCorgiDir(dir)
 
 	exe, _ := os.Executable()
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
@@ -137,20 +138,21 @@ func runHub(dir string) {
 		pubURLs = strings.Split(*publicURL, ",")
 	}
 	srv := &web.Server{
-		Store:      st,
-		Engine:     eng,
-		Bus:        bus,
-		WeCom:      wc,
-		Fleet:      fl,
-		Auth:       fleet.NewAuthManager(st, master),
-		Agents:     reg,
-		StaticFS:   webassets.DistFS(),
-		CorgiDir:   dir,
-		Home:       home,
-		Version:    version,
-		Port:       tcpAddr.Port,
-		PublicURLs: pubURLs,
-		Logger:     logger,
+		Store:          st,
+		Engine:         eng,
+		Bus:            bus,
+		WeCom:          wc,
+		Fleet:          fl,
+		Auth:           fleet.NewAuthManager(st, master),
+		Agents:         reg,
+		StaticFS:       webassets.DistFS(),
+		CorgiDir:       dir,
+		Home:           home,
+		Version:        version,
+		Port:           tcpAddr.Port,
+		PublicURLs:     pubURLs,
+		Logger:         logger,
+		ExecutablePath: exe,
 	}
 
 	printBanner(srv, tcpAddr, master)
@@ -158,6 +160,7 @@ func runHub(dir string) {
 	go eng.Run(ctx)
 	go bus.Run(ctx)
 	go wc.Run(ctx)
+	go srv.WatchEndings(ctx)
 
 	hs := &http.Server{Handler: srv.Routes(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -221,14 +224,20 @@ func runNode(dir string, args []string) {
 	installed := reg.DetectInstalled(home, true)
 	herdrClient := herdr.NewUnixClient(*sock, home, logger)
 	fl := fleet.NewFleet(herdrClient, *name, home, version, installed)
+	fl.SetCorgiDir(dir)
+	nodeExe, _ := os.Executable()
+	if resolved, err := filepath.EvalSymlinks(nodeExe); err == nil {
+		nodeExe = resolved
+	}
 	nodeSrv := &web.Server{
-		Fleet:    fl,
-		Agents:   reg,
-		CorgiDir: dir,
-		Home:     home,
-		Version:  version,
-		NodeOnly: true,
-		Logger:   logger,
+		Fleet:          fl,
+		Agents:         reg,
+		CorgiDir:       dir,
+		Home:           home,
+		Version:        version,
+		NodeOnly:       true,
+		Logger:         logger,
+		ExecutablePath: nodeExe,
 	}
 
 	if err := fleet.StartLocalUIProxy(ctx, *localUI, cfg.Hub, logger); err != nil {

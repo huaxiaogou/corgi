@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowUp, Paperclip, Pin, RotateCw, Search, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Pin, X } from "lucide-react";
 import { CorgiButtMark, CorgiMark, StatusDot } from "../../components/CorgiMark";
 import { DecisionCard } from "../../components/DecisionCard";
 import { MarkdownText } from "../../components/MarkdownText";
-import { api, uploadFile } from "../../lib/api";
-import type { Entry, Machine, SuperView } from "../../types/api";
+import { api } from "../../lib/api";
+import type { Entry, Machine, Settings, SuperView } from "../../types/api";
+import { ChatHeader } from "./ChatHeader";
+import { ComposerBar } from "./ComposerBar";
 
 interface Props {
   data: SuperView | null;
@@ -16,12 +18,7 @@ interface Props {
 }
 
 export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFile, onToast }: Props) {
-  const [text, setText] = useState("");
-  const [machine, setMachine] = useState("");
-  const [kind, setKind] = useState("");
-  const [effort, setEffort] = useState("");
   const [replyTo, setReplyTo] = useState<Entry | null>(null);
-  const [attachments, setAttachments] = useState<string[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQ, setSearchQ] = useState("");
   const [searchHits, setSearchHits] = useState<{ id: string; role: string; snippet: string }[]>([]);
@@ -29,7 +26,6 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
   const [olderEntries, setOlderEntries] = useState<Entry[]>([]);
   const [moreOlder, setMoreOlder] = useState<boolean | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setOlderEntries([]);
@@ -48,9 +44,8 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
     if (loadingOlder || entries.length === 0) return;
     setLoadingOlder(true);
     try {
-      const before = entries[0].seq;
       const res = await api<{ entries: Entry[]; more: boolean }>(
-        `/api/super/earlier?thread=${encodeURIComponent(thread)}&before=${before}&limit=80`
+        `/api/super/earlier?thread=${encodeURIComponent(thread)}&before=${entries[0].seq}&limit=80`
       );
       setOlderEntries((prev) => [...(res.entries ?? []), ...prev]);
       setMoreOlder(Boolean(res.more));
@@ -61,54 +56,14 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
     }
   };
 
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    let payload = text.trim();
-    if (!payload && attachments.length === 0) return;
-    if (attachments.length > 0) {
-      payload = (payload ? payload + "\n\n" : "") + "附件：\n" + attachments.join("\n");
-    }
-    setText("");
-    setAttachments([]);
-    const reId = replyTo?.id ?? "";
-    setReplyTo(null);
+  const togglePause = async () => {
     try {
-      await api("/api/super/say", {
-        thread,
-        text: payload,
-        re: reId,
-        machine,
-        kind,
-        effort,
-      });
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : "发送失败");
-    }
-  };
-
-  const resolveAction = async (actionId: string, choiceKey: string) => {
-    try {
-      await api(`/api/super/actions/${encodeURIComponent(actionId)}/resolve`, { choice: choiceKey, by: "web" });
-      onToast("已拍板并同步");
+      const r = await api<{ settings: Settings }>("/api/super/settings");
+      const next = !r.settings.paused;
+      await api("/api/super/settings", { settings: { ...r.settings, paused: next } });
+      onToast(next ? "已暂停自动投递" : "已恢复自动投递");
     } catch (err) {
       onToast(err instanceof Error ? err.message : "操作失败");
-    }
-  };
-
-  const dismissAction = async (actionId: string) => {
-    try {
-      await api(`/api/super/actions/${encodeURIComponent(actionId)}/dismiss`, {});
-      onToast("已忽略待办");
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : "忽略失败");
-    }
-  };
-
-  const togglePin = async (entry: Entry) => {
-    try {
-      await api("/api/super/pin", { id: entry.id, pinned: !entry.pinned });
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : "置顶失败");
     }
   };
 
@@ -128,86 +83,23 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
     }
   };
 
-  const handleUpload = async (files: FileList | null) => {
-    if (!files) return;
-    for (const f of Array.from(files)) {
-      try {
-        const up = await uploadFile(f, machine);
-        setAttachments((prev) => [...prev, up.path]);
-      } catch (err) {
-        onToast(err instanceof Error ? err.message : "上传失败");
-      }
-    }
-  };
-
   const router = data?.router;
   const isWeComGroup = thread.startsWith("wecom:");
   const headerTitle = thread === "chat:main" ? "Corgi" : isWeComGroup ? `企微群 · ${thread.replace(/^wecom:/, "")}` : thread;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <header className="h-14 px-5 flex items-center justify-between border-b border-hairline shrink-0">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="font-semibold text-[15px] truncate">{headerTitle}</span>
-            {router?.kind && (
-              <span className="text-[11px] font-mono-code px-1.5 py-0.5 rounded border border-strong text-secondary shrink-0">
-                {router.kind}
-              </span>
-            )}
-            {isWeComGroup && (
-              <span className="text-[11px] px-1.5 py-0.5 rounded surface-rail border border-hairline text-muted shrink-0">
-                双向同步
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2 text-[11.5px] text-muted mt-0.5 flex-wrap">
-            <StatusDot status={router?.status ?? "asleep"} />
-            <span>
-              {router?.dreaming
-                ? "正在整理记忆（做梦）…"
-                : router?.handover
-                  ? "正在交接记忆并切换会话…"
-                  : router?.status === "working"
-                    ? router.replied
-                      ? "正在收尾记忆…"
-                      : "正在跑腿…"
-                    : router?.alive
-                      ? "空闲"
-                      : "打盹中"}
-            </span>
-            {router?.model && <span>· {router.model}</span>}
-            {router && router.context ? (
-              <span>
-                · 上下文 {router.context}%{router.rotate_at > 0 ? `/${router.rotate_at}%` : ""}
-              </span>
-            ) : null}
-            {data?.follow && (
-              <span className="truncate max-w-[260px]" title={data.follow.next_text}>
-                · 下次唤醒 {new Date(data.follow.next).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-              </span>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setSearchOpen((v) => !v)}
-            className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer"
-            title="搜索对话"
-          >
-            <Search className="w-4 h-4" strokeWidth={1.7} />
-          </button>
-          <button
-            type="button"
-            onClick={() => void api("/api/super/router/restart", {}).then(() => onToast("正在重启 Corgi 会话"))}
-            className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer"
-            title="重启 Corgi"
-          >
-            <RotateCw className="w-4 h-4" strokeWidth={1.7} />
-          </button>
-        </div>
-      </header>
+      <ChatHeader
+        title={headerTitle}
+        isWeComGroup={isWeComGroup}
+        router={router}
+        paused={data?.paused}
+        follow={data?.follow}
+        onToggleSearch={() => setSearchOpen((v) => !v)}
+        onRestartRouter={() => void api("/api/super/router/restart", {}).then(() => onToast("正在重启 Corgi 会话"))}
+        onTogglePause={() => void togglePause()}
+        onOpenRouterPane={onSelectWorker}
+      />
 
       {searchOpen && (
         <div className="px-5 py-2.5 border-b border-hairline surface-rail space-y-2">
@@ -258,11 +150,7 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
 
       {pinnedList.length > 0 && (
         <div className="px-5 py-2 border-b border-hairline surface-rail text-xs shrink-0 space-y-1.5">
-          <button
-            type="button"
-            onClick={() => setPinnedOpen((v) => !v)}
-            className="flex items-center gap-1.5 text-secondary font-medium cursor-pointer"
-          >
+          <button type="button" onClick={() => setPinnedOpen((v) => !v)} className="flex items-center gap-1.5 text-secondary font-medium cursor-pointer">
             <Pin className="w-3.5 h-3.5" />
             <span>已置顶 {pinnedList.length} 条</span>
           </button>
@@ -271,7 +159,7 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
               {pinnedList.map((p) => (
                 <div key={p.id} className="px-2.5 py-1.5 rounded-lg surface-bg border border-hairline flex items-center justify-between gap-2">
                   <span className="truncate text-secondary">{p.text}</span>
-                  <button type="button" onClick={() => void togglePin(p)} className="text-muted hover:underline shrink-0 cursor-pointer">
+                  <button type="button" onClick={() => void api("/api/super/pin", { id: p.id, pinned: false })} className="text-muted hover:underline shrink-0 cursor-pointer">
                     取消置顶
                   </button>
                 </div>
@@ -285,12 +173,7 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
         <div className="max-w-[740px] mx-auto space-y-5">
           {canLoadMore && (
             <div className="text-center">
-              <button
-                type="button"
-                disabled={loadingOlder}
-                onClick={() => void loadEarlier()}
-                className="px-3.5 py-1 rounded-full text-xs border border-strong text-secondary surface-hover cursor-pointer disabled:opacity-50"
-              >
+              <button type="button" disabled={loadingOlder} onClick={() => void loadEarlier()} className="px-3.5 py-1 rounded-full text-xs border border-strong text-secondary surface-hover cursor-pointer disabled:opacity-50">
                 {loadingOlder ? "加载中…" : "加载更早消息"}
               </button>
             </div>
@@ -318,9 +201,7 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
             if (entry.role === "user") {
               return (
                 <div key={entry.id} className="flex flex-col items-end gap-1">
-                  <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-sm text-[14px] leading-relaxed pill-user whitespace-pre-wrap">
-                    {entry.text}
-                  </div>
+                  <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-sm text-[14px] leading-relaxed pill-user whitespace-pre-wrap">{entry.text}</div>
                   <span className="text-[11px] text-muted pr-1">
                     {entry.channel === "wecom" ? "企业微信 · " : ""}
                     {new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -334,19 +215,15 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
                   <CorgiMark className="w-4 h-4" />
                 </div>
                 <div className="flex-1 min-w-0 space-y-1.5">
-                  {entry.re && (
-                    <div className="text-xs text-muted pl-2.5 border-l-2 border-strong truncate">
-                      {entry.re.who}：{entry.re.text}
-                    </div>
-                  )}
+                  {entry.re && <div className="text-xs text-muted pl-2.5 border-l-2 border-strong truncate">{entry.re.who}：{entry.re.text}</div>}
                   <div className="text-[14.5px]">
-                    <MarkdownText text={entry.text} onOpenFile={(p) => onOpenFile(p, machine)} />
+                    <MarkdownText text={entry.text} onOpenFile={(p) => onOpenFile(p)} />
                   </div>
                   <div className="flex items-center gap-3 text-[11px] text-muted opacity-0 group-hover:opacity-100 transition-opacity">
                     <button type="button" onClick={() => setReplyTo(entry)} className="hover:underline cursor-pointer">
                       引用回复
                     </button>
-                    <button type="button" onClick={() => void togglePin(entry)} className="inline-flex items-center gap-1 hover:underline cursor-pointer">
+                    <button type="button" onClick={() => void api("/api/super/pin", { id: entry.id, pinned: !entry.pinned })} className="inline-flex items-center gap-1 hover:underline cursor-pointer">
                       <Pin className="w-3 h-3" />
                       {entry.pinned ? "取消置顶" : "置顶"}
                     </button>
@@ -360,8 +237,14 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
             <div key={act.id} className="pl-0 sm:pl-10">
               <DecisionCard
                 action={act}
-                onResolve={resolveAction}
-                onDismiss={dismissAction}
+                onResolve={async (id, key) => {
+                  await api(`/api/super/actions/${encodeURIComponent(id)}/resolve`, { choice: key, by: "web" });
+                  onToast("已拍板并同步");
+                }}
+                onDismiss={async (id) => {
+                  await api(`/api/super/actions/${encodeURIComponent(id)}/dismiss`, {});
+                  onToast("已忽略待办");
+                }}
                 onOpenWorker={(name) => {
                   const wk = data?.workers.find((w) => w.name === name);
                   if (wk?.pane_id) onSelectWorker(wk.pane_id);
@@ -369,105 +252,31 @@ export function CorgiChatView({ data, machines, thread, onSelectWorker, onOpenFi
               />
             </div>
           ))}
+
+          {router?.status === "working" && (
+            <div className="flex items-center gap-2.5 text-xs text-muted pt-1">
+              <StatusDot status="working" />
+              <span>{router.replied ? "已回复，在整理记忆…" : "Corgi 在想…"}</span>
+            </div>
+          )}
         </div>
       </div>
 
-      <div className="px-5 pb-4 pt-2 shrink-0">
-        <form onSubmit={(e) => void submit(e)} className="max-w-[740px] mx-auto composer-box rounded-2xl px-4 pt-3 pb-2.5 space-y-2">
-          {replyTo && (
-            <div className="flex items-center justify-between text-xs px-2.5 py-1 rounded-lg surface-rail text-secondary">
-              <span className="truncate">引用 Corgi：{replyTo.text}</span>
-              <button type="button" onClick={() => setReplyTo(null)} className="cursor-pointer ml-2">
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-          {attachments.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 text-xs">
-              {attachments.map((p) => (
-                <span key={p} className="px-2 py-0.5 rounded surface-rail border border-hairline font-mono-code text-secondary">
-                  {p.split("/").pop()}
-                </span>
-              ))}
-            </div>
-          )}
-          <textarea
-            rows={1}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onPaste={(e) => {
-              const files = e.clipboardData?.files;
-              if (files && files.length > 0) {
-                e.preventDefault();
-                void handleUpload(files);
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void submit(e);
-              }
-            }}
-            placeholder="告诉 Corgi 你要做什么（支持粘贴截图或点左下角添加文件）…"
-            className="w-full resize-none bg-transparent text-[14px] outline-none"
-          />
-          <div className="flex items-center justify-between pt-1.5">
-            <div className="flex items-center gap-2.5 text-xs text-muted flex-wrap">
-              <button
-                type="button"
-                onClick={() => fileRef.current?.click()}
-                className="text-secondary hover:opacity-80 cursor-pointer"
-                title="上传图片或文件"
-              >
-                <Paperclip className="w-4 h-4" strokeWidth={1.7} />
-              </button>
-              <input ref={fileRef} type="file" multiple hidden onChange={(e) => void handleUpload(e.target.files)} />
-              <span>派活</span>
-              <select
-                value={machine}
-                onChange={(e) => setMachine(e.target.value)}
-                className="bg-transparent text-secondary outline-none cursor-pointer"
-              >
-                <option value="">默认电脑</option>
-                {machines.map((m) => (
-                  <option key={m.id || "local"} value={m.id || "local"}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-              <select
-                value={kind}
-                onChange={(e) => setKind(e.target.value)}
-                className="bg-transparent text-secondary outline-none cursor-pointer"
-              >
-                <option value="">自动 Agent</option>
-                <option value="claude">claude</option>
-                <option value="codex">codex</option>
-                <option value="agy">agy</option>
-                <option value="codebuddy">codebuddy</option>
-              </select>
-              <select
-                value={effort}
-                onChange={(e) => setEffort(e.target.value)}
-                className="bg-transparent text-secondary outline-none cursor-pointer"
-              >
-                <option value="">默认思考</option>
-                <option value="low">思考 · 低</option>
-                <option value="medium">思考 · 中</option>
-                <option value="high">思考 · 高</option>
-                <option value="xhigh">思考 · 极高</option>
-              </select>
-            </div>
-            <button
-              type="submit"
-              className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer hover:opacity-85 shrink-0"
-              title="发送"
-            >
-              <ArrowUp className="w-4 h-4" strokeWidth={2} />
-            </button>
-          </div>
-        </form>
-      </div>
+      <ComposerBar
+        machines={machines}
+        replyTo={replyTo}
+        onClearReply={() => setReplyTo(null)}
+        onToast={onToast}
+        onSend={async ({ text, machine, kind, model, effort }) => {
+          const reId = replyTo?.id ?? "";
+          setReplyTo(null);
+          try {
+            await api("/api/super/say", { thread, text, re: reId, machine, kind, model, effort });
+          } catch (err) {
+            onToast(err instanceof Error ? err.message : "发送失败");
+          }
+        }}
+      />
     </div>
   );
 }

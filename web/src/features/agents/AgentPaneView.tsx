@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent } from "react";
 import { ArrowUp, Keyboard, Paperclip, Trash2, X } from "lucide-react";
 import { TerminalScreen } from "../../components/TerminalScreen";
 import { api, uploadFile } from "../../lib/api";
-import type { AgentView, Approval, ChatMessage } from "../../types/api";
+import type { AgentView, Approval, ChatMessage, MsgPatch } from "../../types/api";
 import { AgentChatThread } from "./AgentChatThread";
 
 interface Props {
@@ -12,16 +12,40 @@ interface Props {
   onToast: (msg: string) => void;
 }
 
-const SETUP_RE = /choose your color scheme|welcome to antigravity|select login method|waiting for auth|do you trust|trust this folder/i;
+const SETUP_RE = /choose your color scheme|welcome to antigravity|select login method|waiting for auth|do you trust|trust this folder|terms of service/i;
+
+function computeCursorMoveKeys(ap: Approval, targetIdx: number): string[] {
+  let active = ap.choices.findIndex((c) => c.active);
+  if (active < 0) active = 0;
+  const keys: string[] = [];
+  while (active < targetIdx) {
+    keys.push("down");
+    active++;
+  }
+  while (active > targetIdx) {
+    keys.push("up");
+    active--;
+  }
+  keys.push("enter");
+  return keys;
+}
 
 export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
   const [mode, setMode] = useState<"chat" | "screen" | "log">(pane.is_agent ? "chat" : "screen");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [olderMsgs, setOlderMsgs] = useState<ChatMessage[]>([]);
+  const [liveMsgs, setLiveMsgs] = useState<ChatMessage[]>([]);
+  const [earlierCursor, setEarlierCursor] = useState(0);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [logText, setLogText] = useState("");
   const [approval, setApproval] = useState<Approval | null>(null);
+  const [liveStatus, setLiveStatus] = useState(pane.status);
+  const [liveTail, setLiveTail] = useState("");
+  const [liveMeta, setLiveMeta] = useState("");
+  const [contextPct, setContextPct] = useState(0);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<{ name: string; path: string }[]>([]);
   const [showKeys, setShowKeys] = useState(false);
+  const baseRef = useRef(0);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -32,17 +56,59 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
 
   useEffect(() => {
     setLogText("");
-    setMessages([]);
+    setOlderMsgs([]);
+    setLiveMsgs([]);
+    setEarlierCursor(0);
+    baseRef.current = 0;
     setApproval(null);
     const enc = encodeURIComponent(pane.pane_id);
     const url = mode === "chat" ? `/api/panes/${enc}/chat` : `/api/panes/${enc}/stream?mode=${mode}`;
     const es = new EventSource(url);
-    es.addEventListener("messages", (ev) => setMessages((JSON.parse((ev as MessageEvent).data) as { messages?: ChatMessage[] }).messages ?? []));
+    es.addEventListener("reset", () => {
+      baseRef.current = 0;
+      setOlderMsgs([]);
+      setLiveMsgs([]);
+      setEarlierCursor(0);
+    });
+    es.addEventListener("patch", (ev) => {
+      const p = JSON.parse((ev as MessageEvent).data) as MsgPatch;
+      setLiveMsgs((prev) => {
+        const dropFront = Math.max(0, p.base - baseRef.current);
+        const trimmed = dropFront > 0 ? prev.slice(dropFront) : prev;
+        baseRef.current = p.base;
+        const keepLen = Math.max(0, p.from - p.base);
+        return [...trimmed.slice(0, keepLen), ...(p.msgs ?? [])];
+      });
+      setEarlierCursor((cur) => (cur > 0 ? cur : p.earlier ?? 0));
+    });
+    es.addEventListener("messages", (ev) => setLiveMsgs((JSON.parse((ev as MessageEvent).data) as { messages?: ChatMessage[] }).messages ?? []));
     es.addEventListener("log", (ev) => setLogText((JSON.parse((ev as MessageEvent).data) as { text?: string }).text ?? ""));
     es.addEventListener("frame", (ev) => setLogText((JSON.parse((ev as MessageEvent).data) as { text?: string }).text ?? ""));
-    es.addEventListener("live", (ev) => setApproval((JSON.parse((ev as MessageEvent).data) as { approval?: Approval }).approval ?? null));
+    es.addEventListener("live", (ev) => {
+      const p = JSON.parse((ev as MessageEvent).data) as { status?: string; approval?: Approval; tail?: string; meta?: string; context?: number };
+      setLiveStatus(p.status ?? pane.status);
+      setApproval(p.approval ?? null);
+      setLiveTail(p.tail ?? "");
+      setLiveMeta(p.meta ?? "");
+      if (p.context) setContextPct(p.context);
+    });
     return () => es.close();
   }, [pane.pane_id, mode]);
+
+  const loadEarlier = async () => {
+    if (!earlierCursor || loadingEarlier) return;
+    setLoadingEarlier(true);
+    try {
+      const enc = encodeURIComponent(pane.pane_id);
+      const res = await api<{ messages: ChatMessage[]; earlier: number }>(`/api/panes/${enc}/earlier?before=${earlierCursor}`);
+      setOlderMsgs((prev) => [...(res.messages ?? []), ...prev]);
+      setEarlierCursor(res.earlier ?? 0);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "加载历史失败");
+    } finally {
+      setLoadingEarlier(false);
+    }
+  };
 
   const addFiles = async (files: FileList | File[]) => {
     for (const f of Array.from(files)) {
@@ -55,11 +121,12 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
     }
   };
 
-  const handlePaste = (e: ClipboardEvent<HTMLInputElement>) => {
-    const files = Array.from(e.clipboardData?.files ?? []);
-    if (files.length > 0) {
-      e.preventDefault();
-      void addFiles(files);
+  const submitPromptText = async (rawText: string) => {
+    const enc = encodeURIComponent(pane.pane_id);
+    if (pane.is_agent && mode === "chat") {
+      await api(`/api/agents/${enc}/prompt`, { prompt: rawText });
+    } else {
+      await api(`/api/panes/${enc}/text`, { text: rawText, enter: true });
     }
   };
 
@@ -72,69 +139,61 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
     }
     setInput("");
     setAttachments([]);
-    const enc = encodeURIComponent(pane.pane_id);
     try {
-      if (pane.is_agent && mode === "chat") {
-        await api(`/api/agents/${enc}/prompt`, { prompt: val });
-      } else {
-        await api(`/api/panes/${enc}/text`, { text: val, enter: true });
-      }
+      await submitPromptText(val);
     } catch (err) {
       onToast(err instanceof Error ? err.message : "发送失败");
     }
   };
 
   const sendKey = (key: string) => api(`/api/panes/${encodeURIComponent(pane.pane_id)}/keys`, { keys: [key] });
-  const sendRawText = (text: string) => api(`/api/panes/${encodeURIComponent(pane.pane_id)}/text`, { text, enter: false });
 
-  const answerApproval = async (choice: Approval["choices"][number]) => {
+  const answerApproval = async (choice: Approval["choices"][number], idx: number) => {
     const enc = encodeURIComponent(pane.pane_id);
-    if (approval?.style === "cursor" && choice.cursor && choice.cursor > 0) {
-      const keys = [...Array<string>(Math.max(0, choice.cursor - 1)).fill("down"), "enter"];
-      await api(`/api/panes/${enc}/keys`, { keys });
+    if (approval?.style === "cursor") {
+      await api(`/api/panes/${enc}/keys`, { keys: computeCursorMoveKeys(approval, idx) });
       return;
     }
     await api(`/api/panes/${enc}/text`, { text: choice.key, enter: true });
   };
 
-  const closeWorkspace = async () => {
-    await api(`/api/workspaces/${encodeURIComponent(pane.workspace_id)}/close`, {});
-    onToast("已关闭工作区");
-    onClosed();
-  };
-
+  const messages = [...olderMsgs, ...liveMsgs];
   const keysVisible = mode !== "chat" || !pane.is_agent || showKeys;
   const setupHint = mode === "chat" && messages.length === 0 && SETUP_RE.test(logText);
   const modeTabs = pane.is_agent ? (["chat", "screen", "log"] as const) : (["screen", "log"] as const);
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div
+      className="flex-1 flex flex-col min-h-0"
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e: DragEvent) => {
+        e.preventDefault();
+        if (e.dataTransfer?.files?.length) void addFiles(e.dataTransfer.files);
+      }}
+    >
       <header className="h-14 px-5 flex items-center justify-between border-b border-hairline shrink-0 gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="font-semibold text-[15px] truncate">{pane.topic || pane.name}</span>
-            <span className="text-[11px] font-mono-code px-1.5 py-0.5 rounded border border-strong text-secondary">
-              {pane.is_agent ? pane.kind : "shell"}
-            </span>
+            <span className="text-[11px] font-mono-code px-1.5 py-0.5 rounded border border-strong text-secondary">{pane.is_agent ? pane.kind : "shell"}</span>
+            {contextPct > 0 && <span className="text-[11px] font-mono-code text-muted">上下文 {contextPct}%</span>}
           </div>
-          <div className="text-[11.5px] font-mono-code text-muted truncate mt-0.5">
-            {pane.machine ? `${pane.machine} · ` : ""}{pane.cwd}
-          </div>
+          <div className="text-[11.5px] font-mono-code text-muted truncate mt-0.5">{pane.machine ? `${pane.machine} · ` : ""}{pane.cwd}</div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <div className="inline-flex p-0.5 rounded-lg text-xs surface-rail border border-hairline">
             {modeTabs.map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                className={`px-2.5 py-1 rounded-md cursor-pointer ${mode === m ? "surface-bg font-medium text-primary" : "text-secondary"}`}
-              >
+              <button key={m} type="button" onClick={() => setMode(m)} className={`px-2.5 py-1 rounded-md cursor-pointer ${mode === m ? "surface-bg font-medium text-primary" : "text-secondary"}`}>
                 {m === "chat" ? "对话" : m === "screen" ? "屏幕" : "日志"}
               </button>
             ))}
           </div>
-          <button type="button" onClick={() => void closeWorkspace()} className="w-8 h-8 rounded-lg flex items-center justify-center text-muted surface-hover cursor-pointer" title="关闭工作区">
+          <button
+            type="button"
+            onClick={() => void api(`/api/workspaces/${encodeURIComponent(pane.workspace_id)}/close`, {}).then(() => { onToast("已关闭工作区"); onClosed(); })}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-muted surface-hover cursor-pointer"
+            title="关闭工作区"
+          >
             <Trash2 className="w-4 h-4" strokeWidth={1.7} />
           </button>
         </div>
@@ -143,15 +202,22 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
       <div className="flex-1 overflow-y-auto px-5 py-5 min-h-0">
         {mode === "screen" ? (
           <div className="h-full max-w-[960px] mx-auto">
-            <TerminalScreen frame={logText} onKey={(k) => void sendKey(k)} onText={(t) => void sendRawText(t)} onToast={onToast} />
+            <TerminalScreen frame={logText} onKey={(k) => void sendKey(k)} onText={(t) => void api(`/api/panes/${encodeURIComponent(pane.pane_id)}/text`, { text: t, enter: false })} onToast={onToast} />
           </div>
         ) : mode === "chat" ? (
           <AgentChatThread
             messages={messages}
+            earlierCursor={earlierCursor}
+            loadingEarlier={loadingEarlier}
             approval={approval}
+            liveStatus={liveStatus}
+            liveTail={liveTail}
+            liveMeta={liveMeta}
             setupHint={setupHint}
             isAgent={pane.is_agent}
-            onAnswerApproval={(c) => void answerApproval(c)}
+            onLoadEarlier={() => void loadEarlier()}
+            onPickAskOption={(opt) => void submitPromptText(opt)}
+            onAnswerApproval={(c, i) => void answerApproval(c, i)}
             onCancelApproval={() => void sendKey("esc")}
             onSwitchToScreen={() => setMode("screen")}
             onOpenFile={onOpenFile}
@@ -188,21 +254,21 @@ export function AgentPaneView({ pane, onClosed, onOpenFile, onToast }: Props) {
               <Paperclip className="w-4 h-4" />
             </button>
             {pane.is_agent && mode === "chat" && (
-              <button
-                type="button"
-                onClick={() => setShowKeys((v) => !v)}
-                title={showKeys ? "隐藏终端快捷键" : "显示终端快捷键"}
-                className={`w-8 h-8 rounded-lg flex items-center justify-center surface-hover cursor-pointer shrink-0 ${showKeys ? "text-primary surface-rail" : "text-muted"}`}
-              >
+              <button type="button" onClick={() => setShowKeys((v) => !v)} title={showKeys ? "隐藏终端快捷键" : "显示终端快捷键"} className={`w-8 h-8 rounded-lg flex items-center justify-center surface-hover cursor-pointer shrink-0 ${showKeys ? "text-primary surface-rail" : "text-muted"}`}>
                 <Keyboard className="w-4 h-4" />
               </button>
             )}
             <input
               type="text"
               value={input}
-              onPaste={handlePaste}
+              onPaste={(e: ClipboardEvent<HTMLInputElement>) => {
+                if (e.clipboardData?.files?.length) {
+                  e.preventDefault();
+                  void addFiles(e.clipboardData.files);
+                }
+              }}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={pane.is_agent && mode === "chat" ? `给 ${pane.kind} 发消息（支持粘贴截图）…` : "输入终端命令…"}
+              placeholder={pane.is_agent && mode === "chat" ? `给 ${pane.kind} 发消息（支持粘贴或拖入文件）…` : "输入终端命令…"}
               className="flex-1 bg-transparent text-[14px] outline-none"
             />
             <button type="submit" className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer shrink-0">
