@@ -331,27 +331,6 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
         </div>
       )}
 
-      {activeWorkers.length > 0 && (
-        <div className="px-5 py-2 flex items-center gap-2 border-b border-hairline overflow-x-auto shrink-0">
-          {activeWorkers.map((w) => (
-            <button
-              key={w.name}
-              type="button"
-              onClick={() => w.pane_id && onSelectWorker(w.pane_id)}
-              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border border-strong surface-bg surface-hover cursor-pointer shrink-0"
-            >
-              <StatusDot status={w.status} />
-              <span className="font-medium">{w.name}</span>
-              <span className="font-mono-code text-muted">
-                {w.kind}
-                {w.machine ? ` · ${w.machine}` : ""}
-                {w.worktree_branch ? ` · ${w.worktree_branch}` : ""}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
-
       {(pendingActions.length > 0 || snoozedCount > 0) && (
         <div className="border-b border-hairline surface-rail shrink-0 text-xs">
           <div className="px-5 py-2 flex items-center justify-between gap-3">
