@@ -686,3 +686,44 @@ func TestResolveActionCustomHTTPAndWorkerDialogGuard(t *testing.T) {
 		t.Fatalf("custom resolve on worker_dialog want 400, got %d", codeDlg)
 	}
 }
+
+func TestSuperReplyMultilineJSONRoundTrip(t *testing.T) {
+	srv, master := newTestServer(t)
+	h := srv.Routes()
+
+	wantText := "部署完成：\n\n1. Hub 升级成功\n2. 保留行内代码 `\\n` 与段落换行"
+	payload, err := json.Marshal(map[string]any{
+		"thread":  model.MainThread,
+		"text":    wantText,
+		"options": []string{"继续验证", "暂缓"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/super/reply", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer "+master)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/super/reply want 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	snapReq := httptest.NewRequest(http.MethodGet, "/api/super?thread=chat:main", nil)
+	snapReq.Header.Set("Authorization", "Bearer "+master)
+	snapRec := httptest.NewRecorder()
+	h.ServeHTTP(snapRec, snapReq)
+	if snapRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/super want 200, got %d", snapRec.Code)
+	}
+	var view model.SuperView
+	if err := json.Unmarshal(snapRec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode SuperView: %v", err)
+	}
+	if len(view.Entries) != 1 || view.Entries[0].Text != wantText {
+		t.Fatalf("entry text round-trip mismatch: got %+v, want %q", view.Entries, wantText)
+	}
+	if len(view.Actions) != 1 || view.Actions[0].Summary != wantText {
+		t.Fatalf("action summary round-trip mismatch: got %+v, want %q", view.Actions, wantText)
+	}
+}

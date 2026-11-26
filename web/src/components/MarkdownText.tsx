@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { normalizeEscapedNewlines } from "../lib/text";
 
 interface Props {
   text: string;
@@ -101,7 +102,7 @@ function renderInline(line: string, onOpenFile?: (path: string) => void): ReactN
 }
 
 export function MarkdownText({ text, onOpenFile }: Props) {
-  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const lines = normalizeEscapedNewlines(text).replace(/\r\n/g, "\n").split("\n");
   const blocks: ReactNode[] = [];
   let i = 0;
 

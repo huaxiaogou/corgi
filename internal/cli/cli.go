@@ -174,16 +174,21 @@ func parseInterspersed(fs *flag.FlagSet, args []string) error {
 }
 
 func readTextArg(fs *flag.FlagSet) (string, error) {
-	t := strings.Join(fs.Args(), " ")
 	fi, err := os.Stdin.Stat()
 	isTTY := err == nil && fi.Mode()&os.ModeCharDevice != 0
+	return readTextFrom(fs.Args(), os.Stdin, isTTY)
+}
+
+func readTextFrom(args []string, stdin io.Reader, isTTY bool) (string, error) {
+	t := strings.Join(args, " ")
 	if t == "-" || (t == "" && !isTTY) {
-		b, err := io.ReadAll(os.Stdin)
+		b, err := io.ReadAll(stdin)
 		if err != nil {
 			return "", err
 		}
 		t = string(b)
 	}
+	t = normalizeEscapedNewlines(t)
 	if strings.TrimSpace(t) == "" {
 		return "", fmt.Errorf("text is required")
 	}
@@ -296,7 +301,7 @@ func cmdSend(dir string, args []string) error {
 		return fmt.Errorf("usage: corgi send <worker> <text>")
 	}
 	out, err := apiCall(dir, http.MethodPost, "/api/super/send", map[string]any{
-		"to": fs.Arg(0), "text": strings.Join(fs.Args()[1:], " "), "thread": *thread,
+		"to": fs.Arg(0), "text": normalizeEscapedNewlines(strings.Join(fs.Args()[1:], " ")), "thread": *thread,
 	})
 	if err == nil {
 		fmt.Println(strings.TrimSpace(string(out)))

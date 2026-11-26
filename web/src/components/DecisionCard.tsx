@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Clock, PenLine } from "lucide-react";
+import { normalizeEscapedNewlines } from "../lib/text";
 import type { Action } from "../types/api";
 
 interface Props {
@@ -56,7 +57,9 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
   const isRouterCheck = action.kind === "router_check";
   const isWorkerDialog = action.kind === "worker_dialog";
   const showRecommended = choices.length > 1 && !isRouterCheck;
-  const summaryCoversTitle = Boolean(action.summary) && isClippedTitleOfSummary(action.title, action.summary ?? "");
+  const title = normalizeEscapedNewlines(action.title);
+  const summary = normalizeEscapedNewlines(action.summary ?? "");
+  const summaryCoversTitle = Boolean(summary) && isClippedTitleOfSummary(title, summary);
 
   const badgeLabel =
     action.kind === "patrol_digest"
@@ -91,11 +94,11 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
         </div>
 
         {summaryCoversTitle ? (
-          <p className="text-[14.5px] font-medium leading-relaxed text-primary whitespace-pre-line">{action.summary}</p>
+          <p className="text-[14.5px] font-medium leading-relaxed text-primary whitespace-pre-line">{summary}</p>
         ) : (
           <>
-            <div className="text-[15px] font-semibold leading-snug text-primary">{action.title}</div>
-            {action.summary && <p className="text-[13px] leading-relaxed text-secondary whitespace-pre-line">{action.summary}</p>}
+            <div className="text-[15px] font-semibold leading-snug text-primary">{title}</div>
+            {summary && <p className="text-[13px] leading-relaxed text-secondary whitespace-pre-line">{summary}</p>}
           </>
         )}
         {action.command && (
@@ -124,10 +127,7 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
 
         {!isWorkerDialog && (
           <form onSubmit={(e) => void submitCustom(e)} className="px-5 py-2.5 border-b border-hairline surface-rail flex flex-wrap sm:flex-nowrap items-start gap-2.5">
-            <span
-              className="w-5 h-5 rounded flex items-center justify-center border border-dashed border-strong text-secondary surface-bg shrink-0 mt-1.5"
-              title="自由输入其他想法"
-            >
+            <span className="w-5 h-5 rounded flex items-center justify-center border border-dashed border-strong text-secondary surface-bg shrink-0 mt-1.5" title="自由输入其他想法">
               <PenLine className="w-3 h-3" strokeWidth={1.8} />
             </span>
             <textarea

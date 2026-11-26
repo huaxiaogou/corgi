@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ArrowUpRight, Check, ChevronDown, ChevronUp, Clock, CornerDownRight, MessageSquarePlus, PenLine, X } from "lucide-react";
+import { normalizeEscapedNewlines } from "../lib/text";
 import type { Action } from "../types/api";
 
 interface Props {
@@ -35,7 +36,7 @@ export function DecisionReceiptCard({
   const [altsOpen, setAltsOpen] = useState(false);
   const [qExpanded, setQExpanded] = useState(false);
 
-  const question = (action.summary || action.title || "").trim();
+  const question = normalizeEscapedNewlines((action.summary || action.title || "").trim());
   const originId = originEntryId || action.entry_id || "";
   const timeText = formatTime(action.resolved_at || at);
 

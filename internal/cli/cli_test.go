@@ -197,3 +197,161 @@ func TestCmdReplyAndSpawnInterspersedFlags(t *testing.T) {
 		t.Fatalf("keep --off got path=%q body=%#v", gotPath, gotBody)
 	}
 }
+
+func TestNormalizeEscapedNewlines(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "double quoted paragraphs and bullets",
+			in:   `结论如下：\n\n1. 第一项\n2. 第二项\n- 附注`,
+			want: "结论如下：\n\n1. 第一项\n2. 第二项\n- 附注",
+		},
+		{
+			name: "escaped crlf normalized to lf",
+			in:   `第一行\r\n第二行\r\n\r\n第三行`,
+			want: "第一行\n第二行\n\n第三行",
+		},
+		{
+			name: "single trailing real lf still expands escaped body",
+			in:   "第一段\\n\\n第二段\n",
+			want: "第一段\n\n第二段\n",
+		},
+		{
+			name: "real multiline heredoc preserved verbatim",
+			in:   "排查结果：\n- 不再把字面的 \\n\\n、\\n 展开\n```go\nfmt.Printf(\"hi\\n\")\n```\n",
+			want: "排查结果：\n- 不再把字面的 \\n\\n、\\n 展开\n```go\nfmt.Printf(\"hi\\n\")\n```\n",
+		},
+		{
+			name: "inline backtick code span preserved inside single line",
+			in:   "根因：\\n1. 行内代码 `\\n` 与 `printf 'a\\nb'` 保持原样\\n2. 正文换行展开",
+			want: "根因：\n1. 行内代码 `\\n` 与 `printf 'a\\nb'` 保持原样\n2. 正文换行展开",
+		},
+		{
+			name: "double backtick inline code preserved",
+			in:   "示例：\\n``a `\\n` b``\\n下一行",
+			want: "示例：\n``a `\\n` b``\n下一行",
+		},
+		{
+			name: "unmatched backtick does not block later newlines",
+			in:   "说明：\\n检查 ` 符号\\n第二行",
+			want: "说明：\n检查 ` 符号\n第二行",
+		},
+		{
+			name: "fenced code block in single line expands fence newlines",
+			in:   "示例：\\n\\n```sh\\necho ok\\n```",
+			want: "示例：\n\n```sh\necho ok\n```",
+		},
+		{
+			name: "double backslash escape preserved",
+			in:   `正则 \\n 不应被展开`,
+			want: `正则 \\n 不应被展开`,
+		},
+		{
+			name: "windows drive path preserved",
+			in:   `路径位于 C:\new\notes.md 请核对`,
+			want: `路径位于 C:\new\notes.md 请核对`,
+		},
+		{
+			name: "ascii colon label before cjk or list still expands",
+			in:   `A:\n第一项\nB:\n- 第二项`,
+			want: "A:\n第一项\nB:\n- 第二项",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeEscapedNewlines(tc.in)
+			if got != tc.want {
+				t.Fatalf("normalizeEscapedNewlines(%q)\n got: %q\nwant: %q", tc.in, got, tc.want)
+			}
+			// Idempotency: running a second time must never alter output.
+			if again := normalizeEscapedNewlines(got); again != got {
+				t.Fatalf("not idempotent:\nfirst:  %q\nsecond: %q", got, again)
+			}
+		})
+	}
+}
+
+func TestReadTextFromAndReplyStdinJSON(t *testing.T) {
+	t.Run("readTextFrom stdin heredoc vs piped echo", func(t *testing.T) {
+		heredoc := "第一段\n\n第二段（保留字面 \\n）\n"
+		got, err := readTextFrom([]string{"-"}, strings.NewReader(heredoc), true)
+		if err != nil || got != heredoc {
+			t.Fatalf("heredoc got=%q err=%v, want %q", got, err, heredoc)
+		}
+
+		piped := "第一段\\n\\n第二段\\n- 项1\n"
+		got2, err := readTextFrom(nil, strings.NewReader(piped), false)
+		want2 := "第一段\n\n第二段\n- 项1\n"
+		if err != nil || got2 != want2 {
+			t.Fatalf("piped echo got=%q err=%v, want %q", got2, err, want2)
+		}
+	})
+
+	var (
+		gotPath string
+		gotBody map[string]any
+		rawJSON string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody = nil
+		var raw map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		gotBody = raw
+		enc, _ := json.Marshal(raw)
+		rawJSON = string(enc)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "addr"), []byte(srv.URL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "token"), []byte("tok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Positional arg with literal \n\n and \n sends real LF in JSON.
+	if err := Run(dir, "reply", []string{`结论：\n\n1. 已修复\n2. 保留 ` + "`\\n`", "--opt", "确认"}); err != nil {
+		t.Fatalf("Run reply failed: %v", err)
+	}
+	wantPos := "结论：\n\n1. 已修复\n2. 保留 `\\n`"
+	if gotPath != "/api/super/reply" || gotBody["text"] != wantPos {
+		t.Fatalf("reply positional got path=%q text=%q (json=%s), want %q", gotPath, gotBody["text"], rawJSON, wantPos)
+	}
+
+	// 2. Stdin via `-` with real multiline heredoc preserves literal \n in prose.
+	origStdin := os.Stdin
+	rPipe, wPipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	heredoc := "多行正文：\n\n- 原样保留 \\n\\n 讨论\n"
+	_, _ = wPipe.WriteString(heredoc)
+	_ = wPipe.Close()
+	os.Stdin = rPipe
+	err = Run(dir, "reply", []string{"-"})
+	os.Stdin = origStdin
+	_ = rPipe.Close()
+	if err != nil {
+		t.Fatalf("Run reply stdin failed: %v", err)
+	}
+	if gotBody["text"] != heredoc {
+		t.Fatalf("reply stdin got %q, want %q", gotBody["text"], heredoc)
+	}
+
+	// 3. `corgi send` positional arg also normalizes literal \n.
+	if err := Run(dir, "send", []string{"worker-a", `请检查：\n- 第1步\n- 第2步`}); err != nil {
+		t.Fatalf("Run send failed: %v", err)
+	}
+	wantSend := "请检查：\n- 第1步\n- 第2步"
+	if gotPath != "/api/super/send" || gotBody["text"] != wantSend {
+		t.Fatalf("send got path=%q text=%q, want %q", gotPath, gotBody["text"], wantSend)
+	}
+}
