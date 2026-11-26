@@ -126,6 +126,129 @@ func (s *Store) UpdateWorkItemFields(ctx context.Context, id, title, nextStep, w
 	return wi, nil
 }
 
+// CountClosedWorkItems returns the number of closed work items, optionally scoped to a single thread.
+func (s *Store) CountClosedWorkItems(ctx context.Context, thread string) (int, error) {
+	thread = strings.TrimSpace(thread)
+	var (
+		n   int
+		err error
+	)
+	if thread != "" {
+		err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_items WHERE closed_at > 0 AND thread = ?`, thread).Scan(&n)
+	} else {
+		err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_items WHERE closed_at > 0`).Scan(&n)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("count closed work items: %w", err)
+	}
+	return n, nil
+}
+
+// ListClosedWorkItems returns paginated closed work items (newest closed first), optionally filtered by thread and search query.
+func (s *Store) ListClosedWorkItems(ctx context.Context, thread, query string, limit, offset int) ([]*model.WorkItem, int, error) {
+	if limit <= 0 {
+		limit = 15
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	thread = strings.TrimSpace(thread)
+	query = strings.TrimSpace(query)
+
+	where := []string{"closed_at > 0"}
+	args := []any{}
+	if thread != "" {
+		where = append(where, "thread = ?")
+		args = append(args, thread)
+	}
+	if query != "" {
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(strings.ToLower(query))
+		like := "%" + escaped + "%"
+		where = append(where, `(LOWER(title) LIKE ? ESCAPE '\' OR LOWER(next_step) LIKE ? ESCAPE '\' OR LOWER(close_note) LIKE ? ESCAPE '\' OR LOWER(workers_json) LIKE ? ESCAPE '\' OR LOWER(branches_json) LIKE ? ESCAPE '\')`)
+		args = append(args, like, like, like, like, like)
+	}
+	whereClause := "WHERE " + strings.Join(where, " AND ")
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_items `+whereClause, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count filtered closed work items: %w", err)
+	}
+
+	pageArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, thread, title, next_step, workers_json, branches_json, artifacts_json, created_at, updated_at, closed_at, close_note
+		FROM work_items `+whereClause+`
+		ORDER BY closed_at DESC, updated_at DESC, created_at DESC
+		LIMIT ? OFFSET ?
+	`, pageArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list closed work items: %w", err)
+	}
+	defer rows.Close()
+	out := []*model.WorkItem{}
+	for rows.Next() {
+		wi, err := scanWorkItem(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, wi)
+	}
+	return out, total, rows.Err()
+}
+
+// ClearWorkItemNextStep clears next_step on an open work item transactionally.
+func (s *Store) ClearWorkItemNextStep(ctx context.Context, id string) (*model.WorkItem, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin clear work item next_step: %w", err)
+	}
+	defer tx.Rollback()
+
+	wi, err := getWorkItemTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if wi.ClosedAt != nil {
+		return nil, ErrWorkItemClosed
+	}
+	wi.NextStep = ""
+	wi.UpdatedAt = time.Now()
+	if err := saveWorkItemTx(ctx, tx, wi); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit clear work item next_step %s: %w", id, err)
+	}
+	return wi, nil
+}
+
+// ReopenWorkItem clears closed_at and close_note on a closed work item so it returns to open status.
+func (s *Store) ReopenWorkItem(ctx context.Context, id string) (*model.WorkItem, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin reopen work item: %w", err)
+	}
+	defer tx.Rollback()
+
+	wi, err := getWorkItemTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	wi.ClosedAt = nil
+	wi.CloseNote = ""
+	wi.UpdatedAt = time.Now()
+	if err := saveWorkItemTx(ctx, tx, wi); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit reopen work item %s: %w", id, err)
+	}
+	return wi, nil
+}
+
 // CloseWorkItem marks an open work item closed with an explicit closing note.
 func (s *Store) CloseWorkItem(ctx context.Context, id, note string) (*model.WorkItem, error) {
 	tx, err := s.db.BeginTx(ctx, nil)

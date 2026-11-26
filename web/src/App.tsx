@@ -184,7 +184,7 @@ export function App() {
       />
 
       {toastMsg && (
-        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 px-3.5 py-2 rounded-xl text-xs font-medium btn-accent shadow-lg z-50">
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 pointer-events-none px-3.5 py-1.5 rounded-xl text-xs font-medium btn-accent shadow-lg z-50">
           {toastMsg}
         </div>
       )}

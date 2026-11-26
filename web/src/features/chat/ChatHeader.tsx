@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { MoreHorizontal, Pause, Play, RotateCw, Search, Terminal } from "lucide-react";
+import { List, MoreHorizontal, Pause, Play, RotateCw, Search, Terminal } from "lucide-react";
 import { StatusDot } from "../../components/CorgiMark";
+import type { DerivedWorkStatus, NotebookMode } from "../../lib/workItems";
 import type { FollowView, RouterView } from "../../types/api";
 
 interface Props {
@@ -9,6 +10,10 @@ interface Props {
   router?: RouterView;
   paused?: boolean;
   follow?: FollowView;
+  notebookCount?: number;
+  notebookDot?: DerivedWorkStatus;
+  notebookMode?: NotebookMode;
+  onToggleNotebook?: () => void;
   onToggleSearch: () => void;
   onRestartRouter: () => void;
   onTogglePause: () => void;
@@ -21,6 +26,10 @@ export function ChatHeader({
   router,
   paused,
   follow,
+  notebookCount = 0,
+  notebookDot = "idle",
+  notebookMode = "mini",
+  onToggleNotebook,
   onToggleSearch,
   onRestartRouter,
   onTogglePause,
@@ -76,6 +85,56 @@ export function ChatHeader({
       </div>
 
       <div className="flex items-center gap-1.5 relative">
+        {onToggleNotebook && (
+          <>
+            {/* Compact pill on mobile/narrow viewports */}
+            <button
+              type="button"
+              onClick={onToggleNotebook}
+              className={`lg:hidden inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[12px] font-medium cursor-pointer transition-colors ${
+                notebookMode === "expanded"
+                  ? "border-strong surface-active text-primary"
+                  : "border-strong surface-bg text-primary surface-hover"
+              }`}
+              title="打开小本本"
+            >
+              <span>小本本</span>
+              {notebookCount > 0 && <span className="font-mono-code text-[11px] text-secondary">{notebookCount}</span>}
+              {notebookCount > 0 && (
+                <span
+                  className="w-1.5 h-1.5 rounded-full"
+                  style={{
+                    background:
+                      notebookDot === "blocked"
+                        ? "var(--attn)"
+                        : notebookDot === "working"
+                          ? "var(--ok)"
+                          : "var(--fg-3)",
+                  }}
+                />
+              )}
+            </button>
+            {/* Quiet icon toggle on wide desktop */}
+            <button
+              type="button"
+              onClick={onToggleNotebook}
+              className={`hidden lg:flex relative w-8 h-8 rounded-lg items-center justify-center cursor-pointer transition-colors ${
+                notebookMode === "expanded"
+                  ? "text-primary surface-active"
+                  : "text-secondary surface-hover"
+              }`}
+              title="切换小本本（页边 / 展开 / 隐藏）"
+            >
+              <List className="w-4 h-4" strokeWidth={1.7} />
+              {notebookMode === "hidden" && notebookDot === "blocked" && (
+                <span
+                  className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full"
+                  style={{ background: "var(--attn)" }}
+                />
+              )}
+            </button>
+          </>
+        )}
         <button
           type="button"
           onClick={onToggleSearch}

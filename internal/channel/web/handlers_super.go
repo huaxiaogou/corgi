@@ -471,7 +471,32 @@ func (s *Server) handleSuperList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSuperTasks(w http.ResponseWriter, r *http.Request) {
-	includeClosed := r.URL.Query().Get("all") == "1" || strings.EqualFold(r.URL.Query().Get("all"), "true")
+	q := r.URL.Query()
+	if strings.EqualFold(strings.TrimSpace(q.Get("status")), "closed") {
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		if limit <= 0 {
+			limit = 15
+		}
+		if limit > 100 {
+			limit = 100
+		}
+		offset, _ := strconv.Atoi(q.Get("offset"))
+		if offset < 0 {
+			offset = 0
+		}
+		items, total, err := s.Engine.ListClosedWorkItems(r.Context(), q.Get("thread"), q.Get("q"), limit, offset)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"work_items": items,
+			"total":      total,
+			"has_more":   offset+len(items) < total,
+		})
+		return
+	}
+	includeClosed := q.Get("all") == "1" || strings.EqualFold(q.Get("all"), "true")
 	items, err := s.Engine.ListWorkItems(r.Context(), includeClosed)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -482,17 +507,33 @@ func (s *Server) handleSuperTasks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSuperSetTask(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID       string `json:"id"`
-		Thread   string `json:"thread"`
-		Title    string `json:"title"`
-		NextStep string `json:"next_step"`
-		Worker   string `json:"worker"`
-		Branch   string `json:"branch"`
+		ID            string `json:"id"`
+		Thread        string `json:"thread"`
+		Title         string `json:"title"`
+		NextStep      string `json:"next_step"`
+		ClearNextStep bool   `json:"clear_next_step"`
+		Worker        string `json:"worker"`
+		Branch        string `json:"branch"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	wi, err := s.Engine.SetWorkItem(r.Context(), body.ID, body.Thread, body.Title, body.NextStep, body.Worker, body.Branch)
+	var (
+		wi  *model.WorkItem
+		err error
+	)
+	if body.ClearNextStep && strings.TrimSpace(body.ID) != "" &&
+		strings.TrimSpace(body.Title) == "" &&
+		strings.TrimSpace(body.NextStep) == "" &&
+		strings.TrimSpace(body.Worker) == "" &&
+		strings.TrimSpace(body.Branch) == "" {
+		wi, err = s.Engine.ClearWorkItemNextStep(r.Context(), body.ID)
+	} else {
+		wi, err = s.Engine.SetWorkItem(r.Context(), body.ID, body.Thread, body.Title, body.NextStep, body.Worker, body.Branch)
+		if err == nil && body.ClearNextStep && strings.TrimSpace(body.NextStep) == "" {
+			wi, err = s.Engine.ClearWorkItemNextStep(r.Context(), wi.ID)
+		}
+	}
 	if err != nil {
 		code := http.StatusBadRequest
 		if errors.Is(err, store.ErrNotFound) {
@@ -520,6 +561,19 @@ func (s *Server) handleSuperDoneTask(w http.ResponseWriter, r *http.Request) {
 			code = http.StatusNotFound
 		} else if errors.Is(err, store.ErrWorkItemClosed) {
 			code = http.StatusConflict
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "work_item": wi})
+}
+
+func (s *Server) handleSuperReopenTask(w http.ResponseWriter, r *http.Request) {
+	wi, err := s.Engine.ReopenWorkItem(r.Context(), r.PathValue("id"))
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
 		}
 		writeJSON(w, code, map[string]any{"error": err.Error()})
 		return

@@ -4,7 +4,7 @@ import { useAutoResizeTextarea } from "../../hooks/useAutoResizeTextarea";
 import { api, uploadFile } from "../../lib/api";
 import { createIMETracker, classifyEnterKey } from "../../lib/composerInput";
 import { getSupportedEfforts } from "../../lib/models";
-import type { Entry, Machine, ModelCatalog } from "../../types/api";
+import type { Entry, Machine, ModelCatalog, WorkItem } from "../../types/api";
 
 const ALL_KINDS = ["claude", "codex", "agy", "codebuddy"];
 const IMG_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
@@ -19,12 +19,15 @@ function createClientMsgId(): string {
 interface Props {
   machines: Machine[];
   replyTo: Entry | null;
+  linkedWork?: WorkItem | null;
+  draftSeed?: { seq: number; text: string } | null;
   working?: boolean;
   stopping?: boolean;
   queuedCount?: number;
   embedded?: boolean;
   onStop?: () => void;
   onClearReply: () => void;
+  onClearLinkedWork?: () => void;
   onSend: (payload: {
     text: string;
     machine: string;
@@ -39,12 +42,15 @@ interface Props {
 export function ComposerBar({
   machines,
   replyTo,
+  linkedWork = null,
+  draftSeed = null,
   working = false,
   stopping = false,
   queuedCount = 0,
   embedded = false,
   onStop,
   onClearReply,
+  onClearLinkedWork,
   onSend,
   onToast,
 }: Props) {
@@ -70,6 +76,17 @@ export function ComposerBar({
       textareaRef.current?.focus();
     }
   }, [replyTo?.id]);
+
+  useEffect(() => {
+    if (!draftSeed) return;
+    setText((cur) => (cur.trim() ? cur : draftSeed.text));
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
+  }, [draftSeed?.seq]);
 
   const selectedMachine = machines.find((m) => (m.id || "local") === machine || (machine === "" && m.local));
   const availableKinds =
@@ -169,6 +186,20 @@ export function ComposerBar({
         onDrop={onDrop}
         className={`max-w-[740px] mx-auto composer-box rounded-2xl px-4 pt-3 pb-2.5 space-y-2 transition-colors ${dragging ? "border-strong surface-rail" : ""}`}
       >
+        {linkedWork && (
+          <div className="flex items-center justify-between gap-2 text-xs px-2.5 py-1.5 rounded-lg border border-hairline surface-rail">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="text-muted shrink-0">关联</span>
+              <span className="font-medium text-primary truncate">{linkedWork.title}</span>
+            </div>
+            {onClearLinkedWork && (
+              <button type="button" onClick={onClearLinkedWork} className="text-muted hover:text-primary cursor-pointer shrink-0" title="取消关联">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        )}
+
         {replyTo && (
           <div className="flex items-start justify-between gap-2 text-xs px-2.5 py-1.5 rounded-lg surface-rail text-secondary">
             <span className="line-clamp-2 break-words leading-relaxed">

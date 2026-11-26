@@ -77,6 +77,28 @@ export interface Worker {
   idle_since?: string;
   keep?: boolean;
   snooze_until?: string;
+  work_item_id?: string;
+}
+
+export interface WorkArtifact {
+  path: string;
+  machine?: string;
+  entry_id?: string;
+  delivered_at?: string;
+}
+
+export interface WorkItem {
+  id: string;
+  thread: string;
+  title: string;
+  next_step?: string;
+  workers?: string[];
+  branches?: string[];
+  artifacts?: WorkArtifact[];
+  created_at: string;
+  updated_at: string;
+  closed_at?: string;
+  close_note?: string;
 }
 
 export interface Thread {
@@ -132,6 +154,8 @@ export interface SuperView {
   snoozed_actions?: number;
   pinned: Entry[];
   workers: Worker[];
+  work_items?: WorkItem[];
+  closed_work_count?: number;
   threads: Thread[];
   queued: number;
   queued_router: number;

@@ -247,6 +247,8 @@ type SuperView struct {
 	SnoozedActions  int                `json:"snoozed_actions,omitempty"`
 	Pinned          []*Entry           `json:"pinned"`
 	Workers         []*Worker          `json:"workers"`
+	WorkItems       []*WorkItem        `json:"work_items"`
+	ClosedWorkCount int                `json:"closed_work_count,omitempty"`
 	Threads         []*Thread          `json:"threads"`
 	Queued          int                `json:"queued"`
 	QueuedRouter    int                `json:"queued_router"`

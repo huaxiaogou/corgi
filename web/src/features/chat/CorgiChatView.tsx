@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, Check, Pin, X } from "lucide-react";
 import { CorgiButtMark, CorgiMark, StatusDot } from "../../components/CorgiMark";
 import { DecisionCard } from "../../components/DecisionCard";
@@ -15,9 +15,28 @@ import {
   workerSpawnStatusBadge,
   type QuoteVisibilityState,
 } from "../../lib/chatFilter";
-import type { Action, ChatMessage, EndedSession, Entry, Machine, QueuedPrompt, Settings, SuperView } from "../../types/api";
+import {
+  deriveWorkItems,
+  formatWorkItemPrompt,
+  type DerivedWorkStatus,
+  type NotebookMode,
+} from "../../lib/workItems";
+import type { Action, ChatMessage, EndedSession, Entry, Machine, QueuedPrompt, Settings, SuperView, WorkItem } from "../../types/api";
 import { ChatHeader } from "./ChatHeader";
 import { ComposerBar } from "./ComposerBar";
+import { WorkNotebook } from "./WorkNotebook";
+
+const NOTEBOOK_MODE_KEY = "corgi.notebook.mode";
+
+function readDesktopNotebookMode(): NotebookMode {
+  try {
+    const v = localStorage.getItem(NOTEBOOK_MODE_KEY);
+    if (v === "mini" || v === "expanded" || v === "hidden") return v;
+  } catch {
+    // ignore storage errors
+  }
+  return "mini";
+}
 
 function actionPriority(a: Action): number {
   if (a.kind === "worker_dialog" || a.category === "blocked") return 0;
@@ -69,8 +88,41 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const [stopping, setStopping] = useState(false);
   const [busyActionId, setBusyActionId] = useState("");
   const [historyPreview, setHistoryPreview] = useState<{ sess: EndedSession; msgs: ChatMessage[] } | null>(null);
+  const [isDesktop, setIsDesktop] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(min-width: 1024px)").matches : true
+  );
+  const [notebookMode, setNotebookMode] = useState<NotebookMode>(() =>
+    typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches
+      ? readDesktopNotebookMode()
+      : "hidden"
+  );
+  const [linkedWork, setLinkedWork] = useState<WorkItem | null>(null);
+  const [draftSeed, setDraftSeed] = useState<{ seq: number; text: string } | null>(null);
   const tmpSeqRef = useRef(0);
+  const draftSeqRef = useRef(0);
   const highlightTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const onChange = (e: MediaQueryListEvent) => {
+      setIsDesktop(e.matches);
+      setNotebookMode(e.matches ? readDesktopNotebookMode() : "hidden");
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  const updateNotebookMode = (next: NotebookMode) => {
+    setNotebookMode(next);
+    if (isDesktop) {
+      try {
+        localStorage.setItem(NOTEBOOK_MODE_KEY, next);
+      } catch {
+        // ignore storage errors
+      }
+    }
+  };
 
   const serverQueuedChat = data?.queued_chat ?? [];
   const serverQueueSig = serverQueuedChat.map((q) => q.id).join(",");
@@ -82,6 +134,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
     setHighlightedEntryId("");
     setOptimisticQueued([]);
     setRemovedQueueIds([]);
+    setLinkedWork(null);
   }, [thread]);
 
   useEffect(() => {
@@ -290,6 +343,30 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const isWeComGroup = thread.startsWith("wecom:");
   const headerTitle = thread === "chat:main" ? "Corgi" : isWeComGroup ? `企微群 · ${thread.replace(/^wecom:/, "")}` : thread;
 
+  const notebookSummary = useMemo(() => {
+    const derived = deriveWorkItems(data?.work_items ?? [], data?.workers ?? [], pendingActions, thread);
+    const dot: DerivedWorkStatus = derived.some((x) => x.derived === "blocked")
+      ? "blocked"
+      : derived.some((x) => x.derived === "working")
+        ? "working"
+        : "idle";
+    return { count: derived.length, dot };
+  }, [data?.work_items, data?.workers, pendingActions, thread]);
+
+  const toggleNotebook = () => {
+    if (!isDesktop) {
+      updateNotebookMode(notebookMode === "expanded" ? "hidden" : "expanded");
+      return;
+    }
+    if (notebookSummary.count === 0) {
+      updateNotebookMode(notebookMode === "expanded" ? "mini" : "expanded");
+      return;
+    }
+    if (notebookMode === "hidden") updateNotebookMode("mini");
+    else if (notebookMode === "mini") updateNotebookMode("expanded");
+    else updateNotebookMode("hidden");
+  };
+
   return (
     <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
       <ChatHeader
@@ -298,6 +375,10 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
         router={router}
         paused={data?.paused}
         follow={data?.follow}
+        notebookCount={notebookSummary.count}
+        notebookDot={notebookSummary.dot}
+        notebookMode={notebookMode}
+        onToggleNotebook={toggleNotebook}
         onToggleSearch={() => setSearchOpen((v) => !v)}
         onRestartRouter={() => void api("/api/super/router/restart", {}).then(() => onToast("正在重启 Corgi 会话"))}
         onTogglePause={() => void togglePause()}
@@ -511,6 +592,8 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
         </div>
       )}
 
+      <div className="flex-1 flex min-h-0 overflow-hidden relative">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0">
       <div className="relative flex-1 flex flex-col min-h-0">
         <div ref={containerRef} onScroll={onScroll} className="flex-1 overflow-y-auto scroll-chat px-5 pt-6 pb-2 min-h-0">
           <div ref={contentRef} className="max-w-[740px] mx-auto">
@@ -861,6 +944,8 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
           embedded
           machines={machines}
           replyTo={replyTo}
+          linkedWork={linkedWork}
+          draftSeed={draftSeed}
           working={router?.status === "working"}
           stopping={stopping}
           queuedCount={effectiveQueue.length}
@@ -877,18 +962,20 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
             }
           }}
           onClearReply={() => setReplyTo(null)}
+          onClearLinkedWork={() => setLinkedWork(null)}
           onToast={onToast}
           onSend={async ({ text, machine, kind, model, effort, clientMsgId }) => {
             const reId = replyTo?.id ?? "";
+            const finalText = linkedWork ? formatWorkItemPrompt(linkedWork, text) : text;
             const shouldQueue = router?.status === "working" || effectiveQueue.length > 0;
             const tmpId = shouldQueue ? `tmp-${++tmpSeqRef.current}` : "";
             if (tmpId) {
-              setOptimisticQueued((prev) => [...prev, { id: tmpId, thread, text, created_at: new Date().toISOString() }]);
+              setOptimisticQueued((prev) => [...prev, { id: tmpId, thread, text: finalText, created_at: new Date().toISOString() }]);
             }
             try {
               const res = await api<{ ok: boolean; queued?: boolean; item?: QueuedPrompt }>("/api/super/say", {
                 thread,
-                text,
+                text: finalText,
                 re: reId,
                 machine,
                 kind,
@@ -898,6 +985,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                 mode: shouldQueue ? "queue" : "auto",
               });
               setReplyTo(null);
+              setLinkedWork(null);
               if (tmpId) {
                 setOptimisticQueued((prev) => {
                   const without = prev.filter((x) => x.id !== tmpId);
@@ -918,6 +1006,27 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
             }
           }}
         />
+      </div>
+      </div>
+
+      <WorkNotebook
+        items={data?.work_items ?? []}
+        closedCount={data?.closed_work_count ?? 0}
+        workers={data?.workers ?? []}
+        pendingActions={pendingActions}
+        thread={thread}
+        mode={notebookMode}
+        isDesktop={isDesktop}
+        onModeChange={updateNotebookMode}
+        onAskCorgi={(item) => {
+          setLinkedWork(item);
+          setDraftSeed({ seq: ++draftSeqRef.current, text: "同步一下当前进展和下一步建议" });
+          onToast("已关联小本本，可直接发送或补充");
+        }}
+        onOpenWorker={openWorkerByName}
+        onOpenFile={onOpenFile}
+        onToast={onToast}
+      />
       </div>
 
       {historyPreview && (

@@ -125,6 +125,11 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 	snoozed, _ := e.store.ListSnoozedActions(ctx)
 	pinned, _ := e.store.ListPinnedEntries(ctx, 50)
 	workers, _ := e.store.ListWorkers(ctx)
+	workItems, _ := e.store.ListWorkItems(ctx, false)
+	if workItems == nil {
+		workItems = []*model.WorkItem{}
+	}
+	closedWorkCount, _ := e.store.CountClosedWorkItems(ctx, thread)
 	threads, _ := e.store.ListThreads(ctx, 100)
 	queued, _ := e.store.ListQueuedTriggers(ctx)
 
@@ -243,6 +248,8 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 		SnoozedActions:  len(snoozed),
 		Pinned:          pinned,
 		Workers:         activeWorkers,
+		WorkItems:       workItems,
+		ClosedWorkCount: closedWorkCount,
 		Threads:         threads,
 		Queued:          len(queued),
 		QueuedRouter:    qRouter,

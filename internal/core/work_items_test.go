@@ -166,6 +166,39 @@ func TestWorkItemsLedgerLifecycleInjectionAndDreamInput(t *testing.T) {
 			t.Fatalf("closed item %s still appeared in open ListWorkItems", wiManual.ID)
 		}
 	}
+
+	// 7. Snapshot exposes open WorkItems and ClosedWorkCount; Reopen restores item and clears close_note.
+	snap := eng.Snapshot(ctx, model.MainThread)
+	if snap.ClosedWorkCount != 1 {
+		t.Fatalf("Snapshot ClosedWorkCount want 1, got %d", snap.ClosedWorkCount)
+	}
+	if len(snap.WorkItems) != len(openItems) {
+		t.Fatalf("Snapshot WorkItems len want %d, got %d", len(openItems), len(snap.WorkItems))
+	}
+	for _, wi := range snap.WorkItems {
+		if wi.ID == wiManual.ID {
+			t.Fatalf("closed item %s leaked into Snapshot.WorkItems", wiManual.ID)
+		}
+	}
+
+	// ClearWorkItemNextStep clears next_step on an open item.
+	cleared, err := eng.ClearWorkItemNextStep(ctx, wk1.WorkItemID)
+	if err != nil || cleared.NextStep != "" {
+		t.Fatalf("ClearWorkItemNextStep failed: wi=%+v err=%v", cleared, err)
+	}
+
+	// ReopenWorkItem restores closed item back into open list & Snapshot.
+	reopened, err := eng.ReopenWorkItem(ctx, wiManual.ID)
+	if err != nil || reopened.ClosedAt != nil || reopened.CloseNote != "" {
+		t.Fatalf("ReopenWorkItem failed: wi=%+v err=%v", reopened, err)
+	}
+	snapAfter := eng.Snapshot(ctx, model.MainThread)
+	if snapAfter.ClosedWorkCount != 0 {
+		t.Fatalf("Snapshot ClosedWorkCount after reopen want 0, got %d", snapAfter.ClosedWorkCount)
+	}
+	if len(snapAfter.WorkItems) != len(openItems)+1 {
+		t.Fatalf("Snapshot WorkItems after reopen want %d, got %d", len(openItems)+1, len(snapAfter.WorkItems))
+	}
 }
 
 func TestCheckProtectionOptionsCapAndSayIdempotency(t *testing.T) {

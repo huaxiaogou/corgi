@@ -17,6 +17,7 @@ html, body, #root {
 
 .surface-bg { background: var(--bg); }
 .surface-rail { background: var(--bg-2); }
+.surface-active { background: var(--bg-3); }
 .surface-hover:hover { background: var(--bg-3); }
 .border-hairline { border-color: var(--line); }
 .border-strong { border-color: var(--line-2); }
@@ -47,3 +48,109 @@ html, body, #root {
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 999px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* 小本本 (Work Notebook) restrained motion & quiet margin styling */
+:root {
+  --ease-quiet: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.margin-notebook .margin-chrome {
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+.margin-notebook:hover .margin-chrome,
+.margin-notebook:focus-within .margin-chrome {
+  opacity: 1;
+}
+.margin-notebook-row {
+  opacity: 0.78;
+  will-change: transform, opacity;
+  transition: opacity 160ms ease, color 160ms ease;
+}
+.margin-notebook-row.is-attn {
+  opacity: 0.96;
+}
+.margin-notebook:hover .margin-notebook-row {
+  opacity: 0.88;
+}
+.margin-notebook-row:hover {
+  opacity: 1 !important;
+  color: var(--fg);
+}
+
+.notebook-acc-row {
+  will-change: transform, opacity;
+}
+.notebook-acc-row .notebook-quick-hover {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.notebook-acc-row:hover .notebook-quick-hover,
+.notebook-acc-row.is-open .notebook-quick-hover {
+  opacity: 1;
+}
+
+@keyframes notebookAccEnter {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.notebook-acc-body {
+  animation: notebookAccEnter 190ms var(--ease-quiet) both;
+}
+
+.notebook-dot {
+  position: relative;
+  transition: background-color 260ms ease;
+}
+@keyframes notebookDotRingOnce {
+  0% {
+    transform: scale(1);
+    opacity: 0.45;
+  }
+  100% {
+    transform: scale(3.2);
+    opacity: 0;
+  }
+}
+.notebook-dot.is-attn-once::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--attn);
+  pointer-events: none;
+  animation: notebookDotRingOnce 720ms var(--ease-quiet) 1 forwards;
+}
+
+@keyframes notebookDotPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.notebook-dot-pulse {
+  animation: notebookDotPulse 2.2s ease-in-out infinite;
+}
+
+.notebook-row-exiting {
+  opacity: 0 !important;
+  transform: translateX(6px);
+  transition: opacity 180ms ease, transform 180ms var(--ease-quiet) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notebook-acc-body,
+  .notebook-dot.is-attn-once::after,
+  .notebook-dot-pulse {
+    animation: none !important;
+  }
+  .margin-notebook-row,
+  .notebook-acc-row,
+  .notebook-row-exiting {
+    transition-duration: 0.01ms !important;
+  }
+}

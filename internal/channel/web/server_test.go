@@ -807,3 +807,126 @@ func TestSuperReplyExplicitFilesValidationAndRoundTrip(t *testing.T) {
 		t.Fatalf("expected 1 persisted entry with Files=[%q], got %+v", spacedFile, view.Entries)
 	}
 }
+
+func TestSuperWorkItemsPaginationSearchReopenAndClearNextStepHTTP(t *testing.T) {
+	srv, master := newTestServer(t)
+	h := srv.Routes()
+	ctx := context.Background()
+
+	// Seed 4 items on chat:main (close 3 of them) + 1 closed item on a different thread.
+	openWI, err := srv.Engine.SetWorkItem(ctx, "new", model.MainThread, "SQLite 索引压测", "待确认副本", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closedIDs []string
+	for _, title := range []string{"已归档第一项", "已归档第二项 · 企微修复", "已归档第三项"} {
+		wi, err := srv.Engine.SetWorkItem(ctx, "new", model.MainThread, title, "收尾中", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := srv.Engine.CloseWorkItem(ctx, wi.ID, "完成交付"); err != nil {
+			t.Fatal(err)
+		}
+		closedIDs = append(closedIDs, wi.ID)
+	}
+	otherWI, err := srv.Engine.SetWorkItem(ctx, "new", "wecom:grp1", "群聊归档事项", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Engine.CloseWorkItem(ctx, otherWI.ID, "群内闭环"); err != nil {
+		t.Fatal(err)
+	}
+
+	doJSON := func(method, url string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		var rdr *bytes.Reader
+		if body != nil {
+			b, _ := json.Marshal(body)
+			rdr = bytes.NewReader(b)
+		} else {
+			rdr = bytes.NewReader(nil)
+		}
+		req := httptest.NewRequest(method, url, rdr)
+		req.Header.Set("Authorization", "Bearer "+master)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. /api/super includes open work_items + closed_work_count scoped to chat:main (3, not 4).
+	snapRec := doJSON(http.MethodGet, "/api/super?thread=chat:main", nil)
+	if snapRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/super want 200, got %d", snapRec.Code)
+	}
+	var snap model.SuperView
+	if err := json.Unmarshal(snapRec.Body.Bytes(), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.WorkItems) != 1 || snap.WorkItems[0].ID != openWI.ID || snap.ClosedWorkCount != 3 {
+		t.Fatalf("unexpected snapshot work items: items=%+v closed_count=%d", snap.WorkItems, snap.ClosedWorkCount)
+	}
+
+	// 2. Paginated closed query with limit=2&offset=0 returns 2 items, total=3, has_more=true.
+	p1Rec := doJSON(http.MethodGet, "/api/super/tasks?status=closed&thread=chat:main&limit=2&offset=0", nil)
+	if p1Rec.Code != http.StatusOK {
+		t.Fatalf("GET closed page 1 want 200, got %d body=%s", p1Rec.Code, p1Rec.Body.String())
+	}
+	var p1 struct {
+		WorkItems []*model.WorkItem `json:"work_items"`
+		Total     int               `json:"total"`
+		HasMore   bool              `json:"has_more"`
+	}
+	if err := json.Unmarshal(p1Rec.Body.Bytes(), &p1); err != nil {
+		t.Fatal(err)
+	}
+	if len(p1.WorkItems) != 2 || p1.Total != 3 || !p1.HasMore {
+		t.Fatalf("page 1 want len=2 total=3 has_more=true, got len=%d total=%d has_more=%v", len(p1.WorkItems), p1.Total, p1.HasMore)
+	}
+
+	// 3. Search filter on closed items matches substring safely.
+	qRec := doJSON(http.MethodGet, "/api/super/tasks?status=closed&thread=chat:main&q=企微", nil)
+	if qRec.Code != http.StatusOK {
+		t.Fatalf("GET closed search want 200, got %d", qRec.Code)
+	}
+	var qRes struct {
+		WorkItems []*model.WorkItem `json:"work_items"`
+		Total     int               `json:"total"`
+		HasMore   bool              `json:"has_more"`
+	}
+	_ = json.Unmarshal(qRec.Body.Bytes(), &qRes)
+	if len(qRes.WorkItems) != 1 || qRes.Total != 1 || qRes.HasMore {
+		t.Fatalf("closed search want 1 hit, got %+v", qRes)
+	}
+
+	// 4. Clear next_step via POST /api/super/tasks with clear_next_step=true.
+	clrRec := doJSON(http.MethodPost, "/api/super/tasks", map[string]any{
+		"id":              openWI.ID,
+		"clear_next_step": true,
+	})
+	if clrRec.Code != http.StatusOK {
+		t.Fatalf("clear_next_step want 200, got %d body=%s", clrRec.Code, clrRec.Body.String())
+	}
+	gotOpen, _ := srv.Store.GetWorkItem(ctx, openWI.ID)
+	if gotOpen.NextStep != "" {
+		t.Fatalf("expected empty next_step after clear, got %q", gotOpen.NextStep)
+	}
+
+	// 5. Reopen closed item via POST /api/super/tasks/{id}/reopen; 404 for nonexistent id.
+	reopenRec := doJSON(http.MethodPost, "/api/super/tasks/"+closedIDs[0]+"/reopen", map[string]any{})
+	if reopenRec.Code != http.StatusOK {
+		t.Fatalf("reopen want 200, got %d body=%s", reopenRec.Code, reopenRec.Body.String())
+	}
+	missRec := doJSON(http.MethodPost, "/api/super/tasks/wi-does-not-exist/reopen", map[string]any{})
+	if missRec.Code != http.StatusNotFound {
+		t.Fatalf("reopen missing id want 404, got %d", missRec.Code)
+	}
+	snap2Rec := doJSON(http.MethodGet, "/api/super?thread=chat:main", nil)
+	var snap2 model.SuperView
+	_ = json.Unmarshal(snap2Rec.Body.Bytes(), &snap2)
+	if len(snap2.WorkItems) != 2 || snap2.ClosedWorkCount != 2 {
+		t.Fatalf("after reopen want 2 open & 2 closed, got open=%d closed=%d", len(snap2.WorkItems), snap2.ClosedWorkCount)
+	}
+}
