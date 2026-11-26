@@ -61,16 +61,18 @@ func (b *Bus) saveWeComFocus(ctx context.Context, key string, f *wecomFocus) {
 	}
 }
 
+func isHelpCommand(text string) bool {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "/help", "帮助":
+		return true
+	default:
+		return false
+	}
+}
+
 func isReturnMainCommand(text string) bool {
-	s := strings.ToLower(strings.TrimSpace(text))
-	switch s {
-	case "回主对话", "返回主对话", "回到主对话",
-		"回主会话", "返回主会话", "回到主会话",
-		"回主聊天", "返回主聊天",
-		"退出直聊", "退出",
-		"回corgi", "回 corgi", "返回corgi", "返回 corgi",
-		"回柯基", "返回柯基",
-		"/back", "/main", "/corgi", "/exit", "/q":
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "/back", "回主对话", "回主会话":
 		return true
 	default:
 		return false
@@ -78,9 +80,8 @@ func isReturnMainCommand(text string) bool {
 }
 
 func isWorkerPickerCommand(text string) bool {
-	s := strings.TrimSpace(text)
-	switch strings.ToLower(s) {
-	case "/w", "/workers", "切换", "切换对话":
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "/w", "切换":
 		return true
 	default:
 		return false
@@ -89,13 +90,10 @@ func isWorkerPickerCommand(text string) bool {
 
 func parseDirectSwitchTarget(text string) (string, bool) {
 	s := strings.TrimSpace(text)
-	low := strings.ToLower(s)
-	for _, prefix := range []string{"/w ", "/to "} {
-		if strings.HasPrefix(low, prefix) {
-			name := strings.TrimSpace(strings.TrimPrefix(s[len(prefix):], "#"))
-			if name != "" {
-				return name, true
-			}
+	if strings.HasPrefix(strings.ToLower(s), "/w ") {
+		name := strings.TrimSpace(strings.TrimPrefix(s[3:], "#"))
+		if name != "" {
+			return name, true
 		}
 	}
 	return "", false
@@ -156,11 +154,34 @@ func (b *Bus) resolveSwitchQuery(ctx context.Context, query string) (workerName,
 	return q, ""
 }
 
+func (b *Bus) formatWeComHelp(ctx context.Context, focusKey string) string {
+	status := "Corgi 主对话"
+	if f := b.loadWeComFocus(ctx, focusKey); f != nil {
+		label := firstNonEmptyStr(f.Title, "#"+f.Worker)
+		status = fmt.Sprintf("直连「%s」（`#%s`）", label, f.Worker)
+	}
+	return fmt.Sprintf(
+		"**当前对话**：%s\n\n"+
+			"**快捷命令**\n"+
+			"- `/w`：弹出事项卡片切换直聊（也支持 `/w 1` 或 `/w 关键词`）\n"+
+			"- `/back`：返回 Corgi 主对话\n"+
+			"- `/help`：查看当前状态与命令\n\n"+
+			"提示：长按引用任意带 `[#名称]` 的消息回复，可单次追问该 Worker。",
+		status,
+	)
+}
+
 func (b *Bus) handleWeComControlOrDirect(ctx context.Context, msg wecom.IncomingMessage, thread, text string) bool {
 	focusKey := wecomFocusKey(msg.ChatType, msg.ChatID, msg.FromUser)
 	replyChatID := msg.ChatID
 	if replyChatID == "" {
 		replyChatID = msg.FromUser
+	}
+
+	// 0. Instant help & current conversation status.
+	if isHelpCommand(text) {
+		b.sendInstantWeComText(ctx, replyChatID, msg.ReqID, b.formatWeComHelp(ctx, focusKey))
+		return true
 	}
 
 	// 1. Return to Corgi main chat.
@@ -252,11 +273,11 @@ func (b *Bus) switchWeComFocusTo(ctx context.Context, focusKey, chatID, reqID, w
 		actionVerb = "已恢复并切到"
 	}
 	if cardEv != nil && b.wecom != nil {
-		cardDetail := fmt.Sprintf("%s · %s · 直接发消息即可，发「回主对话」返回 Corgi。", machineLabel, w.Kind)
+		cardDetail := fmt.Sprintf("%s · %s · 直接发消息即可，发 /back 返回主对话。", machineLabel, w.Kind)
 		_ = b.wecom.UpdateNavCard(ctx, cardEv.ReqID, cardEv.TaskID, actionVerb+"："+label, "已切换", cardDetail)
 		return
 	}
-	msg := fmt.Sprintf("%s **%s**（`#%s` · %s · %s）。直接发消息即可，发「回主对话」返回 Corgi。", actionVerb, label, w.Name, machineLabel, w.Kind)
+	msg := fmt.Sprintf("%s **%s**（`#%s` · %s · %s）。直接发消息即可，发 `/back` 返回主对话。", actionVerb, label, w.Name, machineLabel, w.Kind)
 	b.sendInstantWeComText(ctx, chatID, reqID, msg)
 }
 
@@ -357,7 +378,7 @@ func (b *Bus) dispatchWeComDirectWorker(ctx context.Context, msg wecom.IncomingM
 	if err != nil {
 		errText := fmt.Sprintf("发送给「%s」失败：%s", firstNonEmptyStr(target.Title, "#"+target.Worker), err.Error())
 		if inFocusMode {
-			errText += "\n可发送「回主对话」返回 Corgi，或发 `/w` 切换其他事项。"
+			errText += "\n可发 `/back` 返回主对话，或发 `/w` 切换其他事项。"
 		}
 		if stream != nil {
 			if ok, _ := stream.seal(ctx, "", errText); ok {

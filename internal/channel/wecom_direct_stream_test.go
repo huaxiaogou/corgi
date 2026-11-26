@@ -141,6 +141,20 @@ func TestWeComFocusReturnMainAndPickerFallback(t *testing.T) {
 	}
 
 	bus.HandleWeComMessage(ctx, wecom.IncomingMessage{
+		ReqID:    "req-help",
+		MsgID:    "msg-help",
+		ChatType: "single",
+		ChatID:   "U1",
+		FromUser: "U1",
+		Text:     "/help",
+	})
+	mu.Lock()
+	if len(*streams) != 1 || !(*streams)[0].finish || !strings.Contains((*streams)[0].content, "直连") || !strings.Contains((*streams)[0].content, "/back") {
+		t.Fatalf("expected instant /help showing active worker + /back, got %+v", *streams)
+	}
+	mu.Unlock()
+
+	bus.HandleWeComMessage(ctx, wecom.IncomingMessage{
 		ReqID:    "req-back",
 		MsgID:    "msg-back",
 		ChatType: "single",
@@ -153,8 +167,8 @@ func TestWeComFocusReturnMainAndPickerFallback(t *testing.T) {
 		t.Fatalf("expected focus cleared after 回主对话, got %+v", f)
 	}
 	mu.Lock()
-	if len(*streams) != 1 || !(*streams)[0].finish || !strings.Contains((*streams)[0].content, "Corgi 主对话") {
-		t.Fatalf("expected instant sealed confirmation for 回主对话, got %+v", *streams)
+	if len(*streams) != 2 || !(*streams)[1].finish || !strings.Contains((*streams)[1].content, "Corgi 主对话") {
+		t.Fatalf("expected instant sealed confirmation for 回主会话, got %+v", *streams)
 	}
 	mu.Unlock()
 }
