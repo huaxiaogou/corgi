@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { ArrowUp, Paperclip, Square, X } from "lucide-react";
+import { useAutoResizeTextarea } from "../../hooks/useAutoResizeTextarea";
 import { api, uploadFile } from "../../lib/api";
+import { createIMETracker, classifyEnterKey } from "../../lib/composerInput";
 import { getSupportedEfforts } from "../../lib/models";
 import type { Entry, Machine, ModelCatalog } from "../../types/api";
 
@@ -42,6 +44,9 @@ export function ComposerBar({
   const [dragging, setDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const imeRef = useRef(createIMETracker());
+
+  useAutoResizeTextarea(textareaRef, text, { minHeight: 24, maxHeight: 180 });
 
   useEffect(() => {
     if (replyTo) {
@@ -178,6 +183,13 @@ export function ComposerBar({
           rows={1}
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onCompositionStart={() => {
+            imeRef.current.composing = true;
+          }}
+          onCompositionEnd={(e) => {
+            imeRef.current.composing = false;
+            imeRef.current.lastCompositionEndAt = e.timeStamp;
+          }}
           onPaste={(e) => {
             if (e.clipboardData?.files?.length) {
               e.preventDefault();
@@ -185,13 +197,30 @@ export function ComposerBar({
             }
           }}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            const action = classifyEnterKey(
+              {
+                key: e.key,
+                shiftKey: e.shiftKey,
+                ctrlKey: e.ctrlKey,
+                metaKey: e.metaKey,
+                altKey: e.altKey,
+                keyCode: e.keyCode,
+                isComposing: e.nativeEvent.isComposing,
+                timeStamp: e.timeStamp,
+              },
+              imeRef.current
+            );
+            if (action === "swallow_safari_post_ime") {
+              e.preventDefault();
+              return;
+            }
+            if (action === "submit") {
               e.preventDefault();
               void submit(e);
             }
           }}
           placeholder={working || queuedCount > 0 ? "告诉 Corgi 你要做什么（运行中自动排队）…" : "告诉 Corgi 你要做什么（支持粘贴、拖入图片或文件）…"}
-          className="w-full resize-none bg-transparent text-[14px] outline-none"
+          className="block w-full resize-none bg-transparent text-[14px] leading-[1.5] min-h-[24px] max-h-[180px] overscroll-contain outline-none"
         />
 
         <div className="flex items-center justify-between pt-1.5 gap-2">

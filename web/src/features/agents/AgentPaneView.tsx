@@ -4,6 +4,7 @@ import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { TerminalScreen } from "../../components/TerminalScreen";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { api, uploadFile } from "../../lib/api";
+import { createIMETracker, isPostCompositionSafariEnter } from "../../lib/composerInput";
 import type { AgentView, Approval, ChatMessage, MsgPatch, QueuedPrompt } from "../../types/api";
 import { AgentChatThread, type PendingPrompt } from "./AgentChatThread";
 
@@ -103,6 +104,7 @@ export function AgentPaneView({ pane, focusSeq = 0, queuedPrompts = [], queuePau
   const prevServerQueueRef = useRef<QueuedPrompt[]>(queuedPrompts);
   const localHandledIdsRef = useRef<Set<string>>(new Set());
   const fileRef = useRef<HTMLInputElement>(null);
+  const imeRef = useRef(createIMETracker());
 
   useEffect(() => {
     setMode(pane.is_agent ? "chat" : "screen");
@@ -401,6 +403,7 @@ export function AgentPaneView({ pane, focusSeq = 0, queuedPrompts = [], queuePau
 
   const sendInput = async (e: FormEvent) => {
     e.preventDefault();
+    if (imeRef.current.composing) return;
     let val = input.trim();
     if (!val && attachments.length === 0) return;
     if (attachments.length > 0) {
@@ -570,6 +573,31 @@ export function AgentPaneView({ pane, focusSeq = 0, queuedPrompts = [], queuePau
             <input
               type="text"
               value={input}
+              onCompositionStart={() => {
+                imeRef.current.composing = true;
+              }}
+              onCompositionEnd={(e) => {
+                imeRef.current.composing = false;
+                imeRef.current.lastCompositionEndAt = e.timeStamp;
+              }}
+              onKeyDown={(e) => {
+                if (
+                  !e.nativeEvent.isComposing &&
+                  isPostCompositionSafariEnter(
+                    {
+                      key: e.key,
+                      shiftKey: e.shiftKey,
+                      keyCode: e.keyCode,
+                      isComposing: e.nativeEvent.isComposing,
+                      timeStamp: e.timeStamp,
+                    },
+                    imeRef.current
+                  )
+                ) {
+                  // Prevent implicit <form> submission on Safari's post-compositionend Enter.
+                  e.preventDefault();
+                }
+              }}
               onPaste={(e: ClipboardEvent<HTMLInputElement>) => {
                 if (e.clipboardData?.files?.length) {
                   e.preventDefault();

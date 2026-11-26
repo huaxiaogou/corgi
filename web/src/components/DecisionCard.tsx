@@ -1,5 +1,7 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { ArrowUpRight, Clock, PenLine } from "lucide-react";
+import { useAutoResizeTextarea } from "../hooks/useAutoResizeTextarea";
+import { classifyEnterKey, createIMETracker } from "../lib/composerInput";
 import { normalizeEscapedNewlines } from "../lib/text";
 import type { Action } from "../types/api";
 import { MarkdownText } from "./MarkdownText";
@@ -30,6 +32,10 @@ function isClippedTitleOfSummary(title: string, summary: string): boolean {
 export function DecisionCard({ action, workerNames, onResolve, onDismiss, onSnooze, onOpenWorker, onOpenFile }: Props) {
   const [busy, setBusy] = useState(false);
   const [customText, setCustomText] = useState("");
+  const customTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const customImeRef = useRef(createIMETracker());
+
+  useAutoResizeTextarea(customTextareaRef, customText, { minHeight: 34, maxHeight: 120 });
 
   const run = async (fn: () => Promise<void>) => {
     if (busy || action.status !== "pending") return;
@@ -172,12 +178,37 @@ export function DecisionCard({ action, workerNames, onResolve, onDismiss, onSnoo
               <PenLine className="w-3 h-3" strokeWidth={1.8} />
             </span>
             <textarea
+              ref={customTextareaRef}
               rows={1}
               value={customText}
               disabled={busy}
               onChange={(e) => setCustomText(e.target.value)}
+              onCompositionStart={() => {
+                customImeRef.current.composing = true;
+              }}
+              onCompositionEnd={(e) => {
+                customImeRef.current.composing = false;
+                customImeRef.current.lastCompositionEndAt = e.timeStamp;
+              }}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                const action = classifyEnterKey(
+                  {
+                    key: e.key,
+                    shiftKey: e.shiftKey,
+                    ctrlKey: e.ctrlKey,
+                    metaKey: e.metaKey,
+                    altKey: e.altKey,
+                    keyCode: e.keyCode,
+                    isComposing: e.nativeEvent.isComposing,
+                    timeStamp: e.timeStamp,
+                  },
+                  customImeRef.current
+                );
+                if (action === "swallow_safari_post_ime") {
+                  e.preventDefault();
+                  return;
+                }
+                if (action === "submit") {
                   e.preventDefault();
                   void submitCustom();
                 }
@@ -187,7 +218,7 @@ export function DecisionCard({ action, workerNames, onResolve, onDismiss, onSnoo
                   ? "指定要处理的条目或例外…（如：先验收某项、只保留 X 其余归档）"
                   : "输入其他想法或补充条件…（Enter 提交，Shift+Enter 换行）"
               }
-              className="flex-1 min-w-[180px] min-h-[34px] max-h-28 px-3 py-1.5 rounded-lg surface-bg border border-strong text-[13px] leading-snug text-primary outline-none resize-y disabled:opacity-50"
+              className="block flex-1 min-w-[180px] min-h-[34px] max-h-[120px] px-3 py-1.5 rounded-lg surface-bg border border-strong text-[13px] leading-snug text-primary outline-none resize-none overscroll-contain disabled:opacity-50"
             />
             <button
               type="submit"
