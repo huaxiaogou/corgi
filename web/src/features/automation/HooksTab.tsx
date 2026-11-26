@@ -1,15 +1,34 @@
 import { useState } from "react";
-import type { Policy, TriggerView } from "../../types/api";
+import type { PendingWeComUser, Policy, Settings, TriggerView } from "../../types/api";
+import { WeComSection } from "./WeComSection";
 
 interface Props {
+  settings: Settings;
+  wecomOnline: boolean;
+  wecomError?: string;
+  wecomPending?: PendingWeComUser[];
   hookKey: string;
   policies: Policy[];
   triggers: TriggerView[];
+  onSaveSettingsPatch: (patch: Partial<Settings>, okMsg: string) => Promise<void>;
+  onApproveWeCom?: (userId: string, dismiss?: boolean) => Promise<void>;
   onSavePolicies: (next: Policy[]) => Promise<void>;
   onToast: (msg: string) => void;
 }
 
-export function HooksTab({ hookKey, policies, triggers, onSavePolicies, onToast }: Props) {
+export function HooksTab({
+  settings,
+  wecomOnline,
+  wecomError,
+  wecomPending = [],
+  hookKey,
+  policies,
+  triggers,
+  onSaveSettingsPatch,
+  onApproveWeCom,
+  onSavePolicies,
+  onToast,
+}: Props) {
   const [list, setList] = useState<Policy[]>(policies);
   const [newSrc, setNewSrc] = useState("webhook:github");
   const [newAct, setNewAct] = useState<"respond" | "candidate" | "ignore">("candidate");
@@ -42,6 +61,15 @@ export function HooksTab({ hookKey, policies, triggers, onSavePolicies, onToast 
 
   return (
     <div className="space-y-5">
+      <WeComSection
+        settings={settings}
+        wecomOnline={wecomOnline}
+        wecomError={wecomError}
+        wecomPending={wecomPending}
+        onSavePatch={onSaveSettingsPatch}
+        onApproveWeCom={onApproveWeCom}
+      />
+
       <section className="p-4 rounded-xl border border-hairline space-y-3">
         <div className="font-semibold text-sm">外部 Webhook 接入（202 异步入箱）</div>
         <div className="space-y-2">

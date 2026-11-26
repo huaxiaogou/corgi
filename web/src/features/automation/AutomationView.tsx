@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { FleetUpdateController } from "../../hooks/useFleetUpdate";
 import { api } from "../../lib/api";
 import type { DeviceView, Machine, MemorySnapshot, PendingWeComUser, Policy, Settings, Timer, TriggerView } from "../../types/api";
@@ -22,11 +22,11 @@ interface SettingsResp {
 }
 
 const TABS: { key: TabKey; label: string }[] = [
-  { key: "settings", label: "企微与偏好" },
-  { key: "hooks", label: "接入与策略" },
+  { key: "settings", label: "模型与运行" },
+  { key: "hooks", label: "企微与接入" },
   { key: "memory", label: "记忆与做梦" },
-  { key: "timers", label: "定时" },
-  { key: "devices", label: "设备与多机" },
+  { key: "timers", label: "定时与巡检" },
+  { key: "devices", label: "设备与更新" },
 ];
 
 export function AutomationView({
@@ -38,7 +38,6 @@ export function AutomationView({
 }) {
   const [tab, setTab] = useState<TabKey>("settings");
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [allowText, setAllowText] = useState("");
   const [wecomOnline, setWecomOnline] = useState(false);
   const [wecomError, setWecomError] = useState("");
   const [wecomPending, setWecomPending] = useState<PendingWeComUser[]>([]);
@@ -52,43 +51,49 @@ export function AutomationView({
   const [machines, setMachines] = useState<Machine[]>([]);
   const [pairResult, setPairResult] = useState<{ code: string; kind: string; pair_url: string; addr: string } | null>(null);
 
-  const load = async () => {
-    if (tab === "settings" || tab === "hooks") {
-      const r = await api<SettingsResp>("/api/super/settings");
-      setSettings(r.settings);
-      setAllowText((r.settings.wecom_allow_users ?? []).join(", "));
-      setWecomOnline(r.wecom_online);
-      setWecomError(r.wecom_error ?? "");
-      setWecomPending(r.wecom_pending ?? []);
-      setHubAgents(r.hub_agents ?? []);
-      if (r.machines) setMachines(r.machines);
-      setPolicies(r.policies ?? []);
-      setHookKey(r.hook_key ?? "");
-      if (tab === "hooks") setTriggers((await api<{ triggers: TriggerView[] }>("/api/super/triggers")).triggers ?? []);
-    } else if (tab === "memory") {
-      setMemory(await api<MemorySnapshot>("/api/super/memory"));
-    } else if (tab === "timers") {
-      setTimers((await api<{ timers: Timer[] }>("/api/super/timers")).timers ?? []);
-    } else if (tab === "devices") {
-      const dr = await api<{ devices: DeviceView[]; machines: Machine[] }>("/api/devices");
-      setDevices(dr.devices ?? []);
-      setMachines(dr.machines ?? []);
-    }
-  };
+  const loadSettingsMeta = useCallback(async () => {
+    const r = await api<SettingsResp>("/api/super/settings");
+    setSettings(r.settings);
+    setWecomOnline(r.wecom_online);
+    setWecomError(r.wecom_error ?? "");
+    setWecomPending(r.wecom_pending ?? []);
+    setHubAgents(r.hub_agents ?? []);
+    if (r.machines) setMachines(r.machines);
+    setPolicies(r.policies ?? []);
+    setHookKey(r.hook_key ?? "");
+    return r.settings;
+  }, []);
+
+  const loadTab = useCallback(
+    async (activeTab: TabKey) => {
+      await loadSettingsMeta();
+      if (activeTab === "hooks") {
+        setTriggers((await api<{ triggers: TriggerView[] }>("/api/super/triggers")).triggers ?? []);
+      } else if (activeTab === "memory") {
+        setMemory(await api<MemorySnapshot>("/api/super/memory"));
+      } else if (activeTab === "timers") {
+        setTimers((await api<{ timers: Timer[] }>("/api/super/timers")).timers ?? []);
+      } else if (activeTab === "devices") {
+        const dr = await api<{ devices: DeviceView[]; machines: Machine[] }>("/api/devices");
+        setDevices(dr.devices ?? []);
+        setMachines(dr.machines ?? []);
+      }
+    },
+    [loadSettingsMeta]
+  );
 
   useEffect(() => {
-    void load();
-  }, [tab]);
+    void loadTab(tab);
+  }, [tab, loadTab]);
 
-  // Live-poll WeCom status & pending single-chat claims without overwriting unsaved inputs.
+  // Live-poll WeCom status & pending single-chat claims on the WeCom & Integrations tab.
   useEffect(() => {
-    if (tab !== "settings" || !settings?.wecom_enabled) return;
+    if (tab !== "hooks" || !settings?.wecom_enabled) return;
     const id = window.setInterval(() => {
       void api<SettingsResp>("/api/super/settings").then((r) => {
         setWecomOnline(r.wecom_online);
         setWecomError(r.wecom_error ?? "");
         setWecomPending(r.wecom_pending ?? []);
-        setHubAgents(r.hub_agents ?? []);
       });
     }, 2500);
     return () => window.clearInterval(id);
@@ -98,16 +103,21 @@ export function AutomationView({
     try {
       await fn();
       if (okMsg) onToast(okMsg);
-      await load();
+      await loadTab(tab);
     } catch (err) {
       onToast(err instanceof Error ? err.message : "操作失败");
     }
   };
 
-  const saveSettings = async () => {
-    if (!settings) return;
-    const allow = allowText.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
-    await runAction(() => api("/api/super/settings", { settings: { ...settings, wecom_allow_users: allow } }), "设置已保存");
+  // Patch only the fields owned by the active card against the latest authoritative Settings
+  // so saving one tab never overwrites settings managed in another tab.
+  const patchSettings = async (patch: Partial<Settings>, okMsg: string) => {
+    await runAction(async () => {
+      const base = settings ?? (await loadSettingsMeta());
+      const merged: Settings = { ...base, ...patch };
+      await api("/api/super/settings", { settings: merged });
+      setSettings(merged);
+    }, okMsg);
   };
 
   const approveWeCom = (userId: string, dismiss = false) =>
@@ -140,24 +150,23 @@ export function AutomationView({
           {tab === "settings" && settings && (
             <SettingsTab
               settings={settings}
-              allowText={allowText}
+              hubAgents={hubAgents}
+              machines={machines}
+              onSavePatch={patchSettings}
+            />
+          )}
+          {tab === "hooks" && settings && (
+            <HooksTab
+              key={hookKey + policies.length}
+              settings={settings}
               wecomOnline={wecomOnline}
               wecomError={wecomError}
               wecomPending={wecomPending}
-              hubAgents={hubAgents}
-              machines={machines}
-              onChange={setSettings}
-              onAllowChange={setAllowText}
-              onSave={saveSettings}
-              onApproveWeCom={approveWeCom}
-            />
-          )}
-          {tab === "hooks" && (
-            <HooksTab
-              key={hookKey + policies.length}
               hookKey={hookKey}
               policies={policies}
               triggers={triggers}
+              onSaveSettingsPatch={patchSettings}
+              onApproveWeCom={approveWeCom}
               onSavePolicies={(next) => runAction(() => api("/api/super/settings", { policies: next }), "过滤策略已保存")}
               onToast={onToast}
             />
@@ -165,25 +174,31 @@ export function AutomationView({
           {tab === "memory" && memory && (
             <MemoryTab
               memory={memory}
+              settings={settings}
               onSaveFile={(path, text) => runAction(() => api("/api/super/memory", { path, text }), "已保存记忆文件")}
+              onSaveSettingsPatch={patchSettings}
               onStartDream={() => runAction(() => api("/api/super/dream", {}), "Corgi 已进入做梦整理记忆")}
             />
           )}
           {tab === "timers" && (
             <TimersTab
               timers={timers}
+              settings={settings}
               onAdd={(spec, text) => runAction(() => api("/api/super/timers", { spec, text }), "已添加定时任务")}
               onDelete={(id) => runAction(() => api(`/api/super/timers/${encodeURIComponent(id)}/delete`, {}))}
+              onSaveSettingsPatch={patchSettings}
             />
           )}
           {tab === "devices" && (
             <DevicesTab
               devices={devices}
               machines={machines}
+              settings={settings}
               fleetUpdate={fleetUpdate}
               pairResult={pairResult}
               onGenPair={genPair}
               onRevoke={(id) => runAction(() => api(`/api/devices/${encodeURIComponent(id)}/delete`, {}))}
+              onSaveSettingsPatch={patchSettings}
               onToast={onToast}
             />
           )}

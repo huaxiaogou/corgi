@@ -1,9 +1,9 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ArrowUpCircle, Copy, Loader2, RefreshCw } from "lucide-react";
 import { StatusDot } from "../../components/CorgiMark";
 import type { FleetUpdateController } from "../../hooks/useFleetUpdate";
 import { isOldVersion } from "../../lib/fleetUpdate";
-import type { DeviceView, Machine } from "../../types/api";
+import type { DeviceView, Machine, Settings } from "../../types/api";
 
 interface PairResult {
   code: string;
@@ -15,16 +15,29 @@ interface PairResult {
 interface Props {
   devices: DeviceView[];
   machines: Machine[];
+  settings: Settings | null;
   fleetUpdate: FleetUpdateController;
   pairResult: PairResult | null;
   onGenPair: (kind: "browser" | "machine") => Promise<void>;
   onRevoke: (id: string) => Promise<void>;
+  onSaveSettingsPatch: (patch: Partial<Settings>, okMsg: string) => Promise<void>;
   onToast: (msg: string) => void;
 }
 
 const INSTALL_URL = "https://github.com/huaxiaogou/corgi/releases/latest/download/install.sh";
 
-export function DevicesTab({ devices, machines, fleetUpdate, pairResult, onGenPair, onRevoke, onToast }: Props) {
+export function DevicesTab({
+  devices,
+  machines,
+  settings,
+  fleetUpdate,
+  pairResult,
+  onGenPair,
+  onRevoke,
+  onSaveSettingsPatch,
+  onToast,
+}: Props) {
+  const [savingAuto, setSavingAuto] = useState(false);
   const {
     verInfo,
     outdatedOnline,
@@ -50,6 +63,21 @@ export function DevicesTab({ devices, machines, fleetUpdate, pairResult, onGenPa
       onToast("复制失败，请手动选中复制");
     }
   };
+
+  const toggleAutoUpdate = async (checked: boolean) => {
+    setSavingAuto(true);
+    try {
+      await onSaveSettingsPatch(
+        { auto_update: checked },
+        checked ? "已开启凌晨空闲自动更新" : "已关闭凌晨空闲自动更新"
+      );
+    } finally {
+      setSavingAuto(false);
+    }
+  };
+
+  const dreamAt = (settings?.dream_at ?? "04:00").trim() || "04:00";
+  const dreamOff = dreamAt.toLowerCase() === "off";
 
   const joinCmd =
     pairResult && pairResult.kind === "machine"
@@ -205,6 +233,26 @@ export function DevicesTab({ devices, machines, fleetUpdate, pairResult, onGenPa
           })}
         </div>
       </div>
+
+      {settings && (
+        <section className="p-4 rounded-xl border border-hairline space-y-2">
+          <div className="font-semibold text-sm">自动更新策略</div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              disabled={savingAuto}
+              checked={Boolean(settings.auto_update)}
+              onChange={(e) => void toggleAutoUpdate(e.target.checked)}
+            />
+            <span className="font-medium">凌晨空闲自动更新（默认关闭，切换即生效）</span>
+          </label>
+          <div className="text-[11.5px] text-muted leading-relaxed">
+            {dreamOff
+              ? "开启后仅在凌晨 04:00–06:00 完全空闲时自动先升在线 Node、再热重启 Hub；运行中的 Agent 不受影响。"
+              : `开启后仅在当天计划做梦（${dreamAt}）完成或静默跳过后的 3 小时夜间完全空闲窗口内自动先升在线 Node、再热重启 Hub；绝不打断做梦、会话交接与进行中的任务。`}
+          </div>
+        </section>
+      )}
 
       <div className="space-y-2">
         <div className="font-medium text-secondary">已配对凭证</div>

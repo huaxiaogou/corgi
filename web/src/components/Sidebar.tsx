@@ -179,7 +179,7 @@ export function Sidebar({
           <SlidersHorizontal className="w-4 h-4 shrink-0 text-secondary" strokeWidth={1.7} />
           <div className="min-w-0">
             <div className="text-[13.5px] text-primary">自动化与设置</div>
-            <div className="text-[11px] text-muted truncate">企微 · 接入 · 记忆 · 多机</div>
+            <div className="text-[11px] text-muted truncate">模型 · 企微 · 记忆 · 定时 · 更新</div>
           </div>
         </button>
 
