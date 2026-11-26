@@ -445,7 +445,11 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 }
 
 func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
-	summary := e.lastWorkerSummary(ctx, w)
+	fullText, fromTranscript := e.lastWorkerFullMessage(ctx, w)
+	summary := fullText
+	if summary != "(no output captured)" {
+		summary = clipMultiline(fullText, 1200)
+	}
 	screen := ""
 	if rr, err := e.fleet.Read(ctx, w.PaneID, "recent", "text", 40); err == nil {
 		screen = rr.Text
@@ -461,8 +465,14 @@ func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
 		e.addEvent(ctx, w.Thread, w.Name+" 出错了："+qErr, w.Name, "error")
 		return
 	}
+	artNote := ""
+	if fromTranscript {
+		if artID := e.captureWorkerReportSnapshot(ctx, w, fullText, 800); artID != "" {
+			artNote = fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --worker %s on `corgi reply` to attach it on the delivery card]", artID, w.Name)
+		}
+	}
 	_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name,
-		fmt.Sprintf("worker %s finished a turn. Last message:\n%s", w.Name, summary), "", model.RouterName, w.Name)
+		fmt.Sprintf("worker %s finished a turn. Last message:\n%s%s", w.Name, summary, artNote), "", model.RouterName, w.Name)
 	e.addEvent(ctx, w.Thread, w.Name+" 完成了一轮", w.Name, "done")
 }
 

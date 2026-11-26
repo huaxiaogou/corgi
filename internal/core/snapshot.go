@@ -243,8 +243,9 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 	queuedChat, chatQueuePaused := e.ChatQueueSnapshot(ctx, thread)
 
 	return model.SuperView{
-		Router:          rv,
-		Entries:         entries,
+		Router:           rv,
+		DispatchDefaults: buildDispatchDefaultsView(st),
+		Entries:          entries,
 		Earlier:         earlier,
 		Actions:         actions,
 		ResolvedActions: resolvedActions,

@@ -200,6 +200,30 @@ func (s *Server) handleKeepWorker(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "worker": wk.Name, "keep": wk.Keep})
 }
 
+func (s *Server) handleResumeWorker(w http.ResponseWriter, r *http.Request) {
+	var body core.ResumeWorkerRequest
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	wk, resumed, err := s.Engine.ResumeWorkerSession(r.Context(), body)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	if resumed && wk.PaneID != "" {
+		s.markStarted(wk.PaneID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"resumed":      resumed,
+		"pane_id":      wk.PaneID,
+		"workspace_id": wk.WorkspaceID,
+		"name":         wk.Name,
+		"worker":       wk.Name,
+		"work_item_id": wk.WorkItemID,
+	})
+}
+
 func (s *Server) handleResolveAction(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
@@ -292,12 +316,19 @@ func (s *Server) handleSuperSpawn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := map[string]any{
-		"worker":  wk.Name,
-		"kind":    wk.Kind,
-		"machine": wk.Machine,
-		"thread":  wk.Thread,
-		"status":  wk.Status,
-		"cwd":     wk.Cwd,
+		"worker":       wk.Name,
+		"kind":         wk.Kind,
+		"machine":      wk.Machine,
+		"thread":       wk.Thread,
+		"status":       wk.Status,
+		"cwd":          wk.Cwd,
+		"model":        wk.Model,
+		"effort":       wk.Effort,
+		"model_source": wk.ModelSource,
+	}
+	if wk.ProjectID != "" {
+		res["project_id"] = wk.ProjectID
+		res["project_name"] = wk.ProjectName
 	}
 	if wk.WorktreeBranch != "" {
 		res["worktree_branch"] = wk.WorktreeBranch
@@ -473,6 +504,7 @@ func (s *Server) handleSuperList(w http.ResponseWriter, r *http.Request) {
 		"work_items":      workItems,
 		"pending_actions": pendingActions,
 		"machines":        machines,
+		"projects":        s.Engine.Settings().Projects,
 		"agents":          liveAgents,
 		"workers":         workers,
 		"threads":         threads,

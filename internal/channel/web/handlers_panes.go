@@ -525,17 +525,21 @@ func (s *Server) handleStreamPane(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLastMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	maxRunes := 1200
+	if r.URL.Query().Get("full") == "1" {
+		maxRunes = 128000
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	if tr, _ := s.readerForPane(ctx, id); tr != nil {
 		tr.OpenTail()
-		if last := tr.LastAssistant(1200); last != "" {
-			writeJSON(w, http.StatusOK, map[string]any{"text": last})
+		if last := tr.LastAssistant(maxRunes); last != "" {
+			writeJSON(w, http.StatusOK, map[string]any{"text": last, "from_transcript": true})
 			return
 		}
 	}
 	if rr, err := s.Fleet.Read(ctx, id, "detection", "text", 0); err == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"text": agent.TailLines(rr.Text, 14)})
+		writeJSON(w, http.StatusOK, map[string]any{"text": agent.TailLines(rr.Text, 14), "from_transcript": false})
 		return
 	}
 	writeJSON(w, http.StatusNotFound, map[string]any{"error": "pane not found"})

@@ -36,20 +36,22 @@ func ExtractQuoteWorkerTag(quotedText string) string {
 
 // SpawnRequest defines parameters for launching or resuming a worker.
 type SpawnRequest struct {
-	Kind      string `json:"kind"`
-	Machine   string `json:"machine"`
-	Cwd       string `json:"cwd"`
-	Task      string `json:"task"`
-	Thread    string `json:"thread"`
-	Name      string `json:"name"`
-	By        string `json:"by"`
-	Model     string `json:"model"`
-	Effort    string `json:"effort"`
-	Subscribe *bool  `json:"subscribe"`
-	Resume    string `json:"resume"`
-	Worktree  string `json:"worktree,omitempty"` // auto (default) | on | off
-	WorkID    string `json:"work_id,omitempty"`
-	Ephemeral bool   `json:"ephemeral,omitempty"`
+	Kind            string `json:"kind"`
+	Machine         string `json:"machine"`
+	Cwd             string `json:"cwd"`
+	Task            string `json:"task"`
+	Thread          string `json:"thread"`
+	Name            string `json:"name"`
+	By              string `json:"by"`
+	Model           string `json:"model"`
+	Effort          string `json:"effort"`
+	Subscribe       *bool  `json:"subscribe"`
+	Resume          string `json:"resume"`
+	Worktree        string `json:"worktree,omitempty"` // auto (default) | on | off
+	WorkID          string `json:"work_id,omitempty"`
+	ProjectID       string `json:"project_id,omitempty"`
+	OriginalRequest string `json:"original_request,omitempty"`
+	Ephemeral       bool   `json:"ephemeral,omitempty"`
 }
 
 // SayRequest represents an incoming human message from Web, WeCom, or CLI.
@@ -66,6 +68,7 @@ type SayRequest struct {
 	Kind          string `json:"kind,omitempty"`
 	Model         string `json:"model,omitempty"`
 	Effort        string `json:"effort,omitempty"`
+	ProjectID     string `json:"project_id,omitempty"`
 	IdemKey       string `json:"idem_key,omitempty"`
 	ClientMsgID   string `json:"client_msg_id,omitempty"`
 }
@@ -164,6 +167,7 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 	if err != nil {
 		return nil, fmt.Errorf("load settings: %w", err)
 	}
+	NormalizeDispatchConfig(&settings)
 	policies, err := st.LoadPolicies(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load policies: %w", err)
@@ -333,6 +337,7 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 			return urlErr
 		}
 		ns.PublicURL = normPubURL
+		NormalizeDispatchConfig(&ns)
 		routerChanged = prev.RouterKind != ns.RouterKind ||
 			prev.RouterModel != ns.RouterModel ||
 			prev.RouterEffort != ns.RouterEffort ||
@@ -616,8 +621,13 @@ func hasLaterCorgiEntry(entries []*model.Entry, a *model.Action) bool {
 func (e *Engine) buildDispatchHint(req SayRequest) string {
 	st := e.Settings()
 	var hints []string
+	effMachine := st.WorkerMachine
 	if m := strings.TrimSpace(req.Machine); m != "" {
-		resolved := e.fleet.ResolveMachine(m)
+		resolved := m
+		if e.fleet != nil {
+			resolved = e.fleet.ResolveMachine(m)
+		}
+		effMachine = resolved
 		if resolved != st.WorkerMachine {
 			name := resolved
 			if name == "" {
@@ -626,14 +636,29 @@ func (e *Engine) buildDispatchHint(req SayRequest) string {
 			hints = append(hints, "--machine "+name)
 		}
 	}
-	if k := agent.NormalizeKind(req.Kind); k != "" && k != agent.NormalizeKind(st.WorkerKind) {
-		hints = append(hints, "--kind "+k)
+	effKind := agent.NormalizeKind(st.WorkerKind)
+	if k := agent.NormalizeKind(req.Kind); k != "" {
+		effKind = k
+		if k != agent.NormalizeKind(st.WorkerKind) {
+			hints = append(hints, "--kind "+k)
+		}
 	}
-	if m := strings.TrimSpace(req.Model); m != "" && agent.ModelNameRe.MatchString(m) && m != st.WorkerModel {
+	baseModel, baseEffort, _ := ResolveWorkerModel(st, effMachine, effKind, "", "")
+	if m := strings.TrimSpace(req.Model); m != "" && agent.ModelNameRe.MatchString(m) && m != baseModel {
 		hints = append(hints, "--model "+m)
 	}
-	if ef := strings.TrimSpace(req.Effort); ef != "" && agent.ModelNameRe.MatchString(ef) && ef != st.WorkerEffort {
+	if ef := strings.TrimSpace(req.Effort); ef != "" && agent.ModelNameRe.MatchString(ef) && ef != baseEffort {
 		hints = append(hints, "--effort "+ef)
+	}
+	if pid := strings.TrimSpace(req.ProjectID); pid != "" {
+		if proj := ResolveProject(st.Projects, pid); proj != nil {
+			hints = append(hints, "--project "+proj.ID)
+			if p := ProjectPathForMachine(proj, effMachine); p != "" {
+				hints = append(hints, "--cwd "+p)
+			}
+		} else {
+			hints = append(hints, "--project "+pid)
+		}
 	}
 	if len(hints) == 0 {
 		return ""
@@ -726,7 +751,10 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 	hasOpts := len(opts) > 0
 	wantCheck := !hasOpts && req.Check
 
-	var quote *model.Quote
+	var (
+		quote       *model.Quote
+		quoteWorker string
+	)
 	if req.ReID != "" {
 		if prev, err := e.store.GetEntry(ctx, req.ReID); err == nil {
 			who := "你"
@@ -734,8 +762,54 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 				who = prev.Role
 			}
 			quote = &model.Quote{Entry: prev.ID, Who: who, Text: oneLineClip(prev.Text, 120)}
+			if prev.Role == "event" && prev.Ref != "" && prev.Ref != model.RouterName {
+				quoteWorker = prev.Ref
+			}
 		} else if tr, err := e.store.GetTrigger(ctx, req.ReID); err == nil {
 			quote = &model.Quote{Who: tr.From, Text: oneLineClip(tr.Text, 120)}
+			if tr.Source == "worker" && tr.From != "" {
+				quoteWorker = tr.From
+			}
+		}
+	}
+
+	// Resolve bound worker instance (name + machine + session) so delivery cards link directly
+	// to the exact Worker that produced the report/artifact, and auto-attach its freshly captured
+	// full report snapshot when Router did not pass explicit --file paths.
+	relatedWorkerName := strings.TrimSpace(req.Worker)
+	if relatedWorkerName == "" {
+		relatedWorkerName = quoteWorker
+	}
+	var relatedWorker *model.Worker
+	if relatedWorkerName != "" {
+		if wk, wErr := e.store.GetWorker(ctx, relatedWorkerName); wErr == nil {
+			relatedWorker = wk
+		}
+	} else if workID != "" {
+		if wi, wErr := e.store.GetWorkItem(ctx, workID); wErr == nil && len(wi.Workers) > 0 {
+			for i := len(wi.Workers) - 1; i >= 0; i-- {
+				if wk, gErr := e.store.GetWorker(ctx, wi.Workers[i]); gErr == nil {
+					relatedWorker = wk
+					break
+				}
+			}
+		}
+	}
+	var workerRef *model.EntryWorkerRef
+	if relatedWorker != nil {
+		if workID == "" && relatedWorker.WorkItemID != "" {
+			if wi, wErr := e.store.GetWorkItem(ctx, relatedWorker.WorkItemID); wErr == nil && wi.ClosedAt == nil && (wi.Thread == "" || wi.Thread == thread) {
+				workID = wi.ID
+			}
+		}
+		workerRef = &model.EntryWorkerRef{
+			Name:       relatedWorker.Name,
+			Machine:    relatedWorker.Machine,
+			Session:    relatedWorker.Session,
+			Kind:       relatedWorker.Kind,
+			Model:      relatedWorker.Model,
+			Effort:     relatedWorker.Effort,
+			WorkItemID: relatedWorker.WorkItemID,
 		}
 	}
 
@@ -747,6 +821,41 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 	artifactRecs, artifactSummaries, cleanupBlobs, err := e.stageArtifacts(ctx, eid, thread, workID, fetchedFiles, now)
 	if err != nil {
 		return nil, fmt.Errorf("stage reply artifacts: %w", err)
+	}
+
+	// Auto-attach a freshly captured full worker report snapshot once when Router replies about
+	// that worker without explicit --file attachments.
+	var autoAttachedReportID string
+	if len(fetchedFiles) == 0 && relatedWorker != nil &&
+		relatedWorker.LastReportArtifactID != "" &&
+		relatedWorker.LastReportArtifactID != relatedWorker.LastReportAttachedID {
+		if art, data, rErr := e.ReadArtifactForConsole(ctx, relatedWorker.LastReportArtifactID); rErr == nil {
+			autoAttachedReportID = art.ID
+			artifactSummaries = append(artifactSummaries, model.ArtifactSummary{
+				ID:   art.ID,
+				Name: art.Name,
+				Kind: art.Kind,
+				Size: art.Size,
+			})
+			fetchedFiles = append(fetchedFiles, AttachmentFile{
+				ArtifactID: art.ID,
+				Path:       art.Name,
+				Machine:    art.SourceMachine,
+				Name:       art.Name,
+				Kind:       art.Kind,
+				ShareURL:   e.BuildPreviewURL(ctx, art.ID),
+				Data:       data,
+			})
+			if art.EntryID == "" || (workID != "" && art.WorkItemID == "") {
+				if art.EntryID == "" {
+					art.EntryID = eid
+				}
+				if workID != "" && art.WorkItemID == "" {
+					art.WorkItemID = workID
+				}
+				_ = e.store.InsertArtifact(ctx, art)
+			}
+		}
 	}
 
 	entry := &model.Entry{
@@ -762,6 +871,7 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 		Files:       files,
 		FileMachine: fileMachine,
 		Artifacts:   artifactSummaries,
+		WorkerRef:   workerRef,
 		WorkItemID:  workID,
 		Check:       req.Check,
 	}
@@ -824,6 +934,10 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 	if err := e.store.CommitReplyTx(ctx, entry, action, expireDigestKind, artifactRecs); err != nil {
 		cleanupBlobs()
 		return nil, err
+	}
+	if autoAttachedReportID != "" && relatedWorker != nil {
+		relatedWorker.LastReportAttachedID = autoAttachedReportID
+		_ = e.store.UpsertWorker(ctx, relatedWorker)
 	}
 	if recent, _, err := e.store.ListEntries(ctx, "", 30); err == nil {
 		_ = e.memory.WriteMessages(recent)

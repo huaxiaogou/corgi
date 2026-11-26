@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kiperjing/corgi/internal/model"
 )
@@ -351,6 +353,89 @@ func (e *Engine) stageArtifacts(
 		fetched[i].ShareURL = e.BuildPreviewURL(ctx, id)
 	}
 	return records, summaries, cleanup, nil
+}
+
+// SaveStandaloneTextArtifact persists a full text/Markdown report directly into ~/.corgi/artifacts/
+// and SQLite before any Router truncation, linking it to workID (小本本) when provided.
+func (e *Engine) SaveStandaloneTextArtifact(
+	ctx context.Context,
+	filename, content, thread, workID, sourceMachine string,
+) (*model.Artifact, model.ArtifactSummary, error) {
+	data := []byte(strings.TrimSpace(content))
+	if len(data) == 0 {
+		return nil, model.ArtifactSummary{}, fmt.Errorf("empty artifact content")
+	}
+	if thread == "" {
+		thread = model.MainThread
+	}
+	now := time.Now()
+	fetched := []AttachmentFile{{
+		Name:    filename,
+		Machine: sourceMachine,
+		Path:    filename,
+		Data:    data,
+	}}
+	recs, sums, cleanup, err := e.stageArtifacts(ctx, "", thread, strings.TrimSpace(workID), fetched, now)
+	if err != nil {
+		return nil, model.ArtifactSummary{}, err
+	}
+	if len(recs) == 0 {
+		cleanup()
+		return nil, model.ArtifactSummary{}, fmt.Errorf("failed to stage text artifact")
+	}
+	art := recs[0]
+	sum := sums[0]
+	if err := e.store.InsertArtifact(ctx, art); err != nil {
+		cleanup()
+		return nil, model.ArtifactSummary{}, err
+	}
+	if strings.TrimSpace(workID) != "" {
+		_, _ = e.store.RecordWorkItemArtifact(ctx, strings.TrimSpace(workID), model.WorkArtifact{
+			ArtifactID:  art.ID,
+			Name:        art.Name,
+			Kind:        art.Kind,
+			Size:        art.Size,
+			Path:        art.Name,
+			Machine:     sourceMachine,
+			DeliveredAt: now,
+		})
+	}
+	go e.SweepArtifacts(context.Background())
+	return art, sum, nil
+}
+
+// captureWorkerReportSnapshot stores a full untruncated worker report as an immutable Hub Markdown
+// snapshot when it is long enough to be a substantive deliverable, deduplicated by content hash.
+func (e *Engine) captureWorkerReportSnapshot(ctx context.Context, wk *model.Worker, fullText string, minRunes int) string {
+	if wk == nil {
+		return ""
+	}
+	trimmed := strings.TrimSpace(fullText)
+	if trimmed == "" || trimmed == "(no output captured)" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToUpper(trimmed), "BLOCKED:") {
+		return ""
+	}
+	if utf8.RuneCountInString(trimmed) < minRunes {
+		return ""
+	}
+	sumBytes := sha256.Sum256([]byte(trimmed))
+	hash := hex.EncodeToString(sumBytes[:16])
+	if wk.LastReportHash == hash && wk.LastReportArtifactID != "" {
+		return wk.LastReportArtifactID
+	}
+	name := safeDisplayFilename(wk.Name + "-完整报告.md")
+	art, _, err := e.SaveStandaloneTextArtifact(ctx, name, trimmed, wk.Thread, wk.WorkItemID, wk.Machine)
+	if err != nil {
+		e.logger.Warn("capture worker report snapshot failed", "worker", wk.Name, "err", err)
+		return ""
+	}
+	wk.LastReportArtifactID = art.ID
+	wk.LastReportHash = hash
+	_ = e.store.UpsertWorker(ctx, wk)
+	e.notifyChanged()
+	return art.ID
 }
 
 // ReadArtifactForConsole loads an artifact and its immutable bytes for an authenticated Web console session.

@@ -279,6 +279,7 @@ func cmdSpawn(dir string, args []string) error {
 	worktree := fs.Bool("worktree", false, "force isolated git worktree")
 	noWorktree := fs.Bool("no-worktree", false, "disable automatic git worktree isolation")
 	work := fs.String("work", "", "attach worker to an existing open work item id")
+	project := fs.String("project", "", "project workspace id or name")
 	ephemeral := fs.Bool("ephemeral", false, "do not create a durable work item (one-off lookup only)")
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
@@ -296,7 +297,7 @@ func cmdSpawn(dir string, args []string) error {
 	body := map[string]any{
 		"kind": *kind, "machine": *machine, "cwd": *cwd, "thread": *thread,
 		"name": *name, "model": *modelName, "effort": *effort, "resume": *resume,
-		"worktree": wtMode, "work_id": *work, "ephemeral": *ephemeral, "task": task, "by": caller(),
+		"worktree": wtMode, "work_id": *work, "project_id": *project, "ephemeral": *ephemeral, "task": task, "by": caller(),
 	}
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "subscribe" {

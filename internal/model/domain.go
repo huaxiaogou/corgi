@@ -21,23 +21,36 @@ type Quote struct {
 	Text   string `json:"text"`
 }
 
+// EntryWorkerRef binds a Corgi reply or delivery card to the exact worker instance that produced it
+// (machine + session) so follow-up jump/resume never collides if a worker name is later reused.
+type EntryWorkerRef struct {
+	Name       string `json:"name"`
+	Machine    string `json:"machine,omitempty"`
+	Session    string `json:"session,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Model      string `json:"model,omitempty"`
+	Effort     string `json:"effort,omitempty"`
+	WorkItemID string `json:"work_item_id,omitempty"`
+}
+
 // Entry is one human-facing message or event in a conversation thread.
 type Entry struct {
-	ID       string    `json:"id"`
-	Seq      int64     `json:"seq"`
-	Role     string    `json:"role"` // user | corgi | event
-	Thread   string    `json:"thread"`
-	Channel  string    `json:"channel,omitempty"` // web | wecom | cli | system
-	Text     string    `json:"text"`
-	At       time.Time `json:"at"`
-	Ref      string    `json:"ref,omitempty"`
-	Tone     string    `json:"tone,omitempty"` // spawn | done | blocked | info | error
-	Re       *Quote    `json:"re,omitempty"`
+	ID          string            `json:"id"`
+	Seq         int64             `json:"seq"`
+	Role        string            `json:"role"` // user | corgi | event
+	Thread      string            `json:"thread"`
+	Channel     string            `json:"channel,omitempty"` // web | wecom | cli | system
+	Text        string            `json:"text"`
+	At          time.Time         `json:"at"`
+	Ref         string            `json:"ref,omitempty"`
+	Tone        string            `json:"tone,omitempty"` // spawn | done | blocked | info | error
+	Re          *Quote            `json:"re,omitempty"`
 	ActionID    string            `json:"action_id,omitempty"`
 	Options     []string          `json:"options,omitempty"`
 	Files       []string          `json:"files,omitempty"`
 	FileMachine string            `json:"file_machine,omitempty"`
 	Artifacts   []ArtifactSummary `json:"artifacts,omitempty"`
+	WorkerRef   *EntryWorkerRef   `json:"worker_ref,omitempty"`
 	WorkItemID  string            `json:"work_item_id,omitempty"`
 	Check       bool              `json:"check,omitempty"`
 	Pinned      bool              `json:"pinned,omitempty"`
@@ -158,16 +171,22 @@ type Worker struct {
 	WorkspaceID     string     `json:"workspace_id,omitempty"`
 	CreatedBy       string     `json:"created_by"`
 	CreatedAt       time.Time  `json:"created_at"`
-	Model           string     `json:"model,omitempty"`
-	Effort          string     `json:"effort,omitempty"`
-	Run             *[2]string `json:"run,omitempty"`
-	Title           string     `json:"title,omitempty"`
-	Status          string     `json:"status"` // starting | working | waiting | idle | done | blocked | gone | failed
-	LastReport      string     `json:"last_report,omitempty"`
-	ReportAt        time.Time  `json:"report_at,omitempty"`
-	Ended           bool       `json:"ended,omitempty"`
-	Session         string     `json:"session,omitempty"`
-	RepoRoot        string     `json:"repo_root,omitempty"`
+	Model                string     `json:"model,omitempty"`
+	Effort               string     `json:"effort,omitempty"`
+	ModelSource          string     `json:"model_source,omitempty"` // explicit | machine_override | kind_default | cli_default
+	Run                  *[2]string `json:"run,omitempty"`
+	Title                string     `json:"title,omitempty"`
+	Status               string     `json:"status"` // starting | working | waiting | idle | done | blocked | gone | failed
+	LastReport           string     `json:"last_report,omitempty"`
+	LastReportArtifactID string     `json:"last_report_artifact_id,omitempty"`
+	LastReportAttachedID string     `json:"last_report_attached_id,omitempty"`
+	LastReportHash       string     `json:"last_report_hash,omitempty"`
+	ReportAt             time.Time  `json:"report_at,omitempty"`
+	Ended                bool       `json:"ended,omitempty"`
+	Session              string     `json:"session,omitempty"`
+	ProjectID            string     `json:"project_id,omitempty"`
+	ProjectName          string     `json:"project_name,omitempty"`
+	RepoRoot             string     `json:"repo_root,omitempty"`
 	RepoCommonDir   string     `json:"repo_common_dir,omitempty"`
 	WorktreePath    string     `json:"worktree_path,omitempty"`
 	WorktreeBranch  string     `json:"worktree_branch,omitempty"`
@@ -245,16 +264,35 @@ type Policy struct {
 	Allow  []string `json:"allow,omitempty"`
 }
 
+// ModelEffortSpec configures a default model and optional reasoning effort for one agent CLI kind.
+type ModelEffortSpec struct {
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+}
+
+// ProjectWorkspace maps one logical project (and its aliases/note) to repository root paths per machine.
+// Paths keys use "hub" for the local Hub machine and the machine ID for connected remote nodes.
+type ProjectWorkspace struct {
+	ID      string            `json:"id"`
+	Name    string            `json:"name"`
+	Aliases []string          `json:"aliases,omitempty"`
+	Note    string            `json:"note,omitempty"`
+	Paths   map[string]string `json:"paths,omitempty"`
+}
+
 // Settings holds durable Corgi configuration.
 type Settings struct {
-	RouterKind        string   `json:"router_kind"`
-	RouterModel       string   `json:"router_model,omitempty"`
-	RouterEffort      string   `json:"router_effort,omitempty"`
-	WorkerKind        string   `json:"worker_kind"`
-	WorkerModel       string   `json:"worker_model,omitempty"`
-	WorkerEffort      string   `json:"worker_effort,omitempty"`
-	WorkerCwd         string   `json:"worker_cwd"`
-	WorkerMachine     string   `json:"worker_machine,omitempty"`
+	RouterKind           string                                `json:"router_kind"`
+	RouterModel          string                                `json:"router_model,omitempty"`
+	RouterEffort         string                                `json:"router_effort,omitempty"`
+	WorkerKind           string                                `json:"worker_kind"`
+	WorkerModel          string                                `json:"worker_model,omitempty"`
+	WorkerEffort         string                                `json:"worker_effort,omitempty"`
+	KindDefaults         map[string]ModelEffortSpec            `json:"kind_defaults,omitempty"`
+	MachineKindOverrides map[string]map[string]ModelEffortSpec `json:"machine_kind_overrides,omitempty"`
+	Projects             []ProjectWorkspace                    `json:"projects,omitempty"`
+	WorkerCwd            string                                `json:"worker_cwd"`
+	WorkerMachine        string                                `json:"worker_machine,omitempty"`
 	ReplyChars        int      `json:"reply_chars"`
 	StallMinutes      int      `json:"stall_minutes"`
 	IdlePatrolMinutes int      `json:"idle_patrol_minutes,omitempty"` // 0 = default 30, -1 = off

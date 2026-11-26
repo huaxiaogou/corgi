@@ -90,7 +90,32 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 			mc.Name, kind, strings.Join(have, ", "))
 	}
 
+	thread := strings.TrimSpace(req.Thread)
+	if thread == "" {
+		thread = model.MainThread
+	}
+
+	// Capture latest human message in this thread so fresh Router spawns carry original phrasing
+	// and constraints verbatim without lossy telephone summarization.
+	origUserReq := strings.TrimSpace(req.OriginalRequest)
+	if origUserReq == "" && sessionID == "" {
+		if recent, _, rErr := e.store.ListEntries(ctx, thread, 12); rErr == nil {
+			for i := len(recent) - 1; i >= 0; i-- {
+				if recent[i].Role == "user" && strings.TrimSpace(recent[i].Text) != "" && time.Since(recent[i].At) <= 20*time.Minute {
+					origUserReq = strings.TrimSpace(recent[i].Text)
+					break
+				}
+			}
+		}
+	}
+
+	proj := ResolveProject(st.Projects, req.ProjectID, req.Task, origUserReq)
 	cwd := strings.TrimSpace(req.Cwd)
+	if (cwd == "" || cwd == "~") && proj != nil {
+		if projPath := ProjectPathForMachine(proj, machine); projPath != "" {
+			cwd = projPath
+		}
+	}
 	if cwd == "" && (mc.ID == st.WorkerMachine || (mc.Local && st.WorkerMachine == "")) {
 		cwd = st.WorkerCwd
 	}
@@ -105,10 +130,6 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		}
 	}
 
-	thread := strings.TrimSpace(req.Thread)
-	if thread == "" {
-		thread = model.MainThread
-	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		_, seq, _ := e.store.NextID(ctx, "w")
@@ -121,15 +142,7 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		return nil, fmt.Errorf("worker %s is already running", name)
 	}
 
-	modelName, effort := req.Model, req.Effort
-	if kind == agent.NormalizeKind(st.WorkerKind) {
-		if modelName == "" {
-			modelName = st.WorkerModel
-		}
-		if effort == "" {
-			effort = st.WorkerEffort
-		}
-	}
+	modelName, effort, modelSource := ResolveWorkerModel(st, machine, kind, req.Model, req.Effort)
 
 	// Resolve work-item assignment before acquiring wtMu/tx so NextID never contends with an open tx.
 	targetWorkID := strings.TrimSpace(req.WorkID)
@@ -160,19 +173,24 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	}
 
 	wk := &model.Worker{
-		Name:      name,
-		Kind:      kind,
-		Machine:   machine,
-		Cwd:       cwd,
-		Task:      req.Task,
-		Thread:    thread,
-		CreatedBy: orStr(req.By, model.RouterName),
-		CreatedAt: time.Now(),
-		Model:     modelName,
-		Effort:    effort,
-		Run:       &[2]string{modelName, effort},
-		Status:    "starting",
-		Session:   sessionID,
+		Name:        name,
+		Kind:        kind,
+		Machine:     machine,
+		Cwd:         cwd,
+		Task:        req.Task,
+		Thread:      thread,
+		CreatedBy:   orStr(req.By, model.RouterName),
+		CreatedAt:   time.Now(),
+		Model:       modelName,
+		Effort:      effort,
+		ModelSource: modelSource,
+		Run:         &[2]string{modelName, effort},
+		Status:      "starting",
+		Session:     sessionID,
+	}
+	if proj != nil {
+		wk.ProjectID = proj.ID
+		wk.ProjectName = proj.Name
 	}
 	if wtPrep != nil {
 		wk.RepoRoot = wtPrep.RepoRoot
@@ -208,7 +226,18 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	if wk.WorktreeBranch != "" {
 		wtTag = " · Worktree " + wk.WorktreeBranch
 	}
-	e.addEvent(ctx, thread, fmt.Sprintf("%s %s（%s%s%s）", verb, name, kind, machineTag(mc.Name, mc.Local), wtTag), name, "spawn")
+	modelTag := ""
+	if modelName != "" {
+		modelTag = " · " + modelName
+		if effort != "" {
+			modelTag += "/" + effort
+		}
+	}
+	projTag := ""
+	if wk.ProjectName != "" {
+		projTag = " · " + wk.ProjectName
+	}
+	e.addEvent(ctx, thread, fmt.Sprintf("%s %s（%s%s%s%s%s）", verb, name, kind, modelTag, machineTag(mc.Name, mc.Local), projTag, wtTag), name, "spawn")
 	e.notifyChanged()
 
 	workerBin := e.binPath
@@ -260,8 +289,17 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		default:
 		}
 
-		brief := fmt.Sprintf("[corgi task · worker=%s · thread=%s]\n%s\n\nHow this works:\n- Report completion with `%s report \"outcome summary & file paths\"`.\n- If blocked on a decision only the human can make or repeated failures, report `BLOCKED: <need> · tried: <attempts> · recommendation: <choice>`.%s",
-			name, thread, strings.TrimSpace(req.Task), workerBin, worktreePromptNote(wtPrep))
+		var extraCtx strings.Builder
+		if origUserReq != "" && !strings.Contains(req.Task, origUserReq) && (req.By == "" || req.By == model.RouterName) {
+			extraCtx.WriteString("\n\n[Human original message — preserve all constraints & nuances]\n")
+			extraCtx.WriteString(oneLineClip(origUserReq, 600))
+		}
+		if proj != nil && proj.Note != "" {
+			extraCtx.WriteString("\n\n[Project workspace note · " + proj.Name + "]\n")
+			extraCtx.WriteString(proj.Note)
+		}
+		brief := fmt.Sprintf("[corgi task · worker=%s · thread=%s]\n%s%s\n\nHow this works:\n- Report completion with `%s report \"outcome summary & file paths\"`.\n- If blocked on a decision only the human can make or repeated failures, report `BLOCKED: <need> · tried: <attempts> · recommendation: <choice>`.%s",
+			name, thread, strings.TrimSpace(req.Task), extraCtx.String(), workerBin, worktreePromptNote(wtPrep))
 		_, _ = e.Ingest(lctx, "router", thread, model.RouterName, brief, "", name, name)
 	}()
 
@@ -278,19 +316,166 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	}
 }
 
-// LaunchManagedRequest describes a user-initiated agent launch from the `+` modal or History resume.
+// LaunchManagedRequest describes a user-initiated agent launch from the `+` modal or History/Card resume.
 type LaunchManagedRequest struct {
-	Kind      string
-	Machine   string
-	Cwd       string
-	Name      string
-	Label     string
-	Model     string
-	Effort    string
-	Prompt    string
-	SessionID string
-	Worktree  string // auto (default) | on | off
-	ExtraArgs []string
+	Kind       string
+	Machine    string
+	Cwd        string
+	Name       string
+	Label      string
+	Model      string
+	Effort     string
+	Prompt     string
+	SessionID  string
+	WorkItemID string
+	ProjectID  string
+	Worktree   string // auto (default) | on | off
+	ExtraArgs  []string
+}
+
+// ResumeWorkerRequest identifies a specific historical worker session to reopen for direct follow-up.
+type ResumeWorkerRequest struct {
+	Name       string `json:"name"`
+	Machine    string `json:"machine,omitempty"`
+	Session    string `json:"session,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Cwd        string `json:"cwd,omitempty"`
+	WorkItemID string `json:"work_item_id,omitempty"`
+}
+
+// ResumeWorkerSession returns the existing live pane if the exact worker session is already running,
+// or reopens the archived session on its original machine while preserving its WorkItem linkage.
+func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerRequest) (*model.Worker, bool, error) {
+	name := strings.TrimSpace(req.Name)
+	sess := strings.TrimSpace(req.Session)
+	machine := strings.TrimSpace(req.Machine)
+	if machine != "" && e.fleet != nil {
+		machine = e.fleet.ResolveMachine(machine)
+	}
+
+	// 1. Check live workers first by exact session match, then by name+machine.
+	if all, err := e.store.ListWorkers(ctx); err == nil {
+		for _, w := range all {
+			if w.Ended || w.PaneID == "" {
+				continue
+			}
+			if sess != "" && w.Session == sess && (machine == "" || w.Machine == machine) {
+				return w, false, nil
+			}
+		}
+		if name != "" {
+			for _, w := range all {
+				if w.Ended || w.PaneID == "" {
+					continue
+				}
+				if w.Name == name && (machine == "" || w.Machine == machine) && (sess == "" || w.Session == "" || w.Session == sess) {
+					return w, false, nil
+				}
+			}
+		}
+	}
+
+	// 2. Recover saved metadata from Worker table and EndedSessions.
+	kind := agent.NormalizeKind(req.Kind)
+	cwd := strings.TrimSpace(req.Cwd)
+	workID := strings.TrimSpace(req.WorkItemID)
+	modelName, effort, title := "", "", ""
+	var repoRoot string
+
+	if name != "" {
+		if old, err := e.store.GetWorker(ctx, name); err == nil {
+			if sess == "" || old.Session == sess || old.Session == "" {
+				if sess == "" {
+					sess = old.Session
+				}
+				if kind == "" {
+					kind = agent.NormalizeKind(old.Kind)
+				}
+				if machine == "" {
+					machine = old.Machine
+				}
+				if cwd == "" {
+					cwd = old.Cwd
+				}
+				if workID == "" {
+					workID = old.WorkItemID
+				}
+				modelName, effort, title, repoRoot = old.Model, old.Effort, old.Title, old.RepoRoot
+			}
+		}
+	}
+	if ended, err := e.store.ListEndedSessions(ctx, 100); err == nil {
+		for _, es := range ended {
+			matchSess := sess != "" && es.Session == sess
+			matchName := sess == "" && name != "" && es.Name == name && (machine == "" || es.Machine == machine)
+			if !matchSess && !matchName {
+				continue
+			}
+			if sess == "" {
+				sess = es.Session
+			}
+			if kind == "" {
+				kind = agent.NormalizeKind(es.Kind)
+			}
+			if machine == "" {
+				machine = es.Machine
+			}
+			if cwd == "" {
+				cwd = es.Cwd
+			}
+			if workID == "" {
+				workID = es.WorkItemID
+			}
+			if modelName == "" {
+				modelName = es.Model
+			}
+			if effort == "" {
+				effort = es.Effort
+			}
+			if title == "" {
+				title = es.Title
+			}
+			if name == "" {
+				name = es.Name
+			}
+			break
+		}
+	}
+
+	if sess == "" {
+		return nil, false, fmt.Errorf("未找到可恢复的会话记录")
+	}
+	if kind == "" {
+		return nil, false, fmt.Errorf("无法确定该会话对应的 Agent 类型")
+	}
+	if repoRoot != "" {
+		cwd = e.resolveResumeCwd(ctx, machine, cwd, repoRoot)
+	}
+	if workID != "" {
+		if wi, err := e.store.GetWorkItem(ctx, workID); err != nil || wi.ClosedAt != nil {
+			// Keep workID only if the WorkItem still exists and is open.
+			if err != nil || wi.ClosedAt != nil {
+				workID = ""
+			}
+		}
+	}
+
+	wk, err := e.LaunchManaged(ctx, LaunchManagedRequest{
+		Kind:       kind,
+		Machine:    machine,
+		Cwd:        cwd,
+		Name:       name,
+		Label:      title,
+		Model:      modelName,
+		Effort:     effort,
+		SessionID:  sess,
+		WorkItemID: workID,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	_ = e.store.ForgetEndedSession(ctx, kind, machine, sess)
+	return wk, true, nil
 }
 
 // LaunchManaged starts an interactive agent on any connected machine and registers it immediately
@@ -371,12 +556,13 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 		e.preTrustWorkspace(ctx, machine, kind, cwd)
 	}
 
+	effModel, effEffort, modelSource := ResolveWorkerModel(st, machine, kind, req.Model, req.Effort)
 	workerBin := e.binPath
 	if !mc.Local || workerBin == "" {
 		workerBin = "corgi"
 	}
 	// Codex `resume <id>` is a subcommand and must precede launch flags.
-	args := append(ad.ResumeArgs(req.SessionID), ad.LaunchArgs(req.Model, req.Effort, !st.AskPermissions)...)
+	args := append(ad.ResumeArgs(req.SessionID), ad.LaunchArgs(effModel, effEffort, !st.AskPermissions)...)
 	if kind == "claude" {
 		args = append(args, "--allowedTools", fmt.Sprintf("Bash(%s report:*),Bash(corgi report:*)", workerBin))
 	}
@@ -399,7 +585,7 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 	}
 
 	e.fleet.RememberName(paneID, name)
-	e.fleet.RememberRun(paneID, req.Model, req.Effort)
+	e.fleet.RememberRun(paneID, effModel, effEffort)
 
 	prompt := strings.TrimSpace(req.Prompt)
 	taskDesc := prompt
@@ -424,11 +610,17 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 		WorkspaceID: wsID,
 		CreatedBy:   "you",
 		CreatedAt:   time.Now(),
-		Model:       req.Model,
-		Effort:      req.Effort,
-		Run:         &[2]string{req.Model, req.Effort},
+		Model:       effModel,
+		Effort:      effEffort,
+		ModelSource: modelSource,
+		Run:         &[2]string{effModel, effEffort},
 		Status:      status,
 		Session:     req.SessionID,
+		WorkItemID:  strings.TrimSpace(req.WorkItemID),
+	}
+	if proj := ResolveProject(st.Projects, req.ProjectID, cwd); proj != nil {
+		wk.ProjectID = proj.ID
+		wk.ProjectName = proj.Name
 	}
 	if wtPrep != nil {
 		wk.RepoRoot = wtPrep.RepoRoot
@@ -437,7 +629,13 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 		wk.WorktreeBranch = wtPrep.WorktreeBranch
 		wk.WorktreeBase = wtPrep.BaseCommit
 	}
-	if err := e.store.UpsertWorker(ctx, wk); err != nil {
+	if wk.WorkItemID != "" {
+		if _, err := e.store.AttachWorkerAndUpsert(ctx, wk, wk.WorkItemID, "", oneLineClip(taskDesc, 90), ""); err != nil {
+			if err := e.store.UpsertWorker(ctx, wk); err != nil {
+				return nil, err
+			}
+		}
+	} else if err := e.store.UpsertWorker(ctx, wk); err != nil {
 		return nil, err
 	}
 
@@ -636,15 +834,19 @@ func (e *Engine) Report(ctx context.Context, workerName, paneID, text string) (*
 	}
 	thread := model.MainThread
 	from := orStr(workerName, "worker")
+	artNote := ""
 	if wk != nil {
 		from = wk.Name
 		thread = wk.Thread
 		wk.LastReport = text
 		wk.ReportAt = time.Now()
 		_ = e.store.UpsertWorker(ctx, wk)
+		if artID := e.captureWorkerReportSnapshot(ctx, wk, text, 500); artID != "" {
+			artNote = fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --worker %s on `corgi reply` to attach it on the delivery card]", artID, wk.Name)
+		}
 	}
 	e.addEvent(ctx, thread, fmt.Sprintf("%s 汇报：%s", from, oneLineClip(text, 120)), from, "done")
-	return e.Ingest(ctx, "worker", thread, from, fmt.Sprintf("report from %s:\n%s", from, text), "", model.RouterName, from)
+	return e.Ingest(ctx, "worker", thread, from, fmt.Sprintf("report from %s:\n%s%s", from, text, artNote), "", model.RouterName, from)
 }
 
 // Subscribe subscribes or unsubscribes a worker to a thread's incoming events.
@@ -727,7 +929,8 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 		eid, _, _ := e.store.NextID(ctx, "h")
 		_ = e.store.SaveEndedSession(ctx, &model.EndedSession{
 			ID: eid, Kind: wk.Kind, Machine: wk.Machine, Cwd: histCwd,
-			Name: wk.Name, Title: orStr(wk.Title, wk.Name), Session: wk.Session, EndedAt: time.Now(),
+			Name: wk.Name, Title: orStr(wk.Title, wk.Name), Session: wk.Session,
+			WorkItemID: wk.WorkItemID, Model: wk.Model, Effort: wk.Effort, EndedAt: time.Now(),
 		}, 40)
 	}
 	e.addEvent(ctx, wk.Thread, "已停止 "+wk.Name+"（会话已保留，可随时续接"+wtNote+"）", wk.Name, "info")

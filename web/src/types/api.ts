@@ -14,8 +14,18 @@ export interface ArtifactSummary {
   expired?: boolean;
 }
 
+export interface EntryWorkerRef {
+  name: string;
+  machine?: string;
+  session?: string;
+  kind?: string;
+  model?: string;
+  effort?: string;
+  work_item_id?: string;
+}
+
 export type FileDrawerTarget =
-  | { artifactId: string; name: string; kind: string; shareToken?: string }
+  | { artifactId: string; name: string; kind: string; shareToken?: string; workerRef?: EntryWorkerRef }
   | { path: string; machine?: string };
 
 export interface Entry {
@@ -34,6 +44,7 @@ export interface Entry {
   files?: string[];
   file_machine?: string;
   artifacts?: ArtifactSummary[];
+  worker_ref?: EntryWorkerRef;
   work_item_id?: string;
   check?: boolean;
   pinned?: boolean;
@@ -81,12 +92,16 @@ export interface Worker {
   created_at: string;
   model?: string;
   effort?: string;
+  model_source?: "explicit" | "machine_override" | "kind_default" | "cli_default" | string;
   run?: [string, string];
   title?: string;
   status: string;
   last_report?: string;
+  last_report_artifact_id?: string;
   ended?: boolean;
   session?: string;
+  project_id?: string;
+  project_name?: string;
   repo_root?: string;
   worktree_path?: string;
   worktree_branch?: string;
@@ -166,8 +181,33 @@ export interface QueuedPrompt {
   created_at: string;
 }
 
+export interface ModelEffortSpec {
+  model?: string;
+  effort?: string;
+}
+
+export interface ProjectWorkspace {
+  id: string;
+  name: string;
+  aliases?: string[];
+  note?: string;
+  paths?: Record<string, string>;
+}
+
+export interface WorkerDispatchDefaults {
+  worker_machine?: string;
+  worker_kind: string;
+  worker_model?: string;
+  worker_effort?: string;
+  worker_cwd?: string;
+  kind_defaults?: Record<string, ModelEffortSpec>;
+  machine_kind_overrides?: Record<string, Record<string, ModelEffortSpec>>;
+  projects?: ProjectWorkspace[];
+}
+
 export interface SuperView {
   router: RouterView;
+  dispatch_defaults?: WorkerDispatchDefaults;
   entries: Entry[];
   earlier?: boolean;
   actions: Action[];
@@ -271,6 +311,9 @@ export interface Settings {
   worker_kind: string;
   worker_model?: string;
   worker_effort?: string;
+  kind_defaults?: Record<string, ModelEffortSpec>;
+  machine_kind_overrides?: Record<string, Record<string, ModelEffortSpec>>;
+  projects?: ProjectWorkspace[];
   worker_cwd: string;
   worker_machine?: string;
   reply_chars: number;

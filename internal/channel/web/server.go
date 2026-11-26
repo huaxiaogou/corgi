@@ -168,6 +168,7 @@ func (s *Server) registerSuperRoutes(mux *http.ServeMux, api func(string, http.H
 	api("POST /api/super/actions/{id}/dismiss", s.handleDismissAction)
 	api("POST /api/super/actions/{id}/snooze", s.handleSnoozeAction)
 	api("POST /api/super/workers/{name}/keep", s.handleKeepWorker)
+	api("POST /api/super/workers/resume", s.handleResumeWorker)
 	api("POST /api/super/pin", s.handleSuperPin)
 	api("GET /api/super/earlier", s.handleSuperEarlier)
 	api("GET /api/super/search", s.handleSuperSearch)

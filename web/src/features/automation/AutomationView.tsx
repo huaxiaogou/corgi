@@ -5,10 +5,11 @@ import type { DeviceView, Machine, MemorySnapshot, PendingWeComUser, Policy, Set
 import { DevicesTab } from "./DevicesTab";
 import { HooksTab } from "./HooksTab";
 import { MemoryTab } from "./MemoryTab";
+import { ProjectsTab } from "./ProjectsTab";
 import { SettingsTab } from "./SettingsTab";
 import { TimersTab } from "./TimersTab";
 
-type TabKey = "settings" | "hooks" | "memory" | "timers" | "devices";
+type TabKey = "settings" | "projects" | "hooks" | "memory" | "timers" | "devices";
 
 interface SettingsResp {
   settings: Settings;
@@ -25,6 +26,7 @@ interface SettingsResp {
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "settings", label: "模型与运行" },
+  { key: "projects", label: "项目工作区" },
   { key: "hooks", label: "企微与接入" },
   { key: "memory", label: "记忆与做梦" },
   { key: "timers", label: "定时与巡检" },
@@ -160,6 +162,9 @@ export function AutomationView({
               machines={machines}
               onSavePatch={patchSettings}
             />
+          )}
+          {tab === "projects" && settings && (
+            <ProjectsTab settings={settings} machines={machines} onSavePatch={patchSettings} />
           )}
           {tab === "hooks" && settings && (
             <HooksTab

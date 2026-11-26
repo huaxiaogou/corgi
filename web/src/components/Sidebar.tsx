@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Hash, Moon, Pin, Plus, SlidersHorizontal, Sun, X } from "lucide-react";
+import { Hash, Moon, Pin, Plus, Settings as SettingsIcon, Sun, X } from "lucide-react";
 import { api } from "../lib/api";
 import type { AgentView, Machine, SuperView } from "../types/api";
 import { AgentGlyph, CorgiMark, StatusDot } from "./CorgiMark";
@@ -169,20 +169,6 @@ export function Sidebar({
           <StatusDot status={mainPending > 0 ? "blocked" : superView?.router.status ?? "idle"} />
         </button>
 
-        <button
-          type="button"
-          onClick={() => pick({ view: "auto" })}
-          className={`w-full px-2.5 py-2 rounded-xl flex items-center gap-2.5 text-left cursor-pointer ${
-            route.view === "auto" ? "surface-active" : "surface-hover"
-          }`}
-        >
-          <SlidersHorizontal className="w-4 h-4 shrink-0 text-secondary" strokeWidth={1.7} />
-          <div className="min-w-0">
-            <div className="text-[13.5px] text-primary">自动化与设置</div>
-            <div className="text-[11px] text-muted truncate">模型 · 企微 · 记忆 · 定时 · 更新</div>
-          </div>
-        </button>
-
         <div className="pt-1">
           <UpdatePill fleetUpdate={fleetUpdate} />
         </div>
@@ -347,17 +333,35 @@ export function Sidebar({
         <HistorySection onSelectPane={(paneId) => pick({ view: "agent", paneId })} onToast={onToast} />
       </div>
 
-      <footer className="h-11 px-3.5 flex items-center justify-between text-[11.5px] border-t border-hairline text-muted shrink-0">
-        <div className="flex items-center gap-2">
+      <footer className="h-11 px-3 flex items-center justify-between text-[11.5px] border-t border-hairline text-muted shrink-0 gap-2">
+        <div className="flex items-center gap-2 min-w-0">
           <StatusDot status={connected ? "online" : "idle"} />
-          <span>
+          <span className="truncate">
             {machines.filter((m) => m.online).length}/{Math.max(machines.length, 1)} 台电脑
             {superView?.wecom_online ? " · 企微在线" : ""}
           </span>
         </div>
-        <button type="button" onClick={onToggleTheme} className="text-secondary hover:opacity-80 cursor-pointer" title="切换深浅色">
-          {dark ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
-        </button>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={onToggleTheme}
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer"
+            title="切换深浅色"
+          >
+            {dark ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+          </button>
+          <button
+            type="button"
+            onClick={() => pick({ view: "auto" })}
+            className={`w-7 h-7 rounded-lg flex items-center justify-center cursor-pointer transition-colors ${
+              route.view === "auto" ? "btn-accent" : "text-secondary surface-hover"
+            }`}
+            title="自动化与设置（模型 · 项目 · 企微 · 记忆 · 设备）"
+            aria-label="自动化与设置"
+          >
+            <SettingsIcon className="w-3.5 h-3.5" strokeWidth={1.8} />
+          </button>
+        </div>
       </footer>
     </aside>
   );

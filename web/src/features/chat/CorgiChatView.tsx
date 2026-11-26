@@ -22,12 +22,16 @@ import {
   formatByteSize,
 } from "../../lib/previewLink";
 import {
+  matchLiveWorkerForRef,
+  resolveShortMachineName,
+} from "../../lib/dispatchDefaults";
+import {
   deriveWorkItems,
   formatWorkItemPrompt,
   type DerivedWorkStatus,
   type NotebookMode,
 } from "../../lib/workItems";
-import type { Action, ArtifactSummary, ChatMessage, EndedSession, Entry, FileDrawerTarget, Machine, QueuedPrompt, Settings, SuperView, WorkItem } from "../../types/api";
+import type { Action, ArtifactSummary, ChatMessage, EndedSession, Entry, EntryWorkerRef, FileDrawerTarget, Machine, QueuedPrompt, Settings, SuperView, WorkItem } from "../../types/api";
 import { ChatHeader } from "./ChatHeader";
 import { ComposerBar } from "./ComposerBar";
 import { WorkNotebook } from "./WorkNotebook";
@@ -72,6 +76,7 @@ interface Props {
   onSelectWorker: (paneId: string) => void;
   onOpenFile: (path: string, machine?: string) => void;
   onOpenArtifact: (target: FileDrawerTarget) => void;
+  onOpenSettings?: () => void;
   onToast: (msg: string) => void;
 }
 
@@ -83,8 +88,9 @@ function artifactBadgeLabel(kind: string): string {
   return "FILE";
 }
 
-export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWorker, onOpenFile, onOpenArtifact, onToast }: Props) {
+export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWorker, onOpenFile, onOpenArtifact, onOpenSettings, onToast }: Props) {
   const [replyTo, setReplyTo] = useState<Entry | null>(null);
+  const [resumingWorkerKey, setResumingWorkerKey] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQ, setSearchQ] = useState("");
   const [searchHits, setSearchHits] = useState<{ id: string; role: string; snippet: string }[]>([]);
@@ -258,6 +264,33 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
       return;
     }
     void openHistoryMatch((s) => s.name === name);
+  };
+
+  const openWorkerRefRecord = (ref: EntryWorkerRef) => {
+    void openHistoryMatch((s) => (ref.session ? s.session === ref.session : s.name === ref.name));
+  };
+
+  const resumeWorkerRef = async (ref: EntryWorkerRef) => {
+    const key = `${ref.name}:${ref.session ?? ""}`;
+    if (resumingWorkerKey === key) return;
+    setResumingWorkerKey(key);
+    try {
+      const res = await api<{ ok: boolean; pane_id: string; resumed?: boolean; name?: string }>("/api/super/workers/resume", {
+        name: ref.name,
+        machine: ref.machine ?? "",
+        session: ref.session ?? "",
+        kind: ref.kind ?? "",
+        work_item_id: ref.work_item_id ?? "",
+      });
+      if (res.pane_id) {
+        onToast(res.resumed ? `已原地恢复 ${res.name || ref.name}` : `已切入 ${res.name || ref.name}`);
+        onSelectWorker(res.pane_id);
+      }
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "恢复会话失败");
+    } finally {
+      setResumingWorkerKey((cur) => (cur === key ? "" : cur));
+    }
   };
 
   const openHistoryMatch = async (pred: (s: EndedSession) => boolean) => {
@@ -794,8 +827,8 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                       />
                     </div>
                     {entry.artifacts && entry.artifacts.length > 0 ? (
-                      <div className="space-y-1.5 pt-1">
-                        {entry.artifacts.map((art: ArtifactSummary) => {
+                      <div className="space-y-2 pt-1">
+                        {entry.artifacts.map((art: ArtifactSummary, artIdx: number) => {
                           if (art.expired) {
                             return (
                               <div
@@ -809,16 +842,147 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                               </div>
                             );
                           }
+                          const workerRef = artIdx === 0 ? entry.worker_ref : undefined;
+                          const liveBoundWorker = workerRef ? matchLiveWorkerForRef(workerRef, data?.workers) : null;
                           const openTarget: FileDrawerTarget = {
                             artifactId: art.id,
                             name: art.name,
                             kind: art.kind,
                             shareToken: art.share_token,
+                            workerRef: entry.worker_ref,
                           };
                           const newTabHref = art.share_token
                             ? buildPublicPreviewURL(art.share_token)
                             : buildArtifactAPIURL(art.id, "raw");
                           const downloadHref = buildArtifactAPIURL(art.id, "download");
+                          const primaryLabel = art.kind === "markdown" || art.kind === "text" ? "查看完整报告" : "预览";
+                          const workerModelText = workerRef?.model
+                            ? workerRef.effort
+                              ? `${workerRef.model} · ${workerRef.effort}`
+                              : workerRef.model
+                            : "";
+                          const workerMachineText = workerRef ? resolveShortMachineName(workerRef.machine ?? "", machines) : "";
+                          const resumeKey = workerRef ? `${workerRef.name}:${workerRef.session ?? ""}` : "";
+                          const isResuming = Boolean(resumeKey && resumingWorkerKey === resumeKey);
+
+                          if (workerRef) {
+                            return (
+                              <div
+                                key={art.id}
+                                className="rounded-xl px-3.5 py-2.5 border border-strong surface-rail space-y-2.5 transition-colors"
+                              >
+                                <div className="flex items-start justify-between gap-2.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => onOpenArtifact(openTarget)}
+                                    className="flex items-start gap-2.5 min-w-0 flex-1 text-left cursor-pointer group"
+                                  >
+                                    <span className="w-8 h-8 rounded-lg surface-bg border border-hairline flex items-center justify-center shrink-0 text-[10.5px] font-semibold font-mono-code text-secondary mt-0.5">
+                                      {artifactBadgeLabel(art.kind)}
+                                    </span>
+                                    <div className="min-w-0">
+                                      <div className="text-[13px] font-medium text-primary truncate group-hover:underline">
+                                        {art.name}
+                                      </div>
+                                      <div className="text-[11px] text-muted flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mt-0.5">
+                                        <span className="font-mono-code">{formatByteSize(art.size) || "完整快照"}</span>
+                                        <span>·</span>
+                                        <span>
+                                          由 <strong className="font-medium text-secondary">{workerRef.name}</strong> 产出
+                                          {workerMachineText ? `（${workerMachineText}${workerModelText ? ` · ${workerModelText}` : ""}）` : ""}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </button>
+                                  <span
+                                    className={`text-[10.5px] px-2 py-0.5 rounded-full border shrink-0 ${
+                                      liveBoundWorker
+                                        ? "border-hairline surface-bg text-primary font-medium"
+                                        : "border-hairline surface-bg text-muted"
+                                    }`}
+                                  >
+                                    {liveBoundWorker ? "会话在线" : "已结束"}
+                                  </span>
+                                </div>
+
+                                <div className="pt-2 border-t border-hairline flex items-center justify-between gap-2 flex-wrap">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    {art.kind !== "binary" && (
+                                      <button
+                                        type="button"
+                                        onClick={() => onOpenArtifact(openTarget)}
+                                        className="px-2.5 py-1 rounded-lg btn-accent text-[11.5px] font-medium cursor-pointer"
+                                      >
+                                        {primaryLabel}
+                                      </button>
+                                    )}
+                                    {liveBoundWorker?.pane_id ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => onSelectWorker(liveBoundWorker.pane_id!)}
+                                        className="px-2.5 py-1 rounded-lg border border-strong surface-bg surface-hover text-[11.5px] font-medium text-primary cursor-pointer"
+                                      >
+                                        继续问这个 Worker →
+                                      </button>
+                                    ) : (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() => openWorkerRefRecord(workerRef)}
+                                          className="px-2.5 py-1 rounded-lg border border-strong surface-bg surface-hover text-[11.5px] font-medium text-secondary cursor-pointer"
+                                        >
+                                          查看记录
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled={isResuming}
+                                          onClick={() => void resumeWorkerRef(workerRef)}
+                                          className="px-2.5 py-1 rounded-lg border border-strong surface-bg surface-hover text-[11.5px] font-medium text-primary cursor-pointer disabled:opacity-50"
+                                        >
+                                          {isResuming ? "恢复中…" : "恢复并追问"}
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <a
+                                      href={newTabHref}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="w-7 h-7 rounded-lg border border-hairline surface-bg surface-hover flex items-center justify-center text-secondary"
+                                      title="在新标签页打开"
+                                    >
+                                      <ExternalLink className="w-3.5 h-3.5" strokeWidth={1.8} />
+                                    </a>
+                                    {art.share_token && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const full = `${window.location.origin}${buildPublicPreviewURL(art.share_token!)}`;
+                                          void navigator.clipboard
+                                            ?.writeText(full)
+                                            .then(() => onToast("已复制在线预览链接"))
+                                            .catch(() => onToast("复制失败"));
+                                        }}
+                                        className="w-7 h-7 rounded-lg border border-hairline surface-bg surface-hover flex items-center justify-center text-secondary cursor-pointer"
+                                        title="复制在线预览链接"
+                                      >
+                                        <Link2 className="w-3.5 h-3.5" strokeWidth={1.8} />
+                                      </button>
+                                    )}
+                                    <a
+                                      href={downloadHref}
+                                      className="w-7 h-7 rounded-lg border border-hairline surface-bg surface-hover flex items-center justify-center text-secondary"
+                                      title="下载原件"
+                                    >
+                                      <Download className="w-3.5 h-3.5" strokeWidth={1.8} />
+                                    </a>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          }
+
                           return (
                             <div
                               key={art.id}
@@ -848,7 +1012,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                                     onClick={() => onOpenArtifact(openTarget)}
                                     className="px-2.5 py-1 rounded-lg border border-strong surface-bg surface-hover text-[11.5px] font-medium text-primary cursor-pointer"
                                   >
-                                    预览
+                                    {primaryLabel}
                                   </button>
                                 )}
                                 <a
@@ -1099,12 +1263,14 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
         <ComposerBar
           embedded
           machines={machines}
+          dispatchDefaults={data?.dispatch_defaults}
           replyTo={replyTo}
           linkedWork={linkedWork}
           draftSeed={draftSeed}
           working={router?.status === "working"}
           stopping={stopping}
           queuedCount={effectiveQueue.length}
+          onOpenSettings={onOpenSettings}
           onStop={async () => {
             if (stopping) return;
             setStopping(true);
@@ -1120,7 +1286,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
           onClearReply={() => setReplyTo(null)}
           onClearLinkedWork={() => setLinkedWork(null)}
           onToast={onToast}
-          onSend={async ({ text, machine, kind, model, effort, clientMsgId }) => {
+          onSend={async ({ text, machine, kind, model, effort, projectId, clientMsgId }) => {
             const reId = replyTo?.id ?? "";
             const finalText = linkedWork ? formatWorkItemPrompt(linkedWork, text) : text;
             const shouldQueue = router?.status === "working" || effectiveQueue.length > 0;
@@ -1137,6 +1303,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                 kind,
                 model,
                 effort,
+                project_id: projectId,
                 client_msg_id: clientMsgId,
                 mode: shouldQueue ? "queue" : "auto",
               });

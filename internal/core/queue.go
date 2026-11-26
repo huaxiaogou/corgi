@@ -245,6 +245,7 @@ func (e *Engine) SubmitChatSay(ctx context.Context, req SayRequest, mode string)
 				Kind:        req.Kind,
 				Model:       req.Model,
 				Effort:      req.Effort,
+				ProjectID:   req.ProjectID,
 				ClientMsgID: clientMsgID,
 				CreatedAt:   time.Now(),
 			}
@@ -286,6 +287,7 @@ func (e *Engine) SteerChatPrompt(ctx context.Context, thread, qid string) (*mode
 		Kind:        item.Kind,
 		Model:       item.Model,
 		Effort:      item.Effort,
+		ProjectID:   item.ProjectID,
 		ClientMsgID: item.ClientMsgID,
 	}, true)
 	if err != nil {
@@ -481,6 +483,7 @@ func (e *Engine) drainRouterPrompts(ctx context.Context, live map[string]liveInf
 			Kind:        item.Kind,
 			Model:       item.Model,
 			Effort:      item.Effort,
+			ProjectID:   item.ProjectID,
 			ClientMsgID: item.ClientMsgID,
 		}, false); err != nil {
 			e.logger.Warn("drain router queued prompt failed", "id", item.ID, "err", err)

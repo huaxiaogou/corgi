@@ -121,13 +121,34 @@ func (s *Server) handleResumeHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.Engine != nil {
+		workID := strings.TrimSpace(target.WorkItemID)
+		modelName, effort := strings.TrimSpace(target.Model), strings.TrimSpace(target.Effort)
+		if workID == "" && target.Name != "" {
+			if old, wErr := s.Store.GetWorker(r.Context(), target.Name); wErr == nil && (old.Session == "" || old.Session == target.Session) {
+				workID = old.WorkItemID
+				if modelName == "" {
+					modelName = old.Model
+				}
+				if effort == "" {
+					effort = old.Effort
+				}
+			}
+		}
+		if workID != "" {
+			if wi, wErr := s.Store.GetWorkItem(r.Context(), workID); wErr != nil || wi.ClosedAt != nil {
+				workID = ""
+			}
+		}
 		wk, lErr := s.Engine.LaunchManaged(r.Context(), core.LaunchManagedRequest{
-			Kind:      target.Kind,
-			Machine:   target.Machine,
-			Cwd:       target.Cwd,
-			Name:      target.Name,
-			Label:     target.Title,
-			SessionID: target.Session,
+			Kind:       target.Kind,
+			Machine:    target.Machine,
+			Cwd:        target.Cwd,
+			Name:       target.Name,
+			Label:      target.Title,
+			Model:      modelName,
+			Effort:     effort,
+			SessionID:  target.Session,
+			WorkItemID: workID,
 		})
 		if lErr != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": lErr.Error()})
@@ -135,7 +156,7 @@ func (s *Server) handleResumeHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		s.markStarted(wk.PaneID)
 		_ = s.Store.ForgetEndedSession(r.Context(), target.Kind, target.Machine, target.Session)
-		writeJSON(w, http.StatusOK, map[string]any{"pane_id": wk.PaneID, "workspace_id": wk.WorkspaceID, "name": wk.Name, "worker": wk.Name})
+		writeJSON(w, http.StatusOK, map[string]any{"pane_id": wk.PaneID, "workspace_id": wk.WorkspaceID, "name": wk.Name, "worker": wk.Name, "work_item_id": wk.WorkItemID})
 		return
 	}
 

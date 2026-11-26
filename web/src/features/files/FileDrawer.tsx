@@ -10,13 +10,14 @@ import {
   fileBaseName,
   getPreviewFileKind,
 } from "../../lib/previewLink";
-import type { FileDrawerTarget, FileResponse } from "../../types/api";
+import type { EntryWorkerRef, FileDrawerTarget, FileResponse } from "../../types/api";
 import { HtmlPreviewPane } from "./HtmlPreviewPane";
 import { SplitResizer } from "./SplitResizer";
 
 interface Props {
   target: FileDrawerTarget | null;
   onClose: () => void;
+  onJumpWorker?: (ref: EntryWorkerRef) => void;
 }
 
 const WIDTH_STORAGE_KEY_HTML = "corgi.preview.width.html";
@@ -32,7 +33,7 @@ function readSavedWidth(key: string): number | null {
   }
 }
 
-export function FileDrawer({ target, onClose }: Props) {
+export function FileDrawer({ target, onClose, onJumpWorker }: Props) {
   const asideRef = useRef<HTMLElement>(null);
   const [file, setFile] = useState<FileResponse | null>(null);
   const [err, setErr] = useState("");
@@ -310,6 +311,21 @@ export function FileDrawer({ target, onClose }: Props) {
             {file && file.kind === "binary" && (
               <div className="text-muted">二进制文件，请点击右上角下载原件。</div>
             )}
+          </div>
+        )}
+        {"artifactId" in target && target.workerRef && onJumpWorker && (
+          <div className="px-3.5 py-2.5 border-t border-hairline surface-bg flex items-center justify-between gap-2 shrink-0 text-xs">
+            <span className="text-muted truncate">
+              由 <strong className="font-medium text-secondary">{target.workerRef.name}</strong> 产出
+              {target.workerRef.model ? ` · ${target.workerRef.model}` : ""}
+            </span>
+            <button
+              type="button"
+              onClick={() => onJumpWorker(target.workerRef!)}
+              className="px-2.5 py-1 rounded-lg btn-accent text-[11.5px] font-medium cursor-pointer shrink-0"
+            >
+              继续问这个 Worker →
+            </button>
           </div>
         )}
       </aside>

@@ -163,6 +163,35 @@ func (s *Store) CommitReplyTx(
 	return nil
 }
 
+// InsertArtifact persists a single standalone Hub artifact metadata row (used for worker report snapshots).
+func (s *Store) InsertArtifact(ctx context.Context, art *model.Artifact) error {
+	if art == nil {
+		return nil
+	}
+	revokedAt := int64(0)
+	if art.RevokedAt != nil && !art.RevokedAt.IsZero() {
+		revokedAt = art.RevokedAt.Unix()
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO artifacts(
+			id, entry_id, ordinal, thread, work_item_id, name, kind, mime, size,
+			source_path, source_machine, created_at, share_expires, expires_at, revoked_at
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			entry_id = CASE WHEN excluded.entry_id != '' THEN excluded.entry_id ELSE artifacts.entry_id END,
+			work_item_id = CASE WHEN excluded.work_item_id != '' THEN excluded.work_item_id ELSE artifacts.work_item_id END
+	`,
+		art.ID, art.EntryID, art.Ordinal, art.Thread, art.WorkItemID,
+		art.Name, art.Kind, art.MIME, art.Size,
+		art.SourcePath, art.SourceMachine,
+		art.CreatedAt.Unix(), art.ShareExpiresAt.Unix(), art.ExpiresAt.Unix(), revokedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("insert artifact %s: %w", art.ID, err)
+	}
+	return nil
+}
+
 // GetArtifact loads one artifact metadata record by internal ID.
 func (s *Store) GetArtifact(ctx context.Context, id string) (*model.Artifact, error) {
 	row := s.db.QueryRowContext(ctx, `

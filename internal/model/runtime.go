@@ -106,10 +106,11 @@ type QueuedPrompt struct {
 	Thread    string    `json:"thread,omitempty"`
 	Text      string    `json:"text"`
 	ReEntryID string    `json:"re,omitempty"`
-	Machine   string    `json:"machine,omitempty"`
-	Kind      string    `json:"kind,omitempty"`
+	Machine     string    `json:"machine,omitempty"`
+	Kind        string    `json:"kind,omitempty"`
 	Model       string    `json:"model,omitempty"`
 	Effort      string    `json:"effort,omitempty"`
+	ProjectID   string    `json:"project_id,omitempty"`
 	ClientMsgID string    `json:"client_msg_id,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 }
@@ -205,14 +206,17 @@ type Approval struct {
 
 // EndedSession remembers a closed agent session for review or --resume.
 type EndedSession struct {
-	ID      string    `json:"id"`
-	Kind    string    `json:"kind"`
-	Machine string    `json:"machine,omitempty"`
-	Cwd     string    `json:"cwd"`
-	Title   string    `json:"title,omitempty"`
-	Name    string    `json:"name,omitempty"`
-	Session string    `json:"session"`
-	EndedAt time.Time `json:"ended_at"`
+	ID         string    `json:"id"`
+	Kind       string    `json:"kind"`
+	Machine    string    `json:"machine,omitempty"`
+	Cwd        string    `json:"cwd"`
+	Title      string    `json:"title,omitempty"`
+	Name       string    `json:"name,omitempty"`
+	Session    string    `json:"session"`
+	WorkItemID string    `json:"work_item_id,omitempty"`
+	Model      string    `json:"model,omitempty"`
+	Effort     string    `json:"effort,omitempty"`
+	EndedAt    time.Time `json:"ended_at"`
 }
 
 // RouterView summarizes the live state of Corgi's resident Router session.
@@ -237,10 +241,24 @@ type FollowView struct {
 	NextText string    `json:"next_text"`
 }
 
+// WorkerDispatchDefaults exposes non-secret worker dispatch settings and projects directly in SuperView
+// so the chat composer always displays the exact active global default in real time.
+type WorkerDispatchDefaults struct {
+	WorkerMachine        string                                `json:"worker_machine,omitempty"`
+	WorkerKind           string                                `json:"worker_kind"`
+	WorkerModel          string                                `json:"worker_model,omitempty"`
+	WorkerEffort         string                                `json:"worker_effort,omitempty"`
+	WorkerCwd            string                                `json:"worker_cwd,omitempty"`
+	KindDefaults         map[string]ModelEffortSpec            `json:"kind_defaults,omitempty"`
+	MachineKindOverrides map[string]map[string]ModelEffortSpec `json:"machine_kind_overrides,omitempty"`
+	Projects             []ProjectWorkspace                    `json:"projects,omitempty"`
+}
+
 // SuperView is the snapshot of Super-Agent state sent to Web clients.
 type SuperView struct {
-	Router          RouterView         `json:"router"`
-	Entries         []*Entry           `json:"entries"`
+	Router           RouterView              `json:"router"`
+	DispatchDefaults *WorkerDispatchDefaults `json:"dispatch_defaults,omitempty"`
+	Entries          []*Entry                `json:"entries"`
 	Earlier         bool               `json:"earlier,omitempty"`
 	Actions         []*Action          `json:"actions"`
 	ResolvedActions map[string]*Action `json:"resolved_actions,omitempty"`

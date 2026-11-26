@@ -92,27 +92,32 @@ func (e *Engine) answerWorkerTrust(ctx context.Context, w *model.Worker, ap mode
 	return true
 }
 
-// lastWorkerSummary fetches the worker's latest assistant message from its machine's transcript
-// (via /api/panes/{id}/last for remote nodes), falling back to the last 14 terminal lines.
-func (e *Engine) lastWorkerSummary(ctx context.Context, w *model.Worker) string {
+// lastWorkerFullMessage fetches the worker's latest untruncated assistant message from its machine's
+// transcript (via /api/panes/{id}/last?full=1 for remote nodes), returning fromTranscript=true when
+// read from structured transcript logs rather than raw terminal screen fallback.
+func (e *Engine) lastWorkerFullMessage(ctx context.Context, w *model.Worker) (string, bool) {
 	if w == nil || w.PaneID == "" || e.fleet == nil {
-		return "(no output captured)"
+		return "(no output captured)", false
 	}
 	localPane, machine := fleet.SplitID(w.PaneID)
 	if machine != "" {
 		if hc, err := e.fleet.HTTPClient(machine); err == nil {
-			rctx, cancel := context.WithTimeout(ctx, 6*time.Second)
-			req, _ := http.NewRequestWithContext(rctx, http.MethodGet, "http://node/api/panes/"+url.PathEscape(localPane)+"/last", nil)
+			rctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			req, _ := http.NewRequestWithContext(rctx, http.MethodGet, "http://node/api/panes/"+url.PathEscape(localPane)+"/last?full=1", nil)
 			resp, rErr := hc.Do(req)
 			cancel()
 			if rErr == nil {
 				var out struct {
-					Text string `json:"text"`
+					Text           string `json:"text"`
+					FromTranscript bool   `json:"from_transcript"`
 				}
 				_ = json.NewDecoder(resp.Body).Decode(&out)
 				_ = resp.Body.Close()
 				if t := strings.TrimSpace(out.Text); t != "" {
-					return clipMultiline(t, 1200)
+					// Treat responses from older nodes without from_transcript as transcript-derived
+					// when they exceed a typical 14-line screen snippet.
+					fromTr := out.FromTranscript || len([]rune(t)) > 900
+					return t, fromTr
 				}
 			}
 		}
@@ -120,17 +125,27 @@ func (e *Engine) lastWorkerSummary(ctx context.Context, w *model.Worker) string 
 		if p := ad.LocateTranscript(e.home, w.Cwd, w.Session, w.CreatedAt); p != "" {
 			tr := agent.NewTranscriptReader(p, ad, "")
 			tr.OpenTail()
-			if last := tr.LastAssistant(1200); last != "" {
-				return last
+			if last := strings.TrimSpace(tr.LastAssistant(128000)); last != "" {
+				return last, true
 			}
 		}
 	}
 	if rr, err := e.fleet.Read(ctx, w.PaneID, "detection", "text", 0); err == nil {
 		if tail := agent.TailLines(rr.Text, 14); tail != "" {
-			return clipMultiline(tail, 1200)
+			return tail, false
 		}
 	}
-	return "(no output captured)"
+	return "(no output captured)", false
+}
+
+// lastWorkerSummary fetches the worker's latest assistant message from its machine's transcript
+// (via /api/panes/{id}/last for remote nodes), falling back to the last 14 terminal lines.
+func (e *Engine) lastWorkerSummary(ctx context.Context, w *model.Worker) string {
+	full, _ := e.lastWorkerFullMessage(ctx, w)
+	if full == "(no output captured)" {
+		return full
+	}
+	return clipMultiline(full, 1200)
 }
 
 // lookupRemoteSession queries a remote node's /api/titles endpoint to recover a session ID

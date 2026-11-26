@@ -11,8 +11,9 @@ import { FileDrawer } from "./features/files/FileDrawer";
 import { LauncherModal } from "./features/launcher/LauncherModal";
 import { useCorgiStream } from "./hooks/useCorgiStream";
 import { useFleetUpdate } from "./hooks/useFleetUpdate";
-import { onWebBuildChange } from "./lib/api";
-import type { FileDrawerTarget } from "./types/api";
+import { api, onWebBuildChange } from "./lib/api";
+import { matchLiveWorkerForRef } from "./lib/dispatchDefaults";
+import type { EntryWorkerRef, FileDrawerTarget } from "./types/api";
 
 export function App() {
   const [route, setRoute] = useState<AppRoute>({ view: "corgi", thread: "chat:main" });
@@ -73,6 +74,29 @@ export function App() {
   const pendingCount = (superView?.actions ?? []).filter((a) => a.status === "pending").length;
   const selectedPane =
     route.view === "agent" ? [...allAgents, ...shells].find((p) => p.pane_id === route.paneId) ?? null : null;
+
+  const jumpToWorkerRef = async (ref: EntryWorkerRef) => {
+    const live = matchLiveWorkerForRef(ref, superView?.workers);
+    if (live?.pane_id) {
+      selectRoute({ view: "agent", paneId: live.pane_id });
+      return;
+    }
+    try {
+      const res = await api<{ ok: boolean; pane_id: string; resumed?: boolean; name?: string }>("/api/super/workers/resume", {
+        name: ref.name,
+        machine: ref.machine ?? "",
+        session: ref.session ?? "",
+        kind: ref.kind ?? "",
+        work_item_id: ref.work_item_id ?? "",
+      });
+      if (res.pane_id) {
+        toast(res.resumed ? `已原地恢复 ${res.name || ref.name}` : `已切入 ${res.name || ref.name}`);
+        selectRoute({ view: "agent", paneId: res.pane_id });
+      }
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "打开该 Worker 会话失败");
+    }
+  };
 
   return (
     <div className="h-full flex flex-col overflow-hidden surface-bg text-primary">
@@ -157,6 +181,7 @@ export function App() {
               onSelectWorker={(paneId) => selectRoute({ view: "agent", paneId })}
               onOpenFile={(p, m) => setFileTarget({ path: p, machine: m })}
               onOpenArtifact={(a) => setFileTarget(a)}
+              onOpenSettings={() => selectRoute({ view: "auto" })}
               onToast={toast}
             />
           )}
@@ -173,7 +198,7 @@ export function App() {
             />
           )}
           {route.view === "auto" && <AutomationView fleetUpdate={fleetUpdate} onToast={toast} />}
-          <FileDrawer target={fileTarget} onClose={() => setFileTarget(null)} />
+          <FileDrawer target={fileTarget} onClose={() => setFileTarget(null)} onJumpWorker={(ref) => void jumpToWorkerRef(ref)} />
         </main>
       </div>
 
