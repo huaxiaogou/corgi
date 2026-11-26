@@ -136,8 +136,9 @@ func (b *Bus) canSendMarkdown() bool {
 }
 
 // OnUserMessage mirrors messages typed in a Web WeCom-group channel back to that WeCom group.
+// Action-linked decision entries are skipped here because OnActionResolved pushes a structured sync receipt.
 func (b *Bus) OnUserMessage(ctx context.Context, entry *model.Entry) {
-	if entry == nil || entry.Channel != "web" || !strings.HasPrefix(entry.Thread, "wecom:") {
+	if entry == nil || entry.Channel != "web" || entry.ActionID != "" || !strings.HasPrefix(entry.Thread, "wecom:") {
 		return
 	}
 	if !b.canSendMarkdown() {
@@ -298,8 +299,34 @@ func (b *Bus) OnActionCreated(ctx context.Context, action *model.Action) {
 	}
 }
 
-func (b *Bus) OnActionResolved(_ context.Context, _ *model.Action) {
-	// WeCom card in-place refresh happens in HandleWeComCardClick; Web updates via OnStateChanged.
+// OnActionResolved synchronizes non-WeCom action resolutions (Web, CLI, Router, dismiss, snooze)
+// back to WeCom immediately via a compact status receipt, bypassing quiet-mode suppression and Outbox
+// batching to match SendActionCard delivery. WeCom Smart Bot WSS only permits in-place card mutation
+// (`aibot_respond_update_msg`) within 5s of an inbound button-click callback req_id; if the user later
+// clicks the stale card, HandleWeComCardClick still refreshes it in-place without double-executing.
+func (b *Bus) OnActionResolved(ctx context.Context, action *model.Action) {
+	if action == nil || strings.EqualFold(strings.TrimSpace(action.ResolvedBy), "wecom") {
+		return
+	}
+	if !b.canSendMarkdown() {
+		return
+	}
+	body := wecom.FormatActionResolvedMarkdown(action)
+	if body == "" {
+		return
+	}
+	b.mu.Lock()
+	send := b.sendFn
+	b.mu.Unlock()
+	if send == nil {
+		return
+	}
+	chatID := threadToWeComChat(action.Thread)
+	sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := send(sctx, chatID, body); err != nil {
+		b.logger.Warn("sync resolved action status to wecom failed", "action", action.ID, "status", action.Status, "err", err)
+	}
 }
 
 // HandleWeComMessage bridges an allowlisted WeCom message (and any media attachments) into Engine.Say.

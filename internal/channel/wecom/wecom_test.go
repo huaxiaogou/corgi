@@ -744,6 +744,98 @@ func TestBuildResolvedActionCard(t *testing.T) {
 	if expCard["replace_text"] != "已关闭" {
 		t.Fatalf("unexpected dismissed replace_text: %+v", expCard["replace_text"])
 	}
+
+	snoozeAt := time.Date(2026, 11, 27, 9, 0, 0, 0, time.Local)
+	snoozed := &model.Action{ID: "a44", Status: model.ActionSnoozed, Title: "晨间巡检摘要", SnoozeUntil: &snoozeAt}
+	snzCard := BuildResolvedActionCard(snoozed, "a44")
+	if snzSrc, _ := snzCard["source"].(map[string]any); snzSrc["desc"] != "Corgi · 已暂缓" {
+		t.Fatalf("unexpected snoozed source: %+v", snzSrc)
+	}
+	if snzCard["replace_text"] != "暂缓至 11-27 09:00" {
+		t.Fatalf("unexpected snoozed replace_text: %+v", snzCard["replace_text"])
+	}
+	snzHoriz, _ := snzCard["horizontal_content_list"].([]map[string]any)
+	if len(snzHoriz) < 2 || snzHoriz[0]["value"] != "已暂缓" || snzHoriz[1]["value"] != "11-27 09:00" {
+		t.Fatalf("unexpected snoozed horizontal_content_list: %+v", snzHoriz)
+	}
+
+	escAct := &model.Action{
+		ID:           "a45",
+		Kind:         model.ActionKindWorkerDialog,
+		TargetWorker: "db-migrator",
+		Title:        "执行危险迁移？",
+		Status:       model.ActionResolved,
+		ResolvedBy:   "web",
+		ChosenKey:    "esc",
+		ChosenLabel:  "取消 (Esc)",
+	}
+	escCard := BuildResolvedActionCard(escAct, "a45")
+	if escSrc, _ := escCard["source"].(map[string]any); escSrc["desc"] != "Corgi · 已取消" {
+		t.Fatalf("unexpected esc source: %+v", escSrc)
+	}
+	if escCard["replace_text"] != "已取消" {
+		t.Fatalf("unexpected esc replace_text: %+v", escCard["replace_text"])
+	}
+}
+
+func TestFormatActionResolvedMarkdown(t *testing.T) {
+	snoozeAt := time.Date(2026, 11, 27, 9, 0, 0, 0, time.Local)
+	cases := []struct {
+		name      string
+		action    *model.Action
+		wantParts []string
+	}{
+		{
+			name: "web preset choice",
+			action: &model.Action{
+				ID: "a1", Title: "是否启动灰度发布？", Status: model.ActionResolved,
+				ResolvedBy: "web", ChosenKey: "1", ChosenLabel: "立即灰度发布",
+			},
+			wantParts: []string{"已拍板（Web 控制台）", "立即灰度发布", "> 原问题：是否启动灰度发布？"},
+		},
+		{
+			name: "web custom answer",
+			action: &model.Action{
+				ID: "a2", Title: "多用户接入方向？", Status: model.ActionResolved,
+				ResolvedBy: "web", ChosenKey: "custom", ChosenLabel: "先做单实例隔离调研",
+			},
+			wantParts: []string{"自定义回答（Web 控制台）", "先做单实例隔离调研", "> 原问题：多用户接入方向？"},
+		},
+		{
+			name: "web worker dialog esc",
+			action: &model.Action{
+				ID: "a3", Kind: model.ActionKindWorkerDialog, TargetWorker: "db-migrator",
+				Title: "确认执行 DROP TABLE？", Status: model.ActionResolved,
+				ResolvedBy: "web", ChosenKey: "esc", ChosenLabel: "取消 (Esc)",
+			},
+			wantParts: []string{"已取消（Web 控制台）", "db-migrator", "取消 (Esc)", "> 原问题：确认执行 DROP TABLE？"},
+		},
+		{
+			name: "dismissed action",
+			action: &model.Action{
+				ID: "a4", Title: "旧巡检卡片", Status: model.ActionExpired, ResolvedBy: "dismiss",
+			},
+			wantParts: []string{"已关闭", "已忽略该待办", "> 原问题：旧巡检卡片"},
+		},
+		{
+			name: "snoozed action",
+			action: &model.Action{
+				ID: "a5", Title: "未合分支确认", Status: model.ActionSnoozed, SnoozeUntil: &snoozeAt,
+			},
+			wantParts: []string{"已暂缓", "11-27 09:00", "> 原问题：未合分支确认"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FormatActionResolvedMarkdown(tc.action)
+			for _, part := range tc.wantParts {
+				if !strings.Contains(got, part) {
+					t.Fatalf("FormatActionResolvedMarkdown() = %q, missing %q", got, part)
+				}
+			}
+		})
+	}
 }
 
 func TestCardClickUpdateAndNonFatalCommandError(t *testing.T) {

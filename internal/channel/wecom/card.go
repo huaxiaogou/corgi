@@ -106,10 +106,19 @@ func BuildResolvedActionCard(a *model.Action, taskID string) map[string]any {
 	tid := sanitizeTaskID(firstNonEmpty(taskID, a.ID))
 
 	expired := a.Status == model.ActionExpired
+	snoozed := a.Status == model.ActionSnoozed
+	isEsc := a.Status == model.ActionResolved && strings.EqualFold(strings.TrimSpace(a.ChosenKey), "esc")
+	isCustom := a.Status == model.ActionResolved && strings.EqualFold(strings.TrimSpace(a.ChosenKey), "custom")
+
 	sourceDesc := "Corgi · 已拍板"
 	statusText := "已拍板"
 	btnText := "已拍板"
-	if expired {
+	switch {
+	case snoozed:
+		sourceDesc = "Corgi · 已暂缓"
+		statusText = "已暂缓"
+		btnText = "已暂缓"
+	case expired:
 		if a.ResolvedBy == "dismiss" {
 			sourceDesc = "Corgi · 已关闭"
 			statusText = "已关闭"
@@ -119,14 +128,25 @@ func BuildResolvedActionCard(a *model.Action, taskID string) map[string]any {
 			statusText = "已失效"
 			btnText = "已失效"
 		}
+	case isEsc:
+		sourceDesc = "Corgi · 已取消"
+		statusText = "已取消"
+		btnText = "已取消"
 	}
 
 	title, _, body, _ := shapeCardCopy(a, len(a.Choices))
 	channelName := formatResolvedChannel(a.ResolvedBy)
 	mainDesc := statusText
-	if expired {
+	switch {
+	case snoozed:
+		if a.SnoozeUntil != nil {
+			mainDesc = "已暂缓 · " + a.SnoozeUntil.Format("01-02 15:04") + " 再提醒"
+		} else {
+			mainDesc = "已暂缓提醒"
+		}
+	case expired:
 		mainDesc = statusText + " · 无需再处理"
-	} else if channelName != "" {
+	case channelName != "":
 		mainDesc = statusText + " · " + channelName
 	}
 
@@ -134,13 +154,25 @@ func BuildResolvedActionCard(a *model.Action, taskID string) map[string]any {
 	horiz := []map[string]any{
 		{"keyname": "状态", "value": statusText},
 	}
-	if chosen != "" {
+	if snoozed && a.SnoozeUntil != nil {
 		horiz = append(horiz, map[string]any{
-			"keyname": "已选择",
+			"keyname": "再次提醒",
+			"value":   a.SnoozeUntil.Format("01-02 15:04"),
+		})
+	}
+	if !snoozed && !expired && chosen != "" {
+		keyName := "已选择"
+		if isCustom {
+			keyName = "自定义回答"
+		} else if isEsc {
+			keyName = "操作结果"
+		}
+		horiz = append(horiz, map[string]any{
+			"keyname": keyName,
 			"value":   clipRunes(chosen, cardHorizValueMaxRunes),
 		})
 	}
-	if channelName != "" && !expired {
+	if channelName != "" && !expired && !snoozed {
 		horiz = append(horiz, map[string]any{
 			"keyname": "处理渠道",
 			"value":   clipRunes(channelName, cardHorizValueMaxRunes),
@@ -154,7 +186,10 @@ func BuildResolvedActionCard(a *model.Action, taskID string) map[string]any {
 	}
 
 	replaceText := statusText
-	if !expired && chosen != "" {
+	switch {
+	case snoozed && a.SnoozeUntil != nil:
+		replaceText = clipRunes("暂缓至 "+a.SnoozeUntil.Format("01-02 15:04"), cardReplaceTextMaxRunes)
+	case !expired && !snoozed && !isEsc && chosen != "":
 		replaceText = clipRunes("已选："+chosen, cardReplaceTextMaxRunes)
 	}
 

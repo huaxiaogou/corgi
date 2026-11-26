@@ -387,3 +387,251 @@ func TestHandleWeComCardClickResolvesAndUpdatesCard(t *testing.T) {
 		t.Fatalf("second click must not create duplicate reply entries: before=%d after=%d", len(entries), len(entries2))
 	}
 }
+
+func TestWebActionResolutionSyncsToWeComAndStaleCardRefresh(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"claude"})
+	eng, err := core.NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type wsFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers map[string]any `json:"headers"`
+		Body    map[string]any `json:"body"`
+	}
+	cardCh := make(chan wsFrame, 8)
+	mdCh := make(chan wsFrame, 8)
+	updateCh := make(chan wsFrame, 8)
+	serverConnCh := make(chan *websocket.Conn, 1)
+
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+		select {
+		case serverConnCh <- conn:
+		default:
+		}
+		for {
+			_, data, err := conn.Read(r.Context())
+			if err != nil {
+				return
+			}
+			var f wsFrame
+			if json.Unmarshal(data, &f) != nil {
+				continue
+			}
+			reqID, _ := f.Headers["req_id"].(string)
+			switch f.Cmd {
+			case "aibot_send_msg":
+				if f.Body["msgtype"] == "template_card" {
+					cardCh <- f
+				} else if f.Body["msgtype"] == "markdown" {
+					mdCh <- f
+				}
+				ack, _ := json.Marshal(map[string]any{
+					"headers": map[string]any{"req_id": reqID},
+					"errcode": 0,
+					"errmsg":  "ok",
+				})
+				_ = conn.Write(r.Context(), websocket.MessageText, ack)
+			case "aibot_respond_update_msg":
+				updateCh <- f
+				ack, _ := json.Marshal(map[string]any{
+					"headers": map[string]any{"req_id": reqID},
+					"errcode": 0,
+					"errmsg":  "ok",
+				})
+				_ = conn.Write(r.Context(), websocket.MessageText, ack)
+			}
+		}
+	}))
+	defer wsSrv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var bus *Bus
+	wc := wecom.NewClient(wecom.Config{
+		GatewayURL: "ws" + strings.TrimPrefix(wsSrv.URL, "http"),
+		BotID:      "bot-1",
+		Secret:     "sec-1",
+		AllowUsers: []string{"owner_01"},
+		DefaultTo:  "owner_01",
+	}, wecom.Handlers{
+		OnCardClick: func(c context.Context, ev wecom.CardClickEvent) { bus.HandleWeComCardClick(c, ev) },
+	}, nil)
+	bus = NewBus(eng, wc, nil)
+	go wc.Run(ctx)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !wc.Online() && time.Now().Before(deadline) {
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !wc.Online() {
+		t.Fatal("wecom client did not come online")
+	}
+	srvConn := <-serverConnCh
+
+	// Keep Web actively seen in quiet mode — status sync must STILL reach WeCom immediately.
+	bus.RecordWebSeen()
+
+	// 1. Resolve from Web -> WeCom immediately gets Markdown sync receipt.
+	_, act1, _, err := eng.Reply(ctx, model.MainThread, "是否启动灰度发布？", "", []string{"立即灰度", "暂缓发布"}, false)
+	if err != nil || act1 == nil {
+		t.Fatalf("eng.Reply 1 failed: %v", err)
+	}
+	<-cardCh
+	if _, err := eng.ResolveAction(ctx, act1.ID, "web", "2"); err != nil {
+		t.Fatalf("ResolveAction from web failed: %v", err)
+	}
+	select {
+	case m := <-mdCh:
+		md, _ := m.Body["markdown"].(map[string]any)
+		content, _ := md["content"].(string)
+		if !strings.Contains(content, "Web 控制台") || !strings.Contains(content, "暂缓发布") || !strings.Contains(content, "是否启动灰度发布") {
+			t.Fatalf("unexpected web-resolve sync markdown: %q", content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for WeCom sync markdown after Web resolve")
+	}
+
+	// 2. Clicking the stale WeCom card later refreshes it in-place with original Web choice without double-recording.
+	staleClick, _ := json.Marshal(map[string]any{
+		"cmd":     "aibot_event_callback",
+		"headers": map[string]any{"req_id": "cb-stale-web-1"},
+		"body": map[string]any{
+			"chattype": "single",
+			"from":     map[string]any{"userid": "owner_01"},
+			"event": map[string]any{
+				"eventtype": "template_card_event",
+				"template_card_event": map[string]any{
+					"task_id":   act1.ID,
+					"event_key": act1.ID + ":1",
+				},
+			},
+		},
+	})
+	if err := srvConn.Write(ctx, websocket.MessageText, staleClick); err != nil {
+		t.Fatalf("write stale click: %v", err)
+	}
+	select {
+	case upd := <-updateCh:
+		tc, _ := upd.Body["template_card"].(map[string]any)
+		mt, _ := tc["main_title"].(map[string]any)
+		if rt, _ := tc["replace_text"].(string); !strings.Contains(rt, "暂缓发布") {
+			t.Fatalf("stale card refresh should show original Web choice, got replace_text=%q", rt)
+		}
+		if desc, _ := mt["desc"].(string); !strings.Contains(desc, "Web 控制台") {
+			t.Fatalf("stale card refresh should show Web 控制台, got desc=%q", desc)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stale card refresh")
+	}
+
+	// 3. Web custom answer + dismiss + snooze all sync immediately to WeCom.
+	_, act2, _, err := eng.Reply(ctx, model.MainThread, "多用户接入方向？", "", []string{"个人用", "共享服务"}, false)
+	if err != nil || act2 == nil {
+		t.Fatalf("eng.Reply 2 failed: %v", err)
+	}
+	<-cardCh
+	if _, err := eng.ResolveActionCustom(ctx, act2.ID, "web", "先研究单实例隔离"); err != nil {
+		t.Fatalf("ResolveActionCustom failed: %v", err)
+	}
+	select {
+	case m := <-mdCh:
+		md, _ := m.Body["markdown"].(map[string]any)
+		content, _ := md["content"].(string)
+		if !strings.Contains(content, "自定义回答") || !strings.Contains(content, "先研究单实例隔离") {
+			t.Fatalf("unexpected custom-answer sync markdown: %q", content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for custom-answer WeCom sync")
+	}
+
+	_, act3, _, err := eng.Reply(ctx, model.MainThread, "是否归档旧会话？", "", []string{"归档", "保留"}, false)
+	if err != nil || act3 == nil {
+		t.Fatalf("eng.Reply 3 failed: %v", err)
+	}
+	<-cardCh
+	if _, err := eng.SnoozeAction(ctx, act3.ID, time.Date(2026, 11, 27, 9, 0, 0, 0, time.Local)); err != nil {
+		t.Fatalf("SnoozeAction failed: %v", err)
+	}
+	select {
+	case m := <-mdCh:
+		md, _ := m.Body["markdown"].(map[string]any)
+		content, _ := md["content"].(string)
+		if !strings.Contains(content, "已暂缓") || !strings.Contains(content, "11-27 09:00") {
+			t.Fatalf("unexpected snooze sync markdown: %q", content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for snooze WeCom sync")
+	}
+
+	// Clicking stale snoozed WeCom card renders "Corgi · 已暂缓", never "已拍板".
+	snoozedClick, _ := json.Marshal(map[string]any{
+		"cmd":     "aibot_event_callback",
+		"headers": map[string]any{"req_id": "cb-stale-snooze"},
+		"body": map[string]any{
+			"chattype": "single",
+			"from":     map[string]any{"userid": "owner_01"},
+			"event": map[string]any{
+				"eventtype": "template_card_event",
+				"template_card_event": map[string]any{
+					"task_id":   act3.ID,
+					"event_key": act3.ID + ":1",
+				},
+			},
+		},
+	})
+	if err := srvConn.Write(ctx, websocket.MessageText, snoozedClick); err != nil {
+		t.Fatalf("write snoozed click: %v", err)
+	}
+	select {
+	case upd := <-updateCh:
+		tc, _ := upd.Body["template_card"].(map[string]any)
+		src, _ := tc["source"].(map[string]any)
+		if src["desc"] != "Corgi · 已暂缓" || tc["replace_text"] != "暂缓至 11-27 09:00" {
+			t.Fatalf("stale snoozed card mismatch: %+v", tc)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stale snoozed card refresh")
+	}
+
+	// 4. Group thread Web resolution sends exactly ONE receipt (no duplicate from OnUserMessage).
+	_, grpAct, _, err := eng.Reply(ctx, "wecom:grp-99", "群任务确认？", "", []string{"通过", "打回"}, false)
+	if err != nil || grpAct == nil {
+		t.Fatalf("eng.Reply group failed: %v", err)
+	}
+	<-cardCh
+	if _, err := eng.ResolveAction(ctx, grpAct.ID, "web", "1"); err != nil {
+		t.Fatalf("ResolveAction group failed: %v", err)
+	}
+	select {
+	case m := <-mdCh:
+		if m.Body["chatid"] != "grp-99" {
+			t.Fatalf("expected group chatid grp-99, got %+v", m.Body)
+		}
+		md, _ := m.Body["markdown"].(map[string]any)
+		if content, _ := md["content"].(string); !strings.Contains(content, "已拍板（Web 控制台）") || !strings.Contains(content, "通过") {
+			t.Fatalf("unexpected group sync markdown: %q", content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for group WeCom sync")
+	}
+	select {
+	case dup := <-mdCh:
+		t.Fatalf("expected single sync message for group Web resolve, got duplicate: %+v", dup.Body)
+	case <-time.After(80 * time.Millisecond):
+	}
+}

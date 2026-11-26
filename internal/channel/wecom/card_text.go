@@ -316,3 +316,56 @@ func firstNonEmpty(vals ...string) string {
 	}
 	return ""
 }
+
+// FormatActionResolvedMarkdown builds a concise WeCom status-sync receipt for an Action resolved,
+// dismissed, or snoozed outside WeCom (e.g. Web console). WeCom Smart Bot WebSocket does not allow
+// mutating an unclicked template_card in-place without an inbound callback req_id, so this receipt
+// immediately communicates the settled state in the chat thread.
+func FormatActionResolvedMarkdown(a *model.Action) string {
+	if a == nil {
+		return ""
+	}
+	question := clipRunes(collapseSpaces(firstNonEmpty(a.Title, a.Summary)), 80)
+	worker := collapseSpaces(a.TargetWorker)
+	channel := formatResolvedChannel(a.ResolvedBy)
+	chosen := clipRunes(collapseSpaces(firstNonEmpty(a.ChosenLabel, a.ChosenKey)), 180)
+
+	var head string
+	switch a.Status {
+	case model.ActionSnoozed:
+		if a.SnoozeUntil != nil {
+			head = fmt.Sprintf("**已暂缓**：将于 %s 再次提醒（无需在上方卡片重复操作）", a.SnoozeUntil.Format("01-02 15:04"))
+		} else {
+			head = "**已暂缓**：已暂缓该待办提醒"
+		}
+	case model.ActionExpired:
+		if a.ResolvedBy == "dismiss" {
+			head = "**已关闭**：已忽略该待办（无需在上方卡片重复操作）"
+		} else {
+			head = "**已失效**：该待办已关闭"
+		}
+	default:
+		source := ""
+		if channel != "" {
+			source = "（" + channel + "）"
+		}
+		switch {
+		case strings.EqualFold(strings.TrimSpace(a.ChosenKey), "esc"):
+			if worker != "" {
+				head = fmt.Sprintf("**已取消%s** · 已向 `%s` 发送取消 (Esc)", source, worker)
+			} else {
+				head = fmt.Sprintf("**已取消%s**：已取消 (Esc)", source)
+			}
+		case strings.EqualFold(strings.TrimSpace(a.ChosenKey), "custom"):
+			head = fmt.Sprintf("**已拍板 · 自定义回答%s**：%s", source, chosen)
+		case worker != "":
+			head = fmt.Sprintf("**已拍板%s** · `%s`：%s", source, worker, chosen)
+		default:
+			head = fmt.Sprintf("**已拍板%s**：%s", source, chosen)
+		}
+	}
+	if question != "" {
+		return head + "\n> 原问题：" + question
+	}
+	return head
+}
