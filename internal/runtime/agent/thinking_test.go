@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -67,4 +69,28 @@ func TestParseThinkingAcrossAllAdapters(t *testing.T) {
 			t.Fatalf("expected encrypted-only codex reasoning ignored, got ok=%v msgs=%+v", ok, msgs)
 		}
 	})
+}
+
+func TestLastAssistantAfterLastUserDoesNotLeakStaleTurn(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "session.jsonl")
+	before := `{"type":"message","role":"user","content":[{"type":"input_text","text":"old q"}]}` + "\n" +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"stale answer from hours ago"}]}` + "\n" +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"new direct question"}]}` + "\n"
+	if err := os.WriteFile(p, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewTranscriptReader(p, &CodeBuddyAdapter{}, "")
+	tr.OpenTail()
+	if txt, ok := tr.LastAssistantAfterLastUser(128000); ok || txt != "" {
+		t.Fatalf("expected no reply after latest user turn, got ok=%v txt=%q", ok, txt)
+	}
+
+	after := before + `{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fresh answer"}]}` + "\n"
+	if err := os.WriteFile(p, []byte(after), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tr.Poll()
+	if txt, ok := tr.LastAssistantAfterLastUser(128000); !ok || txt != "fresh answer" {
+		t.Fatalf("expected fresh answer after latest user turn, got ok=%v txt=%q", ok, txt)
+	}
 }

@@ -96,8 +96,16 @@ func (e *Engine) answerWorkerTrust(ctx context.Context, w *model.Worker, ap mode
 // transcript (via /api/panes/{id}/last?full=1 for remote nodes), returning fromTranscript=true when
 // read from structured transcript logs rather than raw terminal screen fallback.
 func (e *Engine) lastWorkerFullMessage(ctx context.Context, w *model.Worker) (string, bool) {
+	full, fromTr, _ := e.lastWorkerFullMessageDetailed(ctx, w)
+	return full, fromTr
+}
+
+// lastWorkerFullMessageDetailed additionally reports afterLastUser=true when the transcript contains
+// an assistant reply written strictly after the most recent user message (false when the transcript
+// still ends on the user prompt and no fresh answer has been written yet).
+func (e *Engine) lastWorkerFullMessageDetailed(ctx context.Context, w *model.Worker) (string, bool, bool) {
 	if w == nil || w.PaneID == "" || e.fleet == nil {
-		return "(no output captured)", false
+		return "(no output captured)", false, false
 	}
 	localPane, machine := fleet.SplitID(w.PaneID)
 	if machine != "" {
@@ -110,14 +118,17 @@ func (e *Engine) lastWorkerFullMessage(ctx context.Context, w *model.Worker) (st
 				var out struct {
 					Text           string `json:"text"`
 					FromTranscript bool   `json:"from_transcript"`
+					AfterLastUser  *bool  `json:"after_last_user"`
 				}
 				_ = json.NewDecoder(resp.Body).Decode(&out)
 				_ = resp.Body.Close()
 				if t := strings.TrimSpace(out.Text); t != "" {
-					// Treat responses from older nodes without from_transcript as transcript-derived
-					// when they exceed a typical 14-line screen snippet.
 					fromTr := out.FromTranscript || len([]rune(t)) > 900
-					return t, fromTr
+					afterUser := true
+					if out.AfterLastUser != nil {
+						afterUser = *out.AfterLastUser
+					}
+					return t, fromTr, afterUser
 				}
 			}
 		}
@@ -125,17 +136,20 @@ func (e *Engine) lastWorkerFullMessage(ctx context.Context, w *model.Worker) (st
 		if p := ad.LocateTranscript(e.home, w.Cwd, w.Session, w.CreatedAt); p != "" {
 			tr := agent.NewTranscriptReader(p, ad, "")
 			tr.OpenTail()
+			if after, ok := tr.LastAssistantAfterLastUser(128000); ok {
+				return after, true, true
+			}
 			if last := strings.TrimSpace(tr.LastAssistant(128000)); last != "" {
-				return last, true
+				return last, true, false
 			}
 		}
 	}
 	if rr, err := e.fleet.Read(ctx, w.PaneID, "detection", "text", 0); err == nil {
 		if tail := agent.TailLines(rr.Text, 14); tail != "" {
-			return tail, false
+			return tail, false, true
 		}
 	}
-	return "(no output captured)", false
+	return "(no output captured)", false, false
 }
 
 // lastWorkerSummary fetches the worker's latest assistant message from its machine's transcript

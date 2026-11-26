@@ -146,7 +146,7 @@ func TestWeComFocusReturnMainAndPickerFallback(t *testing.T) {
 		ChatType: "single",
 		ChatID:   "U1",
 		FromUser: "U1",
-		Text:     "回主对话",
+		Text:     "回主会话",
 	})
 
 	if f := bus.loadWeComFocus(ctx, key); f != nil {

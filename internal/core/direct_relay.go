@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"sort"
@@ -53,8 +55,18 @@ type WorkerPickItem struct {
 
 type pendingDirectTurn struct {
 	prompt   string
+	prevHash string
 	at       time.Time
 	callback func(ctx context.Context, res DirectTurnResult)
+}
+
+func hashTurnText(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "(no output captured)" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:12])
 }
 
 // Fleet exposes the underlying multi-machine Fleet for channel streaming helpers.
@@ -478,8 +490,10 @@ func (e *Engine) SendDirectWorkerMessage(ctx context.Context, req DirectWorkerRe
 
 	var slot *pendingDirectTurn
 	if req.OnDone != nil {
+		prevText, _ := e.lastWorkerFullMessage(ctx, w)
 		slot = &pendingDirectTurn{
 			prompt:   text,
+			prevHash: hashTurnText(prevText),
 			at:       time.Now(),
 			callback: req.OnDone,
 		}
@@ -504,6 +518,16 @@ func (e *Engine) hasDirectTurn(workerName string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return len(e.directTurns[workerName]) > 0
+}
+
+func (e *Engine) peekDirectTurn(workerName string) *pendingDirectTurn {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	q := e.directTurns[workerName]
+	if len(q) == 0 {
+		return nil
+	}
+	return q[0]
 }
 
 func (e *Engine) popDirectTurn(workerName string) *pendingDirectTurn {

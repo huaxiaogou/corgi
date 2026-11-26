@@ -62,9 +62,15 @@ func (b *Bus) saveWeComFocus(ctx context.Context, key string, f *wecomFocus) {
 }
 
 func isReturnMainCommand(text string) bool {
-	s := strings.TrimSpace(text)
-	switch strings.ToLower(s) {
-	case "回主对话", "返回主对话", "/back", "/main", "/corgi":
+	s := strings.ToLower(strings.TrimSpace(text))
+	switch s {
+	case "回主对话", "返回主对话", "回到主对话",
+		"回主会话", "返回主会话", "回到主会话",
+		"回主聊天", "返回主聊天",
+		"退出直聊", "退出",
+		"回corgi", "回 corgi", "返回corgi", "返回 corgi",
+		"回柯基", "返回柯基",
+		"/back", "/main", "/corgi", "/exit", "/q":
 		return true
 	default:
 		return false
@@ -245,11 +251,12 @@ func (b *Bus) switchWeComFocusTo(ctx context.Context, focusKey, chatID, reqID, w
 	if resumed {
 		actionVerb = "已恢复并切到"
 	}
-	msg := fmt.Sprintf("%s **%s**（`#%s` · %s · %s）。直接发消息即可，发「回主对话」返回 Corgi。", actionVerb, label, w.Name, machineLabel, w.Kind)
 	if cardEv != nil && b.wecom != nil {
-		_ = b.wecom.UpdateNavCard(ctx, cardEv.ReqID, cardEv.TaskID, "已切到："+label, "已切换", msg)
+		cardDetail := fmt.Sprintf("%s · %s · 直接发消息即可，发「回主对话」返回 Corgi。", machineLabel, w.Kind)
+		_ = b.wecom.UpdateNavCard(ctx, cardEv.ReqID, cardEv.TaskID, actionVerb+"："+label, "已切换", cardDetail)
 		return
 	}
+	msg := fmt.Sprintf("%s **%s**（`#%s` · %s · %s）。直接发消息即可，发「回主对话」返回 Corgi。", actionVerb, label, w.Name, machineLabel, w.Kind)
 	b.sendInstantWeComText(ctx, chatID, reqID, msg)
 }
 

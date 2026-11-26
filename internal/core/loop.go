@@ -349,6 +349,11 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, scan
 			if idleChanged || sessionChanged {
 				_ = e.store.UpsertWorker(ctx, w)
 			}
+			// Also check if a pending direct turn has now written a fresh assistant reply while
+			// the worker remained idle/done (e.g. fast reply or after skipping an early flicker).
+			if (li.status == "done" || li.status == "idle") && e.hasDirectTurn(w.Name) {
+				e.handleWorkerTurnDone(ctx, w)
+			}
 			continue
 		}
 		w.PaneID = li.pane
@@ -445,7 +450,7 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 }
 
 func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
-	fullText, fromTranscript := e.lastWorkerFullMessage(ctx, w)
+	fullText, fromTranscript, afterLastUser := e.lastWorkerFullMessageDetailed(ctx, w)
 	summary := fullText
 	if summary != "(no output captured)" {
 		summary = clipMultiline(fullText, 1200)
@@ -459,6 +464,16 @@ func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
 		checkAgainst += "\n" + w.LastReport
 	}
 	qErr := agent.ExtractQuotaError(screen, checkAgainst)
+	if peek := e.peekDirectTurn(w.Name); peek != nil && qErr == "" {
+		// Never leak a stale assistant reply from a previous turn while the Worker has not yet
+		// written an assistant response after the new direct prompt.
+		if fromTranscript && !afterLastUser {
+			return
+		}
+		if peek.prevHash != "" && hashTurnText(fullText) == peek.prevHash && time.Since(peek.at) < 30*time.Second {
+			return
+		}
+	}
 	dt := e.popDirectTurn(w.Name)
 	if qErr != "" {
 		if dt != nil && dt.callback != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/kiperjing/corgi/internal/model"
 )
@@ -137,6 +138,27 @@ func (tr *TranscriptReader) LastAssistant(maxRunes int) string {
 		}
 	}
 	return ""
+}
+
+// LastAssistantAfterLastUser returns the latest assistant text written strictly after the most
+// recent user message in the transcript. If the transcript currently ends on a user turn (or
+// interim thinking/tool steps) with no assistant reply yet, it returns ("", false).
+func (tr *TranscriptReader) LastAssistantAfterLastUser(maxRunes int) (string, bool) {
+	for i := len(tr.msgs) - 1; i >= 0; i-- {
+		m := tr.msgs[i]
+		if m == nil {
+			continue
+		}
+		switch m.Kind {
+		case "assistant":
+			if strings.TrimSpace(m.Text) != "" {
+				return clipText(m.Text, maxRunes), true
+			}
+		case "user":
+			return "", false
+		}
+	}
+	return "", false
 }
 
 // EarlierMessages loads up to earlierPageSize messages starting strictly before byte offset `before`.

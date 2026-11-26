@@ -533,8 +533,21 @@ func (s *Server) handleLastMessage(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if tr, _ := s.readerForPane(ctx, id); tr != nil {
 		tr.OpenTail()
+		afterText, hasAfter := tr.LastAssistantAfterLastUser(maxRunes)
+		if hasAfter {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"text":            afterText,
+				"from_transcript": true,
+				"after_last_user": true,
+			})
+			return
+		}
 		if last := tr.LastAssistant(maxRunes); last != "" {
-			writeJSON(w, http.StatusOK, map[string]any{"text": last, "from_transcript": true})
+			writeJSON(w, http.StatusOK, map[string]any{
+				"text":            last,
+				"from_transcript": true,
+				"after_last_user": false,
+			})
 			return
 		}
 	}
