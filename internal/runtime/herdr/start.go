@@ -24,17 +24,40 @@ const (
 	shellPaneUnavailable
 )
 
-type paneProcess struct {
-	PID   uint32  `json:"pid"`
-	Name  string  `json:"name"`
-	Argv0 *string `json:"argv0"`
+// PaneProcess describes one foreground process reported by herdr's pane.process_info.
+type PaneProcess struct {
+	PID     uint32   `json:"pid"`
+	Name    string   `json:"name"`
+	Argv0   *string  `json:"argv0"`
+	Argv    []string `json:"argv"`
+	Cmdline *string  `json:"cmdline"`
 }
 
-type paneProcessInfo struct {
+// PaneProcessInfo describes a pane's shell and active foreground processes.
+type PaneProcessInfo struct {
 	PaneID                   string        `json:"pane_id"`
 	ShellPID                 *uint32       `json:"shell_pid"`
 	ForegroundProcessGroupID *uint32       `json:"foreground_process_group_id"`
-	ForegroundProcesses      []paneProcess `json:"foreground_processes"`
+	ForegroundProcesses      []PaneProcess `json:"foreground_processes"`
+}
+
+// IsAtShellPrompt reports whether the pane's foreground process is its idle interactive shell.
+func (p *PaneProcessInfo) IsAtShellPrompt() bool {
+	return classifyShellProcessInfo(p) == shellPaneReady
+}
+
+type paneProcess = PaneProcess
+type paneProcessInfo = PaneProcessInfo
+
+// ProcessInfo queries herdr's pane.process_info for paneID.
+func (c *Client) ProcessInfo(ctx context.Context, paneID string) (*PaneProcessInfo, error) {
+	var r struct {
+		ProcessInfo *PaneProcessInfo `json:"process_info"`
+	}
+	if err := c.Call(ctx, "pane.process_info", map[string]any{"pane_id": paneID}, &r); err != nil {
+		return nil, err
+	}
+	return r.ProcessInfo, nil
 }
 
 // StartAgent launches an agent inside paneID.

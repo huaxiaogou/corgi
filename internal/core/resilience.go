@@ -108,6 +108,11 @@ func (e *Engine) handleRouterLifecycle(ctx context.Context, live map[string]live
 	if busySpecial {
 		return
 	}
+	if !st.AskPermissions && (li.status == "idle" || li.status == "done") {
+		if e.maybeHealRouterBypass(ctx, li, now) {
+			return
+		}
+	}
 
 	// 1. Detect Router turn completion without a reply -> check for API/quota error and retry.
 	if prev == "working" && (li.status == "idle" || li.status == "done") {

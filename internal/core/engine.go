@@ -91,36 +91,44 @@ type Engine struct {
 	home     string
 	binPath  string
 
-	mu               sync.Mutex
-	settings         model.Settings
-	policies         []model.Policy
-	routerLaunching  bool
-	routerFresh      bool
-	routerLaunchAt   time.Time
-	routerAskedAt    time.Time
-	routerRepliedAt  time.Time
-	routerPrevStatus string
-	routerRetries    int
-	routerNudged     bool
-	routerUsage      model.ContextUsage
-	routerRun        *[2]string
-	routerIdleGrace  time.Duration
-	routerLastAlive  bool
-	routerLastPane   string
-	routerLastKind   string
-	routerLastStatus string
-	routerLastSeenAt time.Time
-	routerWorkingAt  time.Time
-	routerIdleSince  time.Time
-	handover         *handoverState
-	dream            *dreamRun
-	lastScreen       map[string]screenMark
-	lastAnswer       map[string]time.Time
-	lastTrust        map[string]time.Time
-	idleCheckAt      map[string]time.Time
-	lastPatrolScan   time.Time
-	noAgent          map[string]time.Time
-	rereadTrigID     string
+	mu                      sync.Mutex
+	settings                model.Settings
+	policies                []model.Policy
+	routerLaunching         bool
+	routerFresh             bool
+	routerLaunchAt          time.Time
+	routerAskedAt           time.Time
+	routerRepliedAt         time.Time
+	routerPrevStatus        string
+	routerRetries           int
+	routerNudged            bool
+	routerUsage             model.ContextUsage
+	routerRun               *[2]string
+	routerIdleGrace         time.Duration
+	routerLastAlive         bool
+	routerLastPane          string
+	routerLastKind          string
+	routerLastStatus        string
+	routerLastSeenAt        time.Time
+	routerWorkingAt         time.Time
+	routerIdleSince         time.Time
+	handover                *handoverState
+	dream                   *dreamRun
+	lastScreen              map[string]screenMark
+	lastAnswer              map[string]time.Time
+	lastTrust               map[string]time.Time
+	idleCheckAt             map[string]time.Time
+	lastPatrolScan          time.Time
+	noAgent                 map[string]time.Time
+	healingBypass           map[string]string
+	bypassCheckedAt         map[string]time.Time
+	bypassHealFailAt        map[string]time.Time
+	bypassHealedPID         map[string]uint32
+	bypassCheckInterval     time.Duration
+	bypassExitPoll          time.Duration
+	bypassExitTimeout       time.Duration
+	bypassStartRetryTimeout time.Duration
+	rereadTrigID            string
 
 	wakeCh        chan struct{}
 	queueMu       sync.Mutex
@@ -147,25 +155,29 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		logger = slog.Default()
 	}
 	return &Engine{
-		store:         st,
-		fleet:         fl,
-		agents:        reg,
-		memory:        mem,
-		sink:          NopSink{},
-		logger:        logger,
-		corgiDir:      corgiDir,
-		home:          home,
-		binPath:       binPath,
-		settings:      settings,
-		policies:      policies,
-		lastScreen:    map[string]screenMark{},
-		lastAnswer:    map[string]time.Time{},
-		lastTrust:     map[string]time.Time{},
-		idleCheckAt:   map[string]time.Time{},
-		noAgent:       map[string]time.Time{},
-		wakeCh:        make(chan struct{}, 1),
-		pausedQueues:  map[string]bool{},
-		drainCooldown: map[string]time.Time{},
+		store:            st,
+		fleet:            fl,
+		agents:           reg,
+		memory:           mem,
+		sink:             NopSink{},
+		logger:           logger,
+		corgiDir:         corgiDir,
+		home:             home,
+		binPath:          binPath,
+		settings:         settings,
+		policies:         policies,
+		lastScreen:       map[string]screenMark{},
+		lastAnswer:       map[string]time.Time{},
+		lastTrust:        map[string]time.Time{},
+		idleCheckAt:      map[string]time.Time{},
+		noAgent:          map[string]time.Time{},
+		healingBypass:    map[string]string{},
+		bypassCheckedAt:  map[string]time.Time{},
+		bypassHealFailAt: map[string]time.Time{},
+		bypassHealedPID:  map[string]uint32{},
+		wakeCh:           make(chan struct{}, 1),
+		pausedQueues:     map[string]bool{},
+		drainCooldown:    map[string]time.Time{},
 	}, nil
 }
 
@@ -261,6 +273,11 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 			prev.RouterModel != ns.RouterModel ||
 			prev.RouterEffort != ns.RouterEffort ||
 			prev.AskPermissions != ns.AskPermissions
+		if prev.AskPermissions && !ns.AskPermissions {
+			clear(e.bypassCheckedAt)
+			clear(e.bypassHealedPID)
+			clear(e.bypassHealFailAt)
+		}
 		e.settings = ns
 	}
 	if pols != nil {

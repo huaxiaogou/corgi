@@ -250,6 +250,7 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, now 
 				w.Ended = false
 				w.Status = li.status
 				_ = e.store.UpsertWorker(ctx, w)
+				e.invalidateBypassCheck(w.PaneID)
 				_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name,
 					fmt.Sprintf("worker %s is back (herdr restored its pane; status %s).", w.Name, li.status), "", model.RouterName, w.Name)
 				e.addEvent(ctx, w.Thread, w.Name+" 回来了（herdr 恢复了其窗格）", w.Name, "info")
@@ -259,6 +260,9 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, now 
 		}
 		li, alive := live[w.Name]
 		if !alive {
+			if e.isHealingBypassWorker(w.Name, w.PaneID) {
+				continue
+			}
 			if w.Status != "starting" && w.Status != "failed" && time.Since(w.CreatedAt) > 20*time.Second {
 				w.Ended = true
 				w.Status = "gone"
@@ -271,11 +275,16 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, now 
 			}
 			continue
 		}
+		if e.isHealingBypassWorker(w.Name, li.pane) {
+			continue
+		}
 		if e.checkWorkerBareShell(ctx, w, li, now) {
 			continue
 		}
+		sessionChanged := false
 		if li.session != "" && li.session != w.Session {
 			w.Session = li.session
+			sessionChanged = true
 		}
 		// herdr reports "idle" while an agent sits on a first-run wizard or folder trust prompt.
 		if li.status == "idle" && e.shouldCheckIdleDialog(li.pane, now) {
@@ -285,6 +294,12 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, now 
 			}
 		}
 		prev := w.Status
+		if prev == "working" && (li.status == "done" || li.status == "idle") {
+			e.invalidateBypassCheck(li.pane)
+		}
+		if li.status == "idle" || li.status == "done" {
+			e.maybeHealWorkerBypass(ctx, w, li, now)
+		}
 		idleChanged := false
 		if li.status == "idle" || li.status == "done" {
 			if w.IdleSince == nil {
@@ -300,7 +315,7 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, now 
 			idleChanged = true
 		}
 		if li.status == prev && li.pane == w.PaneID {
-			if idleChanged {
+			if idleChanged || sessionChanged {
 				_ = e.store.UpsertWorker(ctx, w)
 			}
 			continue
@@ -350,6 +365,9 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 		return
 	}
 	if e.answerWorkerTrust(ctx, w, ap) {
+		return
+	}
+	if e.answerRestoredAgyEditDialog(ctx, w, ap) {
 		return
 	}
 	if pending, err := e.store.ListPendingActions(ctx); err == nil {
@@ -453,7 +471,7 @@ func (e *Engine) deliverQueued(ctx context.Context, live map[string]liveInfo) {
 			}
 			continue
 		}
-		if li.status == "blocked" || (!li.ready && li.status == "unknown") {
+		if li.status == "blocked" || (!li.ready && li.status == "unknown") || e.isHealingBypassWorker(target, li.pane) {
 			continue
 		}
 		// Human chat/wecom messages interrupt Router mid-turn; system events wait for idle.

@@ -490,7 +490,7 @@ func (e *Engine) drainPanePrompts(ctx context.Context, rawAgents []model.Agent) 
 		byPane[p.Scope] = append(byPane[p.Scope], p)
 	}
 	for paneID, items := range byPane {
-		if len(items) == 0 || e.isQueuePaused(paneID) || e.inDrainCooldown(paneID, 5*time.Second) {
+		if len(items) == 0 || e.isQueuePaused(paneID) || e.inDrainCooldown(paneID, 5*time.Second) || e.isHealingBypassPane(paneID) {
 			continue
 		}
 		st, alive := statusByPane[paneID]

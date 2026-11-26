@@ -502,3 +502,13 @@ func (f *Fleet) SendKeys(ctx context.Context, paneID string, keys ...string) err
 	}
 	return cl.SendKeys(ctx, localID, keys...)
 }
+
+// ProcessInfo queries foreground process argv/cmdline for suffixed paneID.
+func (f *Fleet) ProcessInfo(ctx context.Context, paneID string) (*herdr.PaneProcessInfo, error) {
+	localID, machine := SplitID(paneID)
+	cl, err := f.clientFor(machine)
+	if err != nil {
+		return nil, err
+	}
+	return cl.ProcessInfo(ctx, localID)
+}
