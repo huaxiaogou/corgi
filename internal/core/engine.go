@@ -134,6 +134,7 @@ type Engine struct {
 	routerLastSeenAt        time.Time
 	routerWorkingAt         time.Time
 	routerIdleSince         time.Time
+	routerTrueIdleSince     time.Time
 	handover                *handoverState
 	dream                   *dreamRun
 	lastScreen              map[string]screenMark

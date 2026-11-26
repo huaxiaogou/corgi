@@ -719,6 +719,7 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 			e.routerAskedAt = time.Now()
 		}
 		e.routerRepliedAt = time.Time{}
+		e.routerTrueIdleSince = time.Time{}
 	}
 	e.mu.Unlock()
 

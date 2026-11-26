@@ -127,6 +127,17 @@ func (e *Engine) HasQueuedRouterTriggers(ctx context.Context) bool {
 	return false
 }
 
+// RouterContinuousIdle returns how long Router has remained continuously idle/done
+// since its last working state or prompt delivery (0 while working or unknown).
+func (e *Engine) RouterContinuousIdle() time.Duration {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.routerLastAlive || e.routerTrueIdleSince.IsZero() || e.routerLastStatus == "working" {
+		return 0
+	}
+	return time.Since(e.routerTrueIdleSince)
+}
+
 // ListSelectableWorkers returns live workers first, followed by recent ended sessions that can
 // be resumed, deduplicated by name and capped to limit.
 func (e *Engine) ListSelectableWorkers(ctx context.Context, limit int) []WorkerPickItem {

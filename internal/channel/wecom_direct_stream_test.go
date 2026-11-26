@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -187,5 +188,83 @@ func TestApplyMsgPatchAndFormatProgressThink(t *testing.T) {
 	}
 	if strings.Contains(think, "旧问题") || strings.Contains(think, "旧回答") {
 		t.Fatalf("old history leaked into progress think: %q", think)
+	}
+}
+
+func TestRouterStreamNotPrematurelySealedAndCapturesFinalThink(t *testing.T) {
+	_, bus, streams, markdowns, mu := openWeComStreamTestEnv(t)
+	ctx := context.Background()
+
+	// Write a temporary CodeBuddy transcript with prior history + a fast turn's reasoning & Bash description.
+	logPath := filepath.Join(t.TempDir(), "router.jsonl")
+	initial := `{"type":"message","role":"user","content":[{"type":"input_text","text":"old question"}]}` + "\n" +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"old answer"}]}` + "\n"
+	if err := os.WriteFile(logPath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	bus.HandleWeComMessage(ctx, wecom.IncomingMessage{
+		ReqID:    "req-single-bubble",
+		MsgID:    "msg-single-1",
+		ChatType: "single",
+		ChatID:   "U1",
+		FromUser: "U1",
+		Text:     "当前有哪些事项",
+	})
+	// Duplicate MsgID retry must be ignored (no second stream!).
+	bus.HandleWeComMessage(ctx, wecom.IncomingMessage{
+		ReqID:    "req-single-bubble-dup",
+		MsgID:    "msg-single-1",
+		ChatType: "single",
+		ChatID:   "U1",
+		FromUser: "U1",
+		Text:     "当前有哪些事项",
+	})
+
+	// Attach the transcript reader baseline as Hub would, then append fast-turn reasoning + Bash call.
+	bus.mu.Lock()
+	st := bus.routerStreams[model.MainThread]
+	bus.mu.Unlock()
+	if st == nil {
+		t.Fatal("expected active router stream")
+	}
+	st.pollMu.Lock()
+	st.locateFn = func(context.Context) (string, agent.Adapter) { return logPath, &agent.CodeBuddyAdapter{} }
+	st.pollMu.Unlock()
+	st.attachLocalTranscript(ctx, true)
+
+	// Simulate mid-turn flicker calling OnRouterTurnEnd -> must NOT prematurely seal!
+	bus.OnRouterTurnEnd(ctx)
+
+	turnLines := `{"type":"message","role":"user","content":[{"type":"input_text","text":"当前有哪些事项"}]}` + "\n" +
+		`{"type":"function_call","name":"Bash","arguments":{"command":"/usr/local/bin/corgi list","description":"查看当前事项与状态"}}` + "\n" +
+		`{"type":"reasoning","content":[],"rawContent":[{"type":"reasoning_text","text":"整理 4 项待处理事项给用户"}]}` + "\n"
+	if err := os.WriteFile(logPath, []byte(initial+turnLines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	bus.OnReply(ctx, &model.Entry{
+		ID:     "e-single",
+		Thread: model.MainThread,
+		Text:   "当前有 4 项待处理。",
+	}, nil, nil)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*markdowns) != 0 {
+		t.Fatalf("expected 0 fallback markdown bubbles, got %+v", *markdowns)
+	}
+	if len(*streams) != 2 {
+		t.Fatalf("expected exactly 2 frames (init + sealed final), got %d: %+v", len(*streams), *streams)
+	}
+	fin := (*streams)[1]
+	if !fin.finish || fin.reqID != "req-single-bubble" {
+		t.Fatalf("unexpected final frame metadata: %+v", fin)
+	}
+	if !strings.Contains(fin.content, "• 查看当前事项与状态") || !strings.Contains(fin.content, "整理 4 项待处理事项给用户") {
+		t.Fatalf("expected real tool description + reasoning in final <think>, got: %q", fin.content)
+	}
+	if !strings.Contains(fin.content, "</think>\n当前有 4 项待处理。") {
+		t.Fatalf("expected final answer right after </think>, got: %q", fin.content)
 	}
 }

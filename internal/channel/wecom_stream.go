@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -24,6 +25,14 @@ type activeWeComStream struct {
 	thread    string
 	cancel    context.CancelFunc
 	startedAt time.Time
+	initThink string
+
+	pollMu       sync.Mutex
+	locateFn     func(context.Context) (string, agent.Adapter)
+	tr           *agent.TranscriptReader
+	lastPath     string
+	baseline     int
+	lastChangeAt time.Time
 }
 
 func (b *Bus) canSendStream() bool {
@@ -56,16 +65,28 @@ func (b *Bus) startRouterStream(ctx context.Context, thread, chatID, reqID strin
 
 	watchCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	sess := wecom.NewStreamSession(reqID, chatID, b.sendStreamFn)
+	initThink := "正在思考并分析你的请求…"
 	st := &activeWeComStream{
-		session:   sess,
-		chatID:    chatID,
-		thread:    thread,
-		cancel:    cancel,
-		startedAt: time.Now(),
+		session:      sess,
+		chatID:       chatID,
+		thread:       thread,
+		cancel:       cancel,
+		startedAt:    time.Now(),
+		initThink:    initThink,
+		lastChangeAt: time.Now(),
+		locateFn: func(c context.Context) (string, agent.Adapter) {
+			if b.engine == nil {
+				return "", nil
+			}
+			return b.engine.RouterTranscriptInfo(c)
+		},
 	}
 
+	// Establish the transcript baseline BEFORE ingesting the user's message so prior turns
+	// never leak into this turn's <think> block.
+	st.attachLocalTranscript(watchCtx, true)
+
 	// Send Frame 1 immediately so WeCom shows native "思考中..." within ~100ms.
-	initThink := "正在思考并分析你的请求…"
 	if err := sess.SendProgress(watchCtx, initThink, "", true); err != nil {
 		b.logger.Debug("send initial wecom router stream frame failed", "thread", thread, "err", err)
 		cancel()
@@ -76,7 +97,7 @@ func (b *Bus) startRouterStream(ctx context.Context, thread, chatID, reqID strin
 	b.routerStreams[thread] = st
 	b.mu.Unlock()
 
-	go b.watchRouterStream(watchCtx, st, initThink)
+	go b.watchRouterStream(watchCtx, st)
 	return st
 }
 
@@ -87,14 +108,16 @@ func (b *Bus) openWorkerStream(ctx context.Context, thread, chatID, reqID, worke
 	}
 	watchCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	sess := wecom.NewStreamSession(reqID, chatID, b.sendStreamFn)
-	st := &activeWeComStream{
-		session:   sess,
-		chatID:    chatID,
-		thread:    thread,
-		cancel:    cancel,
-		startedAt: time.Now(),
-	}
 	initThink := fmt.Sprintf("正在连接 #%s 并开始思考…", workerName)
+	st := &activeWeComStream{
+		session:      sess,
+		chatID:       chatID,
+		thread:       thread,
+		cancel:       cancel,
+		startedAt:    time.Now(),
+		initThink:    initThink,
+		lastChangeAt: time.Now(),
+	}
 	if err := sess.SendProgress(watchCtx, initThink, "", true); err != nil {
 		b.logger.Debug("send initial wecom worker stream frame failed", "worker", workerName, "err", err)
 		cancel()
@@ -108,8 +131,87 @@ func (b *Bus) beginWatchWorkerStream(watchCtx context.Context, st *activeWeComSt
 		return
 	}
 	initThink := fmt.Sprintf("已转发给 #%s（%s），正在思考…", workerName, machineLabel)
+	st.pollMu.Lock()
+	st.initThink = initThink
+	st.pollMu.Unlock()
 	_ = st.session.SendProgress(watchCtx, initThink, "", false)
 	go b.watchWorkerStream(watchCtx, st, workerName, initThink)
+}
+
+func (st *activeWeComStream) attachLocalTranscript(ctx context.Context, isBaseline bool) {
+	if st == nil {
+		return
+	}
+	st.pollMu.Lock()
+	loc := st.locateFn
+	curPath := st.lastPath
+	st.pollMu.Unlock()
+	if loc == nil {
+		return
+	}
+	p, ad := loc(ctx)
+	if p == "" || ad == nil || p == curPath {
+		return
+	}
+	tr := agent.NewTranscriptReader(p, ad, "")
+	tr.OpenTail()
+	tr.Poll()
+	base := 0
+	if isBaseline {
+		base = len(tr.Messages())
+	}
+	st.pollMu.Lock()
+	if st.lastPath != p {
+		st.lastPath = p
+		st.tr = tr
+		st.baseline = base
+		if !isBaseline {
+			st.lastChangeAt = time.Now()
+		}
+	}
+	st.pollMu.Unlock()
+}
+
+func (st *activeWeComStream) pollLocalThink(ctx context.Context, recheckPath bool) (think string, changed bool) {
+	if st == nil {
+		return "", false
+	}
+	if recheckPath {
+		// If a brand-new transcript file appeared mid-turn (e.g. rotated Router or newly resumed Worker),
+		// attach to it with baseline=0 so its whole turn progress is captured.
+		st.attachLocalTranscript(ctx, false)
+	}
+	st.pollMu.Lock()
+	tr := st.tr
+	base := st.baseline
+	fallback := st.initThink
+	st.pollMu.Unlock()
+	if tr == nil {
+		return "", false
+	}
+	polled := tr.Poll()
+	msgs := tr.Messages()
+	if len(msgs) < base {
+		base = 0
+		st.pollMu.Lock()
+		st.baseline = 0
+		st.pollMu.Unlock()
+	}
+	if polled {
+		st.pollMu.Lock()
+		st.lastChangeAt = time.Now()
+		st.pollMu.Unlock()
+	}
+	return formatProgressThink(sliceAfterLastUser(msgs, base), fallback), polled
+}
+
+func (st *activeWeComStream) idleSinceChange() time.Duration {
+	st.pollMu.Lock()
+	defer st.pollMu.Unlock()
+	if st.lastChangeAt.IsZero() {
+		return time.Since(st.startedAt)
+	}
+	return time.Since(st.lastChangeAt)
 }
 
 func (st *activeWeComStream) seal(ctx context.Context, think, body string) (bool, error) {
@@ -121,6 +223,13 @@ func (st *activeWeComStream) seal(ctx context.Context, think, body string) (bool
 	}
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
+	// Perform one final synchronous transcript poll before sealing so fast 2-5s turns
+	// never miss reasoning or tool steps written right before `corgi reply`.
+	if strings.TrimSpace(think) == "" {
+		if latest, _ := st.pollLocalThink(sctx, true); strings.TrimSpace(latest) != "" {
+			think = latest
+		}
+	}
 	return st.session.Finish(sctx, think, body)
 }
 
@@ -137,52 +246,19 @@ func (b *Bus) takeRouterStream(thread string) *activeWeComStream {
 	return st
 }
 
-// OnRouterTurnEnd closes any dangling Router passive stream when Router finishes a turn silently
-// without calling `corgi reply` and no further queued triggers await Router.
-func (b *Bus) OnRouterTurnEnd(ctx context.Context) {
-	if b.engine != nil && b.engine.HasQueuedRouterTriggers(ctx) {
-		return
-	}
-	b.mu.Lock()
-	var stale []*activeWeComStream
-	for thread, st := range b.routerStreams {
-		if time.Since(st.startedAt) >= 3*time.Second {
-			stale = append(stale, st)
-			delete(b.routerStreams, thread)
-		}
-	}
-	b.mu.Unlock()
-	for _, st := range stale {
-		_, _ = st.seal(ctx, "", "本轮已处理完成。")
-	}
-}
+// OnRouterTurnEnd satisfies core.ChannelSink. Passive Router streams are sealed by OnReply
+// or by watchRouterStream's continuous-idle safety guard so brief mid-turn tool flickers
+// never prematurely split a WeCom reply into two bubbles.
+func (b *Bus) OnRouterTurnEnd(context.Context) {}
 
-func (b *Bus) watchRouterStream(ctx context.Context, st *activeWeComStream, initThink string) {
+func (b *Bus) watchRouterStream(ctx context.Context, st *activeWeComStream) {
 	timer := time.NewTimer(wecom.StreamMaxDuration)
 	defer timer.Stop()
 	defer st.cancel()
 
-	var tr *agent.TranscriptReader
-	var lastPath string
-	baseline := 0
-	initLocal := func() {
-		if b.engine == nil {
-			return
-		}
-		p, ad := b.engine.RouterTranscriptInfo(ctx)
-		if p == "" || ad == nil || p == lastPath {
-			return
-		}
-		lastPath = p
-		tr = agent.NewTranscriptReader(p, ad, "")
-		tr.OpenTail()
-		tr.Poll()
-		baseline = len(tr.Messages())
-	}
-	initLocal()
-
 	tick := time.NewTicker(500 * time.Millisecond)
 	defer tick.Stop()
+	ticks := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -195,19 +271,21 @@ func (b *Bus) watchRouterStream(ctx context.Context, st *activeWeComStream, init
 			if st.session.Finished() {
 				return
 			}
-			if tr == nil {
-				initLocal()
-				continue
-			}
-			if !tr.Poll() {
-				continue
-			}
-			msgs := tr.Messages()
-			if len(msgs) < baseline {
-				baseline = 0
-			}
-			if think := formatProgressThink(msgs[baseline:], initThink); think != "" {
+			ticks++
+			recheck := ticks%4 == 0 // recheck transcript path every ~2s for newly rotated sessions
+			if think, changed := st.pollLocalThink(ctx, recheck); changed && think != "" {
 				_ = st.session.SendProgress(ctx, think, "", false)
+			}
+			// Only auto-seal a silent Router turn after prolonged, verified continuous idle
+			// (never on brief 3s tool-call flickers).
+			if b.engine != nil &&
+				time.Since(st.startedAt) >= 45*time.Second &&
+				st.idleSinceChange() >= 15*time.Second &&
+				b.engine.RouterContinuousIdle() >= 30*time.Second &&
+				!b.engine.HasQueuedRouterTriggers(ctx) {
+				b.clearRouterStreamIfMatch(st)
+				_, _ = st.seal(ctx, "", "已处理，如需进一步操作请告诉我。")
+				return
 			}
 		}
 	}
@@ -229,7 +307,6 @@ func (b *Bus) watchWorkerStream(ctx context.Context, st *activeWeComStream, work
 	defer timer.Stop()
 	defer st.cancel()
 
-	// Locate local transcript or remote Node pane.
 	var paneID, machine, localPath string
 	var ad agent.Adapter
 	if b.engine != nil {
@@ -240,31 +317,27 @@ func (b *Bus) watchWorkerStream(ctx context.Context, st *activeWeComStream, work
 		b.watchRemoteWorkerSSE(ctx, timer, st, machine, paneID, initThink)
 		return
 	}
-	b.watchLocalWorkerTranscript(ctx, timer, st, workerName, localPath, ad, initThink)
+	b.watchLocalWorkerTranscript(ctx, timer, st, workerName, localPath, ad)
 }
 
-func (b *Bus) watchLocalWorkerTranscript(ctx context.Context, timer *time.Timer, st *activeWeComStream, workerName, localPath string, ad agent.Adapter, initThink string) {
-	var tr *agent.TranscriptReader
-	lastPath := ""
-	baseline := 0
-	attach := func(p string, adapter agent.Adapter, initial bool) {
-		if p == "" || adapter == nil || p == lastPath {
-			return
+func (b *Bus) watchLocalWorkerTranscript(ctx context.Context, timer *time.Timer, st *activeWeComStream, workerName, localPath string, ad agent.Adapter) {
+	st.pollMu.Lock()
+	st.locateFn = func(c context.Context) (string, agent.Adapter) {
+		if b.engine == nil {
+			return "", nil
 		}
-		lastPath = p
-		tr = agent.NewTranscriptReader(p, adapter, "")
-		tr.OpenTail()
-		tr.Poll()
-		if initial {
-			baseline = len(tr.Messages())
-		} else {
-			baseline = 0
-		}
+		_, _, p, adapter := b.engine.WorkerTranscriptSource(c, workerName)
+		return p, adapter
 	}
-	attach(localPath, ad, true)
+	st.pollMu.Unlock()
+
+	if localPath != "" && ad != nil {
+		st.attachLocalTranscript(ctx, true)
+	}
 
 	tick := time.NewTicker(500 * time.Millisecond)
 	defer tick.Stop()
+	ticks := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -276,19 +349,9 @@ func (b *Bus) watchLocalWorkerTranscript(ctx context.Context, timer *time.Timer,
 			if st.session.Finished() {
 				return
 			}
-			if tr == nil && b.engine != nil {
-				_, _, p, adapter := b.engine.WorkerTranscriptSource(ctx, workerName)
-				attach(p, adapter, false)
-				continue
-			}
-			if tr == nil || !tr.Poll() {
-				continue
-			}
-			msgs := tr.Messages()
-			if len(msgs) < baseline {
-				baseline = 0
-			}
-			if think := formatProgressThink(sliceAfterLastUser(msgs, baseline), initThink); think != "" {
+			ticks++
+			recheck := ticks%4 == 0
+			if think, changed := st.pollLocalThink(ctx, recheck); changed && think != "" {
 				_ = st.session.SendProgress(ctx, think, "", false)
 			}
 		}
@@ -497,25 +560,70 @@ func formatToolStepLine(m *model.Message) string {
 		}
 		return ""
 	}
-	input := strings.Join(strings.Fields(strings.TrimSpace(m.Input)), " ")
-	if strings.Contains(input, "corgi spawn") {
-		return "• 正在派发 Worker…"
+	rawInput := strings.TrimSpace(m.Input)
+	desc, cmd := extractToolSummary(rawInput)
+	checkCmd := cmd
+	if checkCmd == "" {
+		checkCmd = rawInput
 	}
-	if strings.Contains(input, "corgi send") {
-		return "• 正在给 Worker 发送指令…"
-	}
-	if strings.Contains(input, "corgi reply") {
+	if strings.Contains(checkCmd, "corgi reply") {
 		return "• 正在整理回复…"
 	}
-	label := friendlyToolName(name)
-	if input != "" {
-		r := []rune(input)
-		if len(r) > 56 {
-			input = string(r[:56]) + "…"
+	if strings.Contains(checkCmd, "corgi spawn") {
+		if desc != "" {
+			return "• " + clipThinkLine(desc, 56)
 		}
-		return "• " + label + "：" + input
+		return "• 正在派发 Worker…"
+	}
+	if strings.Contains(checkCmd, "corgi send") {
+		if desc != "" {
+			return "• " + clipThinkLine(desc, 56)
+		}
+		return "• 正在给 Worker 发送指令…"
+	}
+	if desc != "" {
+		return "• " + clipThinkLine(desc, 56)
+	}
+	label := friendlyToolName(name)
+	detail := cmd
+	if detail == "" {
+		detail = strings.Join(strings.Fields(rawInput), " ")
+	}
+	if detail != "" {
+		return "• " + label + "：" + clipThinkLine(detail, 56)
 	}
 	return "• " + label
+}
+
+func extractToolSummary(raw string) (desc, detail string) {
+	if !strings.HasPrefix(raw, "{") {
+		return "", ""
+	}
+	var obj map[string]any
+	if json.Unmarshal([]byte(raw), &obj) != nil {
+		return "", ""
+	}
+	for _, k := range []string{"description", "toolSummary"} {
+		if s, ok := obj[k].(string); ok && strings.TrimSpace(s) != "" {
+			desc = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+			break
+		}
+	}
+	for _, k := range []string{"command", "CommandLine", "file_path", "path", "Path", "query", "pattern"} {
+		if s, ok := obj[k].(string); ok && strings.TrimSpace(s) != "" {
+			detail = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+			break
+		}
+	}
+	return desc, detail
+}
+
+func clipThinkLine(s string, maxRunes int) string {
+	r := []rune(strings.TrimSpace(s))
+	if len(r) <= maxRunes {
+		return string(r)
+	}
+	return string(r[:maxRunes]) + "…"
 }
 
 func friendlyToolName(name string) string {

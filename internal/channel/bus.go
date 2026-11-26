@@ -39,6 +39,7 @@ type Bus struct {
 	subs          map[chan struct{}]struct{}
 	outbox        map[string][]outboxItem
 	routerStreams map[string]*activeWeComStream
+	seenWeComMsgs map[string]time.Time
 	webSeenAt     time.Time
 	wecomActiveAt time.Time
 }
@@ -56,6 +57,7 @@ func NewBus(eng *core.Engine, wc *wecom.Client, logger *slog.Logger) *Bus {
 		subs:          map[chan struct{}]struct{}{},
 		outbox:        map[string][]outboxItem{},
 		routerStreams: map[string]*activeWeComStream{},
+		seenWeComMsgs: map[string]time.Time{},
 	}
 	if wc != nil {
 		b.sendFn = wc.SendMarkdown
@@ -599,9 +601,27 @@ func (b *Bus) OnActionResolved(ctx context.Context, action *model.Action) {
 
 // HandleWeComMessage bridges an allowlisted WeCom message (and any media attachments) into Engine.Say.
 func (b *Bus) HandleWeComMessage(ctx context.Context, msg wecom.IncomingMessage) {
+	now := time.Now()
 	b.mu.Lock()
-	b.wecomActiveAt = time.Now()
+	b.wecomActiveAt = now
 	uploadDir := b.uploadDir
+	if id := strings.TrimSpace(msg.MsgID); id != "" {
+		if b.seenWeComMsgs == nil {
+			b.seenWeComMsgs = map[string]time.Time{}
+		}
+		if _, dup := b.seenWeComMsgs[id]; dup {
+			b.mu.Unlock()
+			return
+		}
+		b.seenWeComMsgs[id] = now
+		if len(b.seenWeComMsgs) > 128 {
+			for k, ts := range b.seenWeComMsgs {
+				if now.Sub(ts) > 10*time.Minute {
+					delete(b.seenWeComMsgs, k)
+				}
+			}
+		}
+	}
 	b.mu.Unlock()
 
 	text := msg.Text

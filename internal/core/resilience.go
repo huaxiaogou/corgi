@@ -250,11 +250,7 @@ func (e *Engine) inspectRouterSilentTurn(ctx context.Context, paneID string, ret
 		e.routerAskedAt = time.Time{}
 		e.routerRetries = 0
 		e.routerRetryPending = false
-		sink := e.sink
 		e.mu.Unlock()
-		if sink != nil {
-			sink.OnRouterTurnEnd(ctx)
-		}
 		return
 	}
 

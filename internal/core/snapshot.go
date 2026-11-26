@@ -314,6 +314,14 @@ func (e *Engine) stabilizeRouterStatus(paneID, kind, rawStatus string, now time.
 		e.routerIdleSince = time.Time{}
 	}
 
+	if eff == "working" || eff == "blocked" {
+		e.routerTrueIdleSince = time.Time{}
+	} else if eff == "idle" || eff == "done" {
+		if e.routerTrueIdleSince.IsZero() {
+			e.routerTrueIdleSince = now
+		}
+	}
+
 	e.routerLastAlive = true
 	if paneID != "" {
 		e.routerLastPane = paneID
@@ -332,6 +340,7 @@ func (e *Engine) clearRouterLive() {
 	e.routerLastStatus = ""
 	e.routerWorkingAt = time.Time{}
 	e.routerIdleSince = time.Time{}
+	e.routerTrueIdleSince = time.Time{}
 	e.mu.Unlock()
 }
 
