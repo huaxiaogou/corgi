@@ -282,3 +282,50 @@ func TestRouterStreamNotPrematurelySealedAndCapturesFinalThink(t *testing.T) {
 		t.Fatalf("expected final answer right after </think>, got: %q", fin.content)
 	}
 }
+
+func TestLongSessionBeyond60MessagesStillStreamsLiveThink(t *testing.T) {
+	_, bus, _, _, _ := openWeComStreamTestEnv(t)
+	ctx := context.Background()
+
+	// Seed 80 historical messages (> TranscriptReader's 60-message sliding View window).
+	logPath := filepath.Join(t.TempDir(), "long-worker.jsonl")
+	var sb strings.Builder
+	for i := 0; i < 40; i++ {
+		sb.WriteString(`{"type":"message","role":"user","content":[{"type":"input_text","text":"hist q"}]}` + "\n")
+		sb.WriteString(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hist a"}]}` + "\n")
+	}
+	if err := os.WriteFile(logPath, []byte(sb.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st := &activeWeComStream{
+		session:   wecom.NewStreamSession("req-long", "U1", bus.sendStreamFn),
+		initThink: "初始占位",
+		locateFn:  func(context.Context) (string, agent.Adapter) { return logPath, &agent.CodeBuddyAdapter{} },
+	}
+	st.attachLocalTranscript(ctx, true)
+
+	// Before any new turn arrives, think must stay at fallback (no leaked history).
+	if think, _ := st.pollLocalThink(ctx, false); think != "初始占位" {
+		t.Fatalf("expected fallback before new turn, got: %q", think)
+	}
+
+	// Append a brand-new user turn + reasoning + tool call beyond the 60-message window.
+	sb.WriteString(`{"type":"message","role":"user","content":[{"type":"input_text","text":"太湖站点可以复用吗"}]}` + "\n")
+	sb.WriteString(`{"type":"reasoning","content":[],"rawContent":[{"type":"reasoning_text","text":"正在核对太湖应用令牌和站点复用机制"}]}` + "\n")
+	sb.WriteString(`{"type":"function_call","name":"Read","arguments":{"file_path":"/data/workbench/app/docs/self-hosting.md"}}` + "\n")
+	if err := os.WriteFile(logPath, []byte(sb.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	think, polled := st.pollLocalThink(ctx, false)
+	if !polled {
+		t.Fatal("expected pollLocalThink to detect newly appended lines")
+	}
+	if !strings.Contains(think, "正在核对太湖应用令牌和站点复用机制") || !strings.Contains(think, "读取文件：/data/workbench/app/docs/self-hosting.md") {
+		t.Fatalf("expected live reasoning + tool call beyond 60-msg window, got: %q", think)
+	}
+	if strings.Contains(think, "hist q") || strings.Contains(think, "hist a") {
+		t.Fatalf("historical messages leaked into think: %q", think)
+	}
+}

@@ -31,7 +31,7 @@ type activeWeComStream struct {
 	locateFn     func(context.Context) (string, agent.Adapter)
 	tr           *agent.TranscriptReader
 	lastPath     string
-	baseline     int
+	baselineAt   int64
 	lastChangeAt time.Time
 }
 
@@ -156,15 +156,17 @@ func (st *activeWeComStream) attachLocalTranscript(ctx context.Context, isBaseli
 	tr := agent.NewTranscriptReader(p, ad, "")
 	tr.OpenTail()
 	tr.Poll()
-	base := 0
+	baseAt := int64(-1)
 	if isBaseline {
-		base = len(tr.Messages())
+		if msgs := tr.Messages(); len(msgs) > 0 {
+			baseAt = msgs[len(msgs)-1].At
+		}
 	}
 	st.pollMu.Lock()
 	if st.lastPath != p {
 		st.lastPath = p
 		st.tr = tr
-		st.baseline = base
+		st.baselineAt = baseAt
 		if !isBaseline {
 			st.lastChangeAt = time.Now()
 		}
@@ -178,12 +180,12 @@ func (st *activeWeComStream) pollLocalThink(ctx context.Context, recheckPath boo
 	}
 	if recheckPath {
 		// If a brand-new transcript file appeared mid-turn (e.g. rotated Router or newly resumed Worker),
-		// attach to it with baseline=0 so its whole turn progress is captured.
+		// attach to it with baselineAt=-1 so its whole turn progress is captured.
 		st.attachLocalTranscript(ctx, false)
 	}
 	st.pollMu.Lock()
 	tr := st.tr
-	base := st.baseline
+	baseAt := st.baselineAt
 	fallback := st.initThink
 	st.pollMu.Unlock()
 	if tr == nil {
@@ -191,10 +193,11 @@ func (st *activeWeComStream) pollLocalThink(ctx context.Context, recheckPath boo
 	}
 	polled := tr.Poll()
 	msgs := tr.Messages()
-	if len(msgs) < base {
-		base = 0
+	if baseAt >= 0 && len(msgs) > 0 && msgs[len(msgs)-1].At < baseAt {
+		// File was truncated/rotated in-place.
+		baseAt = -1
 		st.pollMu.Lock()
-		st.baseline = 0
+		st.baselineAt = -1
 		st.pollMu.Unlock()
 	}
 	if polled {
@@ -202,7 +205,21 @@ func (st *activeWeComStream) pollLocalThink(ctx context.Context, recheckPath boo
 		st.lastChangeAt = time.Now()
 		st.pollMu.Unlock()
 	}
-	return formatProgressThink(sliceAfterLastUser(msgs, base), fallback), polled
+	recent := filterMessagesAfterOffset(msgs, baseAt)
+	return formatProgressThink(sliceAfterLastUser(recent, 0), fallback), polled
+}
+
+func filterMessagesAfterOffset(msgs []*model.Message, afterOffset int64) []*model.Message {
+	if afterOffset < 0 || len(msgs) == 0 {
+		return msgs
+	}
+	var out []*model.Message
+	for _, m := range msgs {
+		if m != nil && m.At > afterOffset {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func (st *activeWeComStream) idleSinceChange() time.Duration {
@@ -273,7 +290,7 @@ func (b *Bus) watchRouterStream(ctx context.Context, st *activeWeComStream) {
 			}
 			ticks++
 			recheck := ticks%4 == 0 // recheck transcript path every ~2s for newly rotated sessions
-			if think, changed := st.pollLocalThink(ctx, recheck); changed && think != "" {
+			if think, _ := st.pollLocalThink(ctx, recheck); think != "" {
 				_ = st.session.SendProgress(ctx, think, "", false)
 			}
 			// Only auto-seal a silent Router turn after prolonged, verified continuous idle
@@ -351,7 +368,7 @@ func (b *Bus) watchLocalWorkerTranscript(ctx context.Context, timer *time.Timer,
 			}
 			ticks++
 			recheck := ticks%4 == 0
-			if think, changed := st.pollLocalThink(ctx, recheck); changed && think != "" {
+			if think, _ := st.pollLocalThink(ctx, recheck); think != "" {
 				_ = st.session.SendProgress(ctx, think, "", false)
 			}
 		}
