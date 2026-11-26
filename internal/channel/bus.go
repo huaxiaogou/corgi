@@ -15,8 +15,9 @@ import (
 )
 
 type outboxItem struct {
-	text string
-	at   time.Time
+	text     string
+	at       time.Time
+	attempts int
 }
 
 // Bus implements core.ChannelSink, fanning out state changes to Web SSE subscribers
@@ -32,6 +33,7 @@ type Bus struct {
 	sendFileFn func(ctx context.Context, chatID, filename string, data []byte) error
 
 	mu            sync.Mutex
+	flushMu       sync.Mutex
 	subs          map[chan struct{}]struct{}
 	outbox        map[string][]outboxItem
 	webSeenAt     time.Time
@@ -324,12 +326,29 @@ func (b *Bus) sendReplyAttachments(ctx context.Context, chatID string, entry *mo
 }
 
 // FlushDue delivers coalesced Outbox messages whose buffer window has elapsed (or all when force=true).
+// Calls are serialized via flushMu so a pre-restart flush always waits for any in-flight periodic send.
 func (b *Bus) FlushDue(ctx context.Context, force bool) {
+	_ = b.flushInternal(ctx, force)
+}
+
+// FlushBeforeRestart waits for any in-flight outbox send to finish and flushes all pending batches.
+func (b *Bus) FlushBeforeRestart(ctx context.Context) error {
+	return b.flushInternal(ctx, true)
+}
+
+func (b *Bus) flushInternal(ctx context.Context, force bool) error {
+	b.flushMu.Lock()
+	defer b.flushMu.Unlock()
+
 	if !b.canSendMarkdown() {
-		return
+		return nil
 	}
 	now := time.Now()
-	ready := map[string]string{}
+	type pendingBatch struct {
+		body  string
+		items []outboxItem
+	}
+	ready := map[string]pendingBatch{}
 
 	b.mu.Lock()
 	for chatID, items := range b.outbox {
@@ -348,17 +367,38 @@ func (b *Bus) FlushDue(ctx context.Context, force bool) {
 		}
 		delete(b.outbox, chatID)
 		if len(parts) > 0 {
-			ready[chatID] = strings.Join(parts, "\n\n---\n\n")
+			ready[chatID] = pendingBatch{
+				body:  strings.Join(parts, "\n\n---\n\n"),
+				items: items,
+			}
 		}
 	}
 	send := b.sendFn
 	b.mu.Unlock()
 
-	for chatID, body := range ready {
-		if err := send(ctx, chatID, body); err != nil {
+	var firstErr error
+	for chatID, batch := range ready {
+		if err := send(ctx, chatID, batch.body); err != nil {
 			b.logger.Warn("flush outbox markdown failed", "chat_id", chatID, "err", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			// Preserve batches that haven't been retried yet so a transient error or canceled flush doesn't drop them.
+			var retryable []outboxItem
+			for _, it := range batch.items {
+				if it.attempts < 1 {
+					it.attempts++
+					retryable = append(retryable, it)
+				}
+			}
+			if len(retryable) > 0 {
+				b.mu.Lock()
+				b.outbox[chatID] = append(retryable, b.outbox[chatID]...)
+				b.mu.Unlock()
+			}
 		}
 	}
+	return firstErr
 }
 
 func (b *Bus) OnActionCreated(ctx context.Context, action *model.Action) {

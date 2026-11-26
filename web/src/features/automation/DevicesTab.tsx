@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
-import { ArrowUpCircle, RefreshCw } from "lucide-react";
+import { useEffect } from "react";
+import { ArrowUpCircle, Copy, Loader2, RefreshCw } from "lucide-react";
 import { StatusDot } from "../../components/CorgiMark";
-import { api } from "../../lib/api";
-import type { DeviceView, Machine, VersionStatus } from "../../types/api";
+import type { FleetUpdateController } from "../../hooks/useFleetUpdate";
+import { isOldVersion } from "../../lib/fleetUpdate";
+import type { DeviceView, Machine } from "../../types/api";
 
 interface PairResult {
   code: string;
@@ -14,6 +15,7 @@ interface PairResult {
 interface Props {
   devices: DeviceView[];
   machines: Machine[];
+  fleetUpdate: FleetUpdateController;
   pairResult: PairResult | null;
   onGenPair: (kind: "browser" | "machine") => Promise<void>;
   onRevoke: (id: string) => Promise<void>;
@@ -22,39 +24,33 @@ interface Props {
 
 const INSTALL_URL = "https://github.com/huaxiaogou/corgi/releases/latest/download/install.sh";
 
-export function DevicesTab({ devices, machines, pairResult, onGenPair, onRevoke, onToast }: Props) {
-  const [verInfo, setVerInfo] = useState<VersionStatus | null>(null);
-  const [updatingId, setUpdatingId] = useState<string | null>(null);
-
-  const checkVersions = (soon = false) => {
-    void api<VersionStatus>(`/api/version${soon ? "?soon=1" : ""}`)
-      .then(setVerInfo)
-      .catch(() => {});
-  };
+export function DevicesTab({ devices, machines, fleetUpdate, pairResult, onGenPair, onRevoke, onToast }: Props) {
+  const {
+    verInfo,
+    outdatedOnline,
+    latest,
+    busy,
+    phase,
+    currentId,
+    errorFor,
+    checkVersions,
+    startFleetUpdate,
+    startSingleUpdate,
+  } = fleetUpdate;
 
   useEffect(() => {
-    checkVersions(true);
-  }, []);
+    void checkVersions(true);
+  }, [checkVersions]);
 
-  const triggerUpdate = async (machineId: string, name: string) => {
-    setUpdatingId(machineId);
+  const copyCmd = async (cmd: string) => {
     try {
-      const qs = machineId ? `?machine=${encodeURIComponent(machineId)}` : "";
-      const res = await api<{ version?: string; up_to_date?: boolean }>(`/api/update${qs}`, {});
-      if (res.up_to_date) {
-        onToast(`${name} 已是最新版本`);
-      } else {
-        onToast(`${name} 已升级至 ${res.version ?? "最新版"}，正在原地热重启…`);
-        window.setTimeout(() => checkVersions(true), 3500);
-      }
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : "升级失败");
-    } finally {
-      setUpdatingId(null);
+      await navigator.clipboard.writeText(cmd);
+      onToast("已复制升级命令");
+    } catch {
+      onToast("复制失败，请手动选中复制");
     }
   };
 
-  const outdatedIds = new Set((verInfo?.outdated ?? []).map((o) => o.id));
   const joinCmd =
     pairResult && pairResult.kind === "machine"
       ? `curl -fsSL ${INSTALL_URL} | sh -s -- node --hub ${pairResult.addr} --code ${pairResult.code}`
@@ -63,7 +59,7 @@ export function DevicesTab({ devices, machines, pairResult, onGenPair, onRevoke,
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button type="button" onClick={() => void onGenPair("browser")} className="px-3.5 py-2 rounded-lg btn-accent font-medium cursor-pointer">
             连接手机 / 浏览器
           </button>
@@ -71,14 +67,37 @@ export function DevicesTab({ devices, machines, pairResult, onGenPair, onRevoke,
             连接一台新电脑 (Node)
           </button>
         </div>
-        <button
-          type="button"
-          onClick={() => checkVersions(true)}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-hairline text-secondary surface-hover cursor-pointer"
-        >
-          <RefreshCw className="w-3.5 h-3.5" />
-          <span>检查更新{verInfo?.latest ? `（最新 ${verInfo.latest}）` : ""}</span>
-        </button>
+        <div className="flex items-center gap-2">
+          {(outdatedOnline.length > 0 || busy || phase === "failed") && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void startFleetUpdate()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg btn-accent font-medium cursor-pointer disabled:opacity-60"
+            >
+              {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowUpCircle className="w-3.5 h-3.5" />}
+              <span>
+                {busy
+                  ? phase === "restarting"
+                    ? "Hub 重启中…"
+                    : phase === "reconnecting"
+                      ? "等待节点重连…"
+                      : "全端升级中…"
+                  : phase === "failed"
+                    ? "重试全端升级"
+                    : `一键升级全端 ${latest}`}
+              </span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void checkVersions(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-hairline text-secondary surface-hover cursor-pointer"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>检查更新{verInfo?.latest ? `（最新 ${verInfo.latest}）` : ""}</span>
+          </button>
+        </div>
       </div>
 
       {pairResult && (
@@ -101,30 +120,85 @@ export function DevicesTab({ devices, machines, pairResult, onGenPair, onRevoke,
         <div className="font-medium text-secondary">算力主机与版本状态</div>
         <div className="rounded-xl border border-hairline divide-y divide-[var(--line)]">
           {machines.map((m) => {
-            const needUpdate = m.online && outdatedIds.has(m.id);
+            const id = m.local ? "" : m.id;
+            const online = m.local || m.online;
+            const curVer = m.local ? m.version || verInfo?.version || "" : m.version || "";
+            const needUpdate = online && Boolean(latest) && isOldVersion(curVer, latest);
+            const isCurrent = busy && currentId === id;
+            const errMsg = errorFor(id);
+            const manualCmd = `curl -fsSL ${INSTALL_URL} | sh -s -- ${m.local ? "hub" : "node"}`;
+
             return (
-              <div key={m.id || "hub"} className="px-4 py-3 flex items-center justify-between gap-3">
-                <div className="min-w-0 space-y-0.5">
-                  <div className="flex items-center gap-2">
-                    <StatusDot status={m.online ? "online" : "idle"} />
-                    <span className="font-medium">{m.name}</span>
-                    {m.local && <span className="px-1.5 py-0.5 rounded surface-rail border border-hairline text-[10.5px] text-muted">Hub</span>}
-                    {m.version && <span className="font-mono-code text-muted">{m.version}</span>}
+              <div key={id || "hub"} className="px-4 py-3 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <StatusDot status={online ? "online" : "idle"} />
+                      <span className="font-medium">{m.name}</span>
+                      {m.local && <span className="px-1.5 py-0.5 rounded surface-rail border border-hairline text-[10.5px] text-muted">Hub</span>}
+                      {curVer && (
+                        <span className={`font-mono-code ${needUpdate ? "text-amber-600 dark:text-amber-300" : "text-muted"}`}>
+                          {needUpdate ? `${curVer} → ${latest}` : curVer}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[11px] font-mono-code text-muted truncate">
+                      {m.os} · 已装 Agent: {(m.agents ?? []).join(", ") || "无"}
+                    </div>
                   </div>
-                  <div className="text-[11px] font-mono-code text-muted truncate">
-                    {m.os} · 已装 Agent: {(m.agents ?? []).join(", ") || "无"}
-                  </div>
+                  {(needUpdate || isCurrent) && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void startSingleUpdate(id, m.name)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg btn-accent cursor-pointer shrink-0 disabled:opacity-60"
+                    >
+                      {isCurrent ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowUpCircle className="w-3.5 h-3.5" />}
+                      <span>
+                        {isCurrent
+                          ? phase === "restarting"
+                            ? "重启中…"
+                            : phase === "reconnecting"
+                              ? "重连中…"
+                              : "升级中…"
+                          : errMsg
+                            ? `重试升级 ${latest}`
+                            : `升级到 ${latest}`}
+                      </span>
+                    </button>
+                  )}
                 </div>
-                {needUpdate && verInfo?.latest && (
-                  <button
-                    type="button"
-                    disabled={updatingId === m.id}
-                    onClick={() => void triggerUpdate(m.id, m.name)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg btn-accent cursor-pointer shrink-0 disabled:opacity-50"
-                  >
-                    <ArrowUpCircle className="w-3.5 h-3.5" />
-                    <span>{updatingId === m.id ? "升级中…" : `一键升级 ${verInfo.latest}`}</span>
-                  </button>
+
+                {isCurrent && (
+                  <div className="text-[11.5px] text-secondary">
+                    {phase === "restarting"
+                      ? "新版本已就绪，Hub 正在热重启并等待页面自动刷新（运行中的 Agent 不受影响）…"
+                      : phase === "reconnecting"
+                        ? "节点已完成安装，正在等待带着新版本重新上线…"
+                        : `正在下载并校验 ${latest}（节点无法直连 GitHub 时将自动由 Hub 中转分发）…`}
+                  </div>
+                )}
+
+                {errMsg && !isCurrent && (
+                  <div className="px-2.5 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-[11.5px] text-amber-700 dark:text-amber-300">
+                    升级失败：{errMsg}
+                  </div>
+                )}
+
+                {needUpdate && (
+                  <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg surface-rail border border-hairline">
+                    <span className="font-mono-code text-[11px] text-muted truncate" title={manualCmd}>
+                      手动升级：{manualCmd}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void copyCmd(manualCmd)}
+                      title="复制手动升级命令"
+                      className="p-1 rounded text-secondary surface-hover cursor-pointer shrink-0"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 )}
               </div>
             );

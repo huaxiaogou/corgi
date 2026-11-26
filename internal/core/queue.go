@@ -440,11 +440,17 @@ func (e *Engine) drainRouterPrompts(ctx context.Context, live map[string]liveInf
 		return
 	}
 	e.mu.Lock()
-	launching := e.routerLaunching
-	e.mu.Unlock()
-	if launching {
+	if e.routerLaunching || e.hubUpdating || e.routerDispatching {
+		e.mu.Unlock()
 		return
 	}
+	e.routerDispatching = true
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.routerDispatching = false
+		e.mu.Unlock()
+	}()
 
 	if queued, err := e.store.ListQueuedTriggers(ctx); err == nil {
 		for _, t := range queued {

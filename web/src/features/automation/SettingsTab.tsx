@@ -202,6 +202,15 @@ export function SettingsTab({
           />
           <span>严格逐条确认模式（关闭默认免权限 bypass，需重启大脑与新派任务生效）</span>
         </label>
+
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={Boolean(settings.auto_update)}
+            onChange={(e) => onChange({ ...settings, auto_update: e.target.checked })}
+          />
+          <span>凌晨空闲自动更新（默认关闭；当天计划做梦完成或静默跳过后的凌晨完全空闲时段自动升全端，绝不打断做梦与任务）</span>
+        </label>
       </section>
 
       <section className="p-4 rounded-xl border border-hairline space-y-3">

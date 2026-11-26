@@ -21,6 +21,7 @@ func (e *Engine) Run(ctx context.Context) {
 	e.mu.Lock()
 	e.runCtx = ctx
 	e.mu.Unlock()
+	e.EmitPendingAutoUpdateNotice(ctx)
 	if changed, err := e.memory.WriteRouterDocsChanged(e.binPath, e.Settings()); err != nil {
 		e.logger.Warn("write router docs", "err", err)
 	} else if changed {
@@ -77,7 +78,7 @@ func (e *Engine) tick(parent context.Context) {
 		}
 	}
 
-	rawAgents, err := e.fleet.Agents(ctx)
+	rawAgents, scanned, err := e.fleet.AgentsWithScanned(ctx)
 	if err != nil {
 		return // herdr temporarily unreachable; preserve queued triggers
 	}
@@ -113,7 +114,7 @@ func (e *Engine) tick(parent context.Context) {
 	e.adoptUnmanagedAgents(ctx, rawAgents)
 
 	// 2. Sync worker states, detect bare-shell failures, create Actions on blocked dialogs or quota errors.
-	e.syncWorkers(ctx, live, now)
+	e.syncWorkers(ctx, live, scanned, now)
 
 	// 3. Guard Router against trust blocks, transient API errors, and stalled turns.
 	e.handleRouterLifecycle(ctx, live, now)
@@ -131,18 +132,21 @@ func (e *Engine) tick(parent context.Context) {
 	e.checkDream(ctx, live, hasRouterQueued)
 	e.checkHandover(ctx, live, hasRouterQueued)
 
-	if e.Settings().Paused || e.Dreaming() || e.handingOver() {
+	if e.Settings().Paused || e.Dreaming() || e.handingOver() || e.isHubUpdating() {
 		return
 	}
 
 	// 5. Drain idle main-chat queue, route/deliver triggers, and drain idle single-agent queues.
 	e.drainRouterPrompts(ctx, live)
-	e.deliverQueued(ctx, live)
+	e.deliverQueued(ctx, live, scanned)
 	e.drainPanePrompts(ctx, rawAgents)
 
 	// 6. Watchdog for stalled workers and zero-token gated idle patrol / morning digest.
 	e.checkStalls(ctx, live, now)
 	e.checkIdlePatrol(ctx, live, now)
+
+	// 7. Optional overnight idle auto-update after tonight's scheduled Dream succeeds/skips.
+	e.checkAutoUpdate(ctx, live, hasRouterQueued, now)
 }
 
 func deriveFallbackWorkerName(rawKind, paneID string) string {
@@ -259,7 +263,7 @@ func (e *Engine) adoptUnmanagedAgents(ctx context.Context, rawAgents []model.Age
 	}
 }
 
-func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, now time.Time) {
+func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, scanned map[string]bool, now time.Time) {
 	workers, err := e.store.ListWorkers(ctx)
 	if err != nil {
 		return
@@ -282,6 +286,12 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, now 
 		li, alive := live[w.Name]
 		if !alive {
 			if e.isHealingBypassWorker(w.Name, w.PaneID) {
+				continue
+			}
+			wkMachine := workerMachineID(w)
+			if scanned != nil && !scanned[wkMachine] {
+				// Machine did not complete a scan on this tick (e.g. Node restarting/reconnecting);
+				// preserve worker state and pending approvals until its machine is observed again.
 				continue
 			}
 			if w.Status != "starting" && w.Status != "failed" && time.Since(w.CreatedAt) > 20*time.Second {
@@ -456,7 +466,19 @@ func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
 	e.addEvent(ctx, w.Thread, w.Name+" 完成了一轮", w.Name, "done")
 }
 
-func (e *Engine) deliverQueued(ctx context.Context, live map[string]liveInfo) {
+func workerMachineID(w *model.Worker) string {
+	if w == nil {
+		return ""
+	}
+	if w.PaneID != "" {
+		if _, m := fleet.SplitID(w.PaneID); m != "" {
+			return m
+		}
+	}
+	return strings.TrimSpace(w.Machine)
+}
+
+func (e *Engine) deliverQueued(ctx context.Context, live map[string]liveInfo, scanned map[string]bool) {
 	queued, err := e.store.ListQueuedTriggers(ctx)
 	if err != nil || len(queued) == 0 {
 		return
@@ -488,7 +510,7 @@ func (e *Engine) deliverQueued(ctx context.Context, live map[string]liveInfo) {
 			if target == model.RouterName {
 				e.ensureRouter(ctx)
 			} else {
-				e.rerouteDeadWorkerTriggers(ctx, target, list)
+				e.rerouteDeadWorkerTriggers(ctx, target, list, scanned)
 			}
 			continue
 		}
@@ -530,9 +552,14 @@ func filterWorkerSteeringTriggers(list []*model.Trigger) []*model.Trigger {
 	return out
 }
 
-func (e *Engine) rerouteDeadWorkerTriggers(ctx context.Context, target string, list []*model.Trigger) {
-	if w, err := e.store.GetWorker(ctx, target); err == nil && !w.Ended && time.Since(w.CreatedAt) < 2*time.Minute {
-		return // still booting
+func (e *Engine) rerouteDeadWorkerTriggers(ctx context.Context, target string, list []*model.Trigger, scanned map[string]bool) {
+	if w, err := e.store.GetWorker(ctx, target); err == nil && !w.Ended {
+		if time.Since(w.CreatedAt) < 2*time.Minute {
+			return // still booting
+		}
+		if scanned != nil && !scanned[workerMachineID(w)] {
+			return // worker's machine was not scanned on this tick; keep trigger targeting this worker
+		}
 	}
 	for _, t := range list {
 		t.Targets = removeStr(t.Targets, target)
@@ -601,6 +628,21 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 		fmt.Fprintf(&b, "\nReply with `%s reply` (usually ≤%d Chinese chars / English words; for 2+ items use `- ` Markdown bullets via stdin heredoc `<<'EOF'`, never pack into one semicolon-separated line).", e.binPath, chars)
 	}
 
+	if target == model.RouterName {
+		e.mu.Lock()
+		if e.hubUpdating || e.dream != nil || e.handover != nil || e.routerDispatching {
+			e.mu.Unlock()
+			return
+		}
+		e.routerDispatching = true
+		e.mu.Unlock()
+		defer func() {
+			e.mu.Lock()
+			e.routerDispatching = false
+			e.mu.Unlock()
+		}()
+	}
+
 	promptTarget := target
 	if paneID != "" {
 		promptTarget = paneID
@@ -642,7 +684,7 @@ func (e *Engine) ensureRouter(ctx context.Context) {
 		return
 	}
 	e.mu.Lock()
-	if e.routerLaunching {
+	if e.routerLaunching || e.hubUpdating {
 		e.mu.Unlock()
 		return
 	}

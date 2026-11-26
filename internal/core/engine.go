@@ -94,11 +94,16 @@ type Engine struct {
 	corgiDir string
 	home     string
 	binPath  string
+	version  string
 
 	mu                      sync.Mutex
 	settings                model.Settings
 	policies                []model.Policy
 	routerLaunching         bool
+	routerDispatching       bool
+	hubUpdating             bool
+	autoUpdater             AutoUpdater
+	lastAutoUpdateCheck     time.Time
 	routerFresh             bool
 	routerLaunchAt          time.Time
 	routerAskedAt           time.Time
@@ -174,7 +179,7 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 			savedRouterRun = &rr
 		}
 	}
-	return &Engine{
+	eng := &Engine{
 		store:            st,
 		fleet:            fl,
 		agents:           reg,
@@ -199,7 +204,32 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		wakeCh:           make(chan struct{}, 1),
 		pausedQueues:     map[string]bool{},
 		drainCooldown:    map[string]time.Time{},
-	}, nil
+	}
+	eng.loadActiveDreamMarker(ctx)
+	return eng, nil
+}
+
+// SetAutoUpdater registers the optional overnight auto-update scheduler hook.
+func (e *Engine) SetAutoUpdater(u AutoUpdater) {
+	e.mu.Lock()
+	e.autoUpdater = u
+	e.mu.Unlock()
+}
+
+// SetVersion records the running Hub binary version for post-upgrade confirmations.
+func (e *Engine) SetVersion(v string) {
+	e.mu.Lock()
+	e.version = strings.TrimSpace(v)
+	e.mu.Unlock()
+}
+
+// PostEvent appends a concise system event entry to a thread and notifies subscribers.
+func (e *Engine) PostEvent(ctx context.Context, thread, text, ref, tone string) {
+	if thread == "" {
+		thread = model.MainThread
+	}
+	e.addEvent(ctx, thread, text, ref, tone)
+	e.notifyChanged()
 }
 
 // SetSink attaches the channel notification sink (Web SSE + WeCom).

@@ -236,6 +236,7 @@ export interface Settings {
   morning_digest?: boolean;
   rotate_pct?: number;
   dream_at?: string;
+  auto_update?: boolean;
   notify_level?: "quiet" | "normal";
   ask_permissions?: boolean;
   paused?: boolean;
@@ -285,10 +286,38 @@ export interface DeviceView {
   agents?: string[];
 }
 
+export interface VersionMachine {
+  id: string;
+  name: string;
+  version?: string;
+  os?: string;
+  local: boolean;
+  online: boolean;
+}
+
+export interface FleetUpdateView {
+  busy: boolean;
+  scope?: string;
+  phase: "idle" | "updating" | "reconnecting" | "restarting" | "done" | "failed";
+  target?: string;
+  total: number;
+  index: number;
+  current_id?: string;
+  current_name?: string;
+  completed_ids?: string[];
+  pending_ids?: string[];
+  failed_id?: string;
+  failed_name?: string;
+  error?: string;
+  errors?: Record<string, string>;
+}
+
 export interface VersionStatus {
   version: string;
   latest: string;
   outdated: { id: string; name: string; version: string }[];
+  machines?: VersionMachine[];
+  update?: FleetUpdateView;
 }
 
 export interface MsgPatch {

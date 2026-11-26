@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -42,6 +43,7 @@ type Server struct {
 	PublicURLs     []string
 	NodeOnly       bool
 	Logger         *slog.Logger
+	ServerCtx      context.Context
 	ReleaseRepoURL string
 	ExecutablePath string
 	ExecFn         func(exe string)
@@ -62,6 +64,8 @@ type Server struct {
 	latestChecked time.Time
 	latestBusy    bool
 	selfUpdateMu  sync.Mutex
+	fleetUpdateMu sync.Mutex
+	fleetUpdate   *fleetUpdateState
 }
 
 // Routes returns the full Hub HTTP handler.
@@ -82,6 +86,8 @@ func (s *Server) Routes() http.Handler {
 	api("GET /api/devices", s.handleListDevices)
 	api("POST /api/devices/{id}/delete", s.handleDeleteDevice)
 	api("GET /api/version", s.handleGetVersion)
+	api("POST /api/update", s.handleHubUpdate)
+	api("POST /api/update/fleet", s.handleFleetUpdate)
 	api("GET /api/history", s.handleListHistory)
 	api("POST /api/history/{id}/resume", s.handleResumeHistory)
 	api("POST /api/history/{id}/delete", s.handleDeleteHistory)
@@ -103,6 +109,8 @@ func (s *Server) Routes() http.Handler {
 func (s *Server) NodeRoutes() http.Handler {
 	mux := http.NewServeMux()
 	s.registerMachineRoutes(mux, func(h http.HandlerFunc) http.Handler { return h })
+	mux.HandleFunc("POST /api/update", s.handleNodeSelfUpdate)
+	mux.HandleFunc("POST /api/update/relay", s.handleNodeRelayUpdate)
 	return mux
 }
 
@@ -114,7 +122,6 @@ func (s *Server) registerMachineRoutes(mux *http.ServeMux, wrap func(http.Handle
 	mux.Handle("POST /api/git/worktree/create", wrap(s.handleGitWorktreeCreate))
 	mux.Handle("POST /api/git/worktree/cleanup", wrap(s.handleGitWorktreeCleanup))
 	mux.Handle("POST /api/codex/interrupt", wrap(s.handleCodexInterrupt))
-	mux.Handle("POST /api/update", wrap(s.handleSelfUpdate))
 	mux.Handle("GET /api/dirs", wrap(s.handleListDirs))
 	mux.Handle("GET /api/file", wrap(s.handleReadFile))
 	mux.Handle("POST /api/attachments/read", wrap(s.handleReadAttachment))
@@ -390,7 +397,7 @@ func (s *Server) routed(h http.HandlerFunc) http.HandlerFunc {
 		var body []byte
 		switch {
 		case r.URL.Path == "/api/dirs", r.URL.Path == "/api/file", r.URL.Path == "/api/attachments/read", r.URL.Path == "/api/uploads",
-			r.URL.Path == "/api/models", r.URL.Path == "/api/transcript", r.URL.Path == "/api/update",
+			r.URL.Path == "/api/models", r.URL.Path == "/api/transcript",
 			r.URL.Path == "/api/git/inspect", r.URL.Path == "/api/git/worktree/create", r.URL.Path == "/api/git/worktree/cleanup":
 			machine = s.Fleet.ResolveMachine(r.URL.Query().Get("machine"))
 		case r.URL.Path == "/api/agents" && r.Method == http.MethodPost && s.Engine == nil:

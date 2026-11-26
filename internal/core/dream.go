@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,19 +17,131 @@ import (
 )
 
 const (
-	dreamSkillsPrefix = "可做成 skill："
-	dreamFixPrefix    = "可改进 skill："
+	dreamSkillsPrefix   = "可做成 skill："
+	dreamFixPrefix      = "可改进 skill："
+	activeDreamKVKey    = "active_dream"
+	nightlyDreamSlotKey = "nightly_dream_slot"
 )
 
+type activeDreamMarker struct {
+	ID          string    `json:"id"`
+	At          time.Time `json:"at"`
+	Reason      string    `json:"reason"`
+	ArchivedRef string    `json:"archived_ref,omitempty"`
+	WorkspaceID string    `json:"workspace_id,omitempty"`
+	PaneID      string    `json:"pane_id,omitempty"`
+	PromptSent  bool      `json:"prompt_sent,omitempty"`
+}
+
+type nightlyDreamSlot struct {
+	Date    string    `json:"date"`    // YYYY-MM-DD of scheduled dream slot
+	Outcome string    `json:"outcome"` // ok | skipped | failed
+	At      time.Time `json:"at"`
+}
+
 type dreamRun struct {
+	id          string
 	at          time.Time
+	observedAt  time.Time
 	started     bool
 	worked      bool
+	recovered   bool
 	idleAt      time.Time
 	reason      string
 	blockedAt   time.Time
 	told        bool
 	archivedRef string
+	workspaceID string
+	paneID      string
+}
+
+func dreamWorkspaceLabel(runID string) string {
+	if strings.TrimSpace(runID) == "" {
+		return model.DreamLabel
+	}
+	return model.DreamLabel + " · " + runID
+}
+
+func isDreamWorkspaceLabel(label string) bool {
+	return label == model.DreamLabel || strings.HasPrefix(label, model.DreamLabel+" · ")
+}
+
+func (e *Engine) loadActiveDreamMarker(ctx context.Context) {
+	if e.store == nil {
+		return
+	}
+	raw, ok, err := e.store.GetKV(ctx, activeDreamKVKey)
+	if err != nil || !ok || strings.TrimSpace(raw) == "" {
+		return
+	}
+	var m activeDreamMarker
+	if err := json.Unmarshal([]byte(raw), &m); err != nil || strings.TrimSpace(m.ID) == "" || m.At.IsZero() {
+		return
+	}
+	e.mu.Lock()
+	e.dream = &dreamRun{
+		id:          m.ID,
+		at:          m.At,
+		observedAt:  time.Now(),
+		started:     m.PromptSent,
+		recovered:   true,
+		reason:      m.Reason,
+		archivedRef: m.ArchivedRef,
+		workspaceID: m.WorkspaceID,
+		paneID:      m.PaneID,
+	}
+	e.mu.Unlock()
+	if e.logger != nil {
+		e.logger.Info("loaded active dream marker for restart recovery", "id", m.ID, "at", m.At.Format(time.RFC3339), "prompt_sent", m.PromptSent)
+	}
+}
+
+func (e *Engine) saveActiveDreamMarker(ctx context.Context, d *dreamRun) error {
+	if e.store == nil || d == nil || d.id == "" {
+		return nil
+	}
+	e.mu.Lock()
+	m := activeDreamMarker{
+		ID:          d.id,
+		At:          d.at,
+		Reason:      d.reason,
+		ArchivedRef: d.archivedRef,
+		WorkspaceID: d.workspaceID,
+		PaneID:      d.paneID,
+		PromptSent:  d.started,
+	}
+	e.mu.Unlock()
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return e.store.SetKV(ctx, activeDreamKVKey, string(b))
+}
+
+func (e *Engine) recordNightlyDreamSlot(ctx context.Context, slotDate, outcome string, at time.Time) {
+	if e.store == nil {
+		return
+	}
+	b, err := json.Marshal(nightlyDreamSlot{Date: slotDate, Outcome: outcome, At: at})
+	if err != nil {
+		return
+	}
+	_ = e.store.SetKV(ctx, nightlyDreamSlotKey, string(b))
+}
+
+func (e *Engine) readNightlyDreamSlot(ctx context.Context) (nightlyDreamSlot, bool) {
+	if e.store == nil {
+		return nightlyDreamSlot{}, false
+	}
+	raw, ok, err := e.store.GetKV(ctx, nightlyDreamSlotKey)
+	if err != nil || !ok || strings.TrimSpace(raw) == "" {
+		return nightlyDreamSlot{}, false
+	}
+	var s nightlyDreamSlot
+	if err := json.Unmarshal([]byte(raw), &s); err != nil || s.Date == "" {
+		return nightlyDreamSlot{}, false
+	}
+	return s, true
 }
 
 // Dreaming reports whether an isolated memory-consolidation Dream session is active.
@@ -85,21 +198,21 @@ func (e *Engine) NextDream(ctx context.Context, now time.Time) time.Time {
 	return t
 }
 
-func (e *Engine) hasActivitySince(ctx context.Context, since time.Time) bool {
+func (e *Engine) hasActivitySince(ctx context.Context, since time.Time) (bool, error) {
 	entries, _, err := e.store.ListEntries(ctx, "", 60)
 	if err != nil {
-		return false
+		return false, err
 	}
 	for i := len(entries) - 1; i >= 0; i-- {
 		en := entries[i]
 		if !since.IsZero() && en.At.Before(since) {
-			return false
+			return false, nil
 		}
 		if en.Role == "user" || en.Role == "corgi" {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // checkDream drives an active dream session or initiates the scheduled nightly dream.
@@ -118,14 +231,20 @@ func (e *Engine) checkDream(ctx context.Context, live map[string]liveInfo, hasQu
 	}
 	li, alive := live[model.RouterName]
 	e.mu.Lock()
-	busy := e.handover != nil || e.settings.Paused || hasQueued || !e.routerAskedAt.IsZero() ||
+	busy := e.handover != nil || e.hubUpdating || e.routerDispatching || e.routerLaunching || e.settings.Paused || hasQueued || !e.routerAskedAt.IsZero() ||
 		(alive && li.status != "idle" && li.status != "done")
 	e.mu.Unlock()
 	if busy {
 		return
 	}
-	if !e.hasActivitySince(ctx, e.LastDream(ctx)) {
+	active, err := e.hasActivitySince(ctx, e.LastDream(ctx))
+	if err != nil {
+		e.logger.Warn("dream activity check failed", "err", err)
+		return
+	}
+	if !active {
 		e.setLastDream(ctx, now) // quiet day: skip waking LLM, zero tokens spent
+		e.recordNightlyDreamSlot(ctx, next.Format("2006-01-02"), "skipped", now)
 		return
 	}
 	_ = e.StartDream(ctx, "nightly")
@@ -134,15 +253,32 @@ func (e *Engine) checkDream(ctx context.Context, live map[string]liveInfo, hasQu
 // StartDream archives the current Router session and spawns an isolated Dream session
 // to review recent history, consolidate memory/, and propose mature skills.
 func (e *Engine) StartDream(ctx context.Context, reason string) error {
+	now := time.Now()
 	e.mu.Lock()
-	if e.dream != nil || e.handover != nil {
+	if e.dream != nil || e.handover != nil || e.hubUpdating {
 		e.mu.Unlock()
-		return fmt.Errorf("Corgi 正在整理记忆或交接会话")
+		return fmt.Errorf("Corgi 正在整理记忆、交接会话或升级中")
 	}
 	st := e.settings
-	d := &dreamRun{at: time.Now(), reason: reason}
+	d := &dreamRun{
+		id:         now.Format("20060102-150405.000000000"),
+		at:         now,
+		observedAt: now,
+		reason:     reason,
+	}
 	e.dream = d
 	e.mu.Unlock()
+
+	// Persist active dream intent BEFORE any workspace/Router side effects so a crash
+	// or restart can deterministically reconcile this exact run.
+	if err := e.saveActiveDreamMarker(ctx, d); err != nil {
+		e.mu.Lock()
+		if e.dream == d {
+			e.dream = nil
+		}
+		e.mu.Unlock()
+		return fmt.Errorf("记录做梦状态失败：%w", err)
+	}
 
 	e.addEvent(ctx, model.MainThread, "Corgi 睡一会儿，复盘近期对话与日志、整理记忆（做梦）", "", "info")
 	e.notifyChanged()
@@ -155,9 +291,23 @@ func (e *Engine) launchDreamAsync(d *dreamRun, st model.Settings) {
 	bg, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	fail := func(err error) {
-		e.logger.Warn("dream launch failed", "err", err)
+		e.logger.Warn("dream launch failed", "id", d.id, "err", err)
+		e.closeDreamWorkspaces(bg, d)
+		updates := map[string]string{}
+		if d.reason == "nightly" {
+			now := time.Now()
+			updates["last_dream"] = now.Format(time.RFC3339)
+			if b, jerr := json.Marshal(nightlyDreamSlot{Date: d.at.Format("2006-01-02"), Outcome: "failed", At: now}); jerr == nil {
+				updates[nightlyDreamSlotKey] = string(b)
+			}
+		}
+		if e.store != nil && d.id != "" {
+			_, _ = e.store.CommitActiveDreamFinish(bg, d.id, updates)
+		}
 		e.mu.Lock()
-		e.dream = nil
+		if e.dream == d {
+			e.dream = nil
+		}
 		e.mu.Unlock()
 		e.addEvent(bg, model.MainThread, "整理记忆未能启动："+err.Error(), "", "error")
 		e.notifyChanged()
@@ -186,6 +336,7 @@ func (e *Engine) launchDreamAsync(d *dreamRun, st model.Settings) {
 						d.archivedRef = "h:" + eid
 					}
 					e.mu.Unlock()
+					_ = e.saveActiveDreamMarker(bg, d)
 				}
 				break
 			}
@@ -193,7 +344,7 @@ func (e *Engine) launchDreamAsync(d *dreamRun, st model.Settings) {
 	}
 
 	e.closeWorkspacesByLabel(bg, model.RouterLabel)
-	e.closeWorkspacesByLabel(bg, model.DreamLabel)
+	e.closeDreamWorkspaces(bg, nil)
 
 	if err := e.memory.WriteRouterDocs(e.binPath, st); err != nil {
 		e.logger.Warn("write router docs before dream", "err", err)
@@ -223,11 +374,19 @@ func (e *Engine) launchDreamAsync(d *dreamRun, st model.Settings) {
 	}
 	args := ad.LaunchArgs(dreamModel, dreamEffort, !st.AskPermissions)
 
-	wsID, paneID, err := e.fleet.CreateWorkspace(bg, "", e.memory.RouterDir(), model.DreamLabel)
+	wsID, paneID, err := e.fleet.CreateWorkspace(bg, "", e.memory.RouterDir(), dreamWorkspaceLabel(d.id))
 	if err != nil {
 		fail(err)
 		return
 	}
+	e.mu.Lock()
+	if e.dream == d {
+		d.workspaceID = wsID
+		d.paneID = paneID
+	}
+	e.mu.Unlock()
+	_ = e.saveActiveDreamMarker(bg, d)
+
 	if err := e.fleet.StartAgent(bg, paneID, kind, model.DreamName, args); err != nil {
 		var he *herdr.Error
 		if !(errors.As(err, &he) && he.Code == "agent_not_ready") {
@@ -252,7 +411,7 @@ func (e *Engine) launchDreamAsync(d *dreamRun, st model.Settings) {
 			break
 		}
 		if !errors.As(err, &he) || (he.Code != "agent_not_ready" && he.Code != "agent_not_found") || time.Now().After(deadline) {
-			e.closeWorkspacesByLabel(context.Background(), model.DreamLabel)
+			e.closeDreamWorkspaces(context.Background(), d)
 			fail(err)
 			return
 		}
@@ -269,19 +428,77 @@ func (e *Engine) launchDreamAsync(d *dreamRun, st model.Settings) {
 		e.dream.started = true
 	}
 	e.mu.Unlock()
+	_ = e.saveActiveDreamMarker(bg, d)
+}
+
+func (e *Engine) findDreamLive(d *dreamRun, live map[string]liveInfo) (liveInfo, bool) {
+	if li, ok := live[model.DreamName]; ok {
+		return li, true
+	}
+	e.mu.Lock()
+	wantPane := d.paneID
+	e.mu.Unlock()
+	if wantPane != "" {
+		for _, li := range live {
+			if li.pane == wantPane {
+				return li, true
+			}
+		}
+	}
+	return liveInfo{}, false
 }
 
 func (e *Engine) driveDream(ctx context.Context, d *dreamRun, live map[string]liveInfo) {
 	e.mu.Lock()
 	started := d.started
+	recovered := d.recovered
+	observedAt := d.observedAt
 	e.mu.Unlock()
+	if observedAt.IsZero() {
+		observedAt = d.at
+	}
+
+	journal := filepath.Join(e.memory.DreamsDir(), journalName(d.at)+".md")
+	journalFresh := false
+	if fi, err := os.Stat(journal); err == nil && !fi.ModTime().Before(d.at) && fi.Size() > 0 {
+		journalFresh = true
+	}
+
+	li, alive := e.findDreamLive(d, live)
 	if !started {
+		if recovered {
+			// Crashed between StartDream and saving PromptSent: reconcile safely against local herdr.
+			if alive {
+				if li.status == "working" {
+					e.mu.Lock()
+					d.started = true
+					d.worked = true
+					e.mu.Unlock()
+					_ = e.saveActiveDreamMarker(ctx, d)
+					goto statusCheck
+				}
+				if journalFresh {
+					e.finishDream(ctx, d, true)
+					return
+				}
+				if time.Since(observedAt) > 90*time.Second {
+					e.finishDream(ctx, d, false)
+				}
+				return
+			}
+			// Verify local herdr workspace list before concluding pane is gone.
+			if _, err := e.fleet.LocalWorkspaces(ctx); err != nil {
+				return
+			}
+			e.finishDream(ctx, d, journalFresh)
+			return
+		}
 		if time.Since(d.at) > 5*time.Minute {
 			e.finishDream(ctx, d, false)
 		}
 		return
 	}
-	li, alive := live[model.DreamName]
+
 	if alive && li.status == "blocked" {
 		if !e.Settings().AskPermissions {
 			e.trustOwnDir(ctx, li.pane)
@@ -315,29 +532,121 @@ statusCheck:
 	worked, idleAt := d.worked, d.idleAt
 	e.mu.Unlock()
 
-	wait := time.Since(d.at)
-	journal := filepath.Join(e.memory.DreamsDir(), journalName(d.at)+".md")
-	journalFresh := false
-	if fi, err := os.Stat(journal); err == nil && !fi.ModTime().Before(d.at) && fi.Size() > 0 {
-		journalFresh = true
-	}
+	// Measure timeout from observedAt so Hub downtime during restart does not prematurely abort a still-running Dream.
+	wait := time.Since(observedAt)
 	switch {
 	case worked && !idleAt.IsZero() && time.Since(idleAt) > 6*time.Second:
 		e.finishDream(ctx, d, true)
 	case !worked && journalFresh && !idleAt.IsZero() && time.Since(idleAt) > 10*time.Second:
 		e.finishDream(ctx, d, true)
-	case !alive && worked, wait > 25*time.Minute, !worked && !idleAt.IsZero() && time.Since(idleAt) > 2*time.Minute:
+	case !alive && (worked || recovered), wait > 25*time.Minute, !worked && !idleAt.IsZero() && time.Since(idleAt) > 2*time.Minute:
 		e.finishDream(ctx, d, worked || journalFresh)
 	}
 }
 
+func (e *Engine) closeDreamWorkspaces(ctx context.Context, d *dreamRun) {
+	if e.fleet == nil {
+		return
+	}
+	closed := map[string]bool{}
+	if d != nil {
+		e.mu.Lock()
+		wsID := d.workspaceID
+		runID := d.id
+		e.mu.Unlock()
+		if wsID != "" {
+			_ = e.fleet.CloseWorkspace(ctx, wsID)
+			closed[wsID] = true
+		}
+		if ws, err := e.fleet.LocalWorkspaces(ctx); err == nil {
+			wantLabel := dreamWorkspaceLabel(runID)
+			for _, w := range ws {
+				if !closed[w.ID] && (w.Label == wantLabel || (runID == "" && isDreamWorkspaceLabel(w.Label))) {
+					_ = e.fleet.CloseWorkspace(ctx, w.ID)
+					closed[w.ID] = true
+				}
+			}
+		}
+		return
+	}
+	// When d == nil (cleanup before a fresh Dream launch), close any legacy or leftover local Dream workspaces.
+	if ws, err := e.fleet.LocalWorkspaces(ctx); err == nil {
+		for _, w := range ws {
+			if isDreamWorkspaceLabel(w.Label) {
+				_ = e.fleet.CloseWorkspace(ctx, w.ID)
+			}
+		}
+	}
+}
+
+func (e *Engine) isLocalRouterAlive(ctx context.Context) bool {
+	if e.fleet == nil {
+		return false
+	}
+	ags, _, err := e.fleet.AgentsWithScanned(ctx)
+	if err != nil {
+		return false
+	}
+	for _, a := range ags {
+		if a.Name != nil && *a.Name == model.RouterName && !strings.Contains(a.PaneID, "@") {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
-	e.closeWorkspacesByLabel(ctx, model.DreamLabel)
-	summary, skills, fixes := "", "", ""
+	now := time.Now()
+	kvUpdates := map[string]string{}
 	if ok || d.reason == "nightly" {
 		// Always advance last_dream on nightly runs so a failed dream cannot spin in a 2-minute loop.
-		e.setLastDream(ctx, time.Now())
+		// For a late recovery (>3h after the original slot), use the original run time so it does not consume a newer night.
+		watermark := now
+		if d.recovered && time.Since(d.at) > 3*time.Hour {
+			watermark = d.at
+		}
+		kvUpdates["last_dream"] = watermark.Format(time.RFC3339)
 	}
+	if d.reason == "nightly" {
+		outcome := "failed"
+		if ok {
+			outcome = "ok"
+		}
+		if b, err := json.Marshal(nightlyDreamSlot{Date: d.at.Format("2006-01-02"), Outcome: outcome, At: now}); err == nil {
+			kvUpdates[nightlyDreamSlotKey] = string(b)
+		}
+	}
+
+	if d.id != "" && e.store != nil {
+		committed, err := e.store.CommitActiveDreamFinish(ctx, d.id, kvUpdates)
+		if err != nil {
+			e.logger.Warn("commit dream finish failed, will retry", "id", d.id, "err", err)
+			return
+		}
+		if !committed {
+			e.mu.Lock()
+			if e.dream == d {
+				e.dream = nil
+			}
+			e.mu.Unlock()
+			return
+		}
+	} else {
+		e.mu.Lock()
+		if e.dream != d {
+			e.mu.Unlock()
+			return
+		}
+		e.mu.Unlock()
+		if e.store != nil {
+			for k, v := range kvUpdates {
+				_ = e.store.SetKV(ctx, k, v)
+			}
+		}
+	}
+
+	e.closeDreamWorkspaces(ctx, d)
+	summary, skills, fixes := "", "", ""
 	if ok {
 		journal := filepath.Join(e.memory.DreamsDir(), journalName(d.at)+".md")
 		summary = parseDreamSummary(journal)
@@ -346,13 +655,13 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 	}
 
 	e.mu.Lock()
-	e.dream = nil
+	if e.dream == d {
+		e.dream = nil
+	}
 	e.routerLaunchAt = time.Time{}
-	e.mu.Unlock()
-
-	e.mu.Lock()
 	archivedRef := d.archivedRef
 	e.mu.Unlock()
+
 	switch {
 	case !ok:
 		e.addEvent(ctx, model.MainThread, "本次整理记忆未能完成，Corgi 先醒过来了", archivedRef, "error")
@@ -373,7 +682,9 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 			"", []string{"派人去修", "先不用"}, false)
 	}
 	e.notifyChanged()
-	e.ensureRouter(ctx)
+	if !e.isLocalRouterAlive(ctx) {
+		e.ensureRouter(ctx)
+	}
 }
 
 // writeDreamInput writes dream/input.md summarizing chats and archived Router logs since last dream.

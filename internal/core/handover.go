@@ -130,6 +130,15 @@ func (e *Engine) checkHandover(ctx context.Context, live map[string]liveInfo, ha
 		return
 	}
 
+	// Claim reservation before sending handover prompt so a concurrent Hub restart cannot race.
+	e.mu.Lock()
+	if e.hubUpdating || e.dream != nil || e.handover != nil || e.routerDispatching || e.routerLaunching || e.settings.Paused {
+		e.mu.Unlock()
+		return
+	}
+	e.routerDispatching = true
+	e.mu.Unlock()
+
 	prompt := fmt.Sprintf(`[corgi] Handover. Your context window is %d%% full, so Corgi will restart you in a fresh session right after this turn. Nothing carries over except memory/ (layout in CORGI.md), so bring it up to date now:
 - instructions.md: standing instructions and preferences (merge duplicates, ≤80 chars/line).
 - tasks/private/ & tasks/groups/: one file per open task with current state and next step; move finished ones to tasks/done/.
@@ -141,12 +150,16 @@ This turn is for memory files alone: edit them, then stop.`, usage.Pct(), UpFron
 		e.logger.Warn("write router docs before handover", "err", err)
 	}
 	if err := e.fleet.Prompt(ctx, model.RouterName, prompt); err != nil {
+		e.mu.Lock()
+		e.routerDispatching = false
+		e.mu.Unlock()
 		e.logger.Warn("send handover prompt failed", "err", err)
 		return
 	}
 
 	e.mu.Lock()
 	e.handover = &handoverState{at: time.Now(), kind: kind, session: sessionID, pct: usage.Pct()}
+	e.routerDispatching = false
 	e.mu.Unlock()
 
 	e.addEvent(ctx, model.MainThread,

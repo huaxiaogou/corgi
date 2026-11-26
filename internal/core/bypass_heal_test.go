@@ -155,7 +155,7 @@ func TestIdleRestoredWorkerHealsBypassInPlace(t *testing.T) {
 	live := map[string]liveInfo{
 		"agy-85": {pane: "w7:p1", status: "idle", ready: true, kind: "agy", session: wk.Session},
 	}
-	eng.syncWorkers(ctx, live, time.Now())
+	eng.syncWorkers(ctx, live, map[string]bool{"": true}, time.Now())
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -185,7 +185,7 @@ func TestIdleRestoredWorkerHealsBypassInPlace(t *testing.T) {
 
 	// Subsequent syncWorkers check must NOT re-trigger heal now that bypass flag is present.
 	time.Sleep(20 * time.Millisecond)
-	eng.syncWorkers(ctx, live, time.Now())
+	eng.syncWorkers(ctx, live, map[string]bool{"": true}, time.Now())
 	time.Sleep(30 * time.Millisecond)
 	mu.Lock()
 	if startCalls != 2 {
@@ -243,7 +243,7 @@ func TestWorkingAndAskPermissionsWorkersAreNotInterrupted(t *testing.T) {
 	// 1. Working worker must NEVER be interrupted.
 	eng.syncWorkers(ctx, map[string]liveInfo{
 		"agy-work": {pane: "w7:p1", status: "working", ready: true, kind: "agy", session: "sess-1"},
-	}, time.Now())
+	}, map[string]bool{"": true}, time.Now())
 	time.Sleep(40 * time.Millisecond)
 
 	// 2. AskPermissions == true must NEVER auto-heal idle worker either.
@@ -254,7 +254,7 @@ func TestWorkingAndAskPermissionsWorkersAreNotInterrupted(t *testing.T) {
 	}
 	eng.syncWorkers(ctx, map[string]liveInfo{
 		"agy-work": {pane: "w7:p1", status: "idle", ready: true, kind: "agy", session: "sess-1"},
-	}, time.Now())
+	}, map[string]bool{"": true}, time.Now())
 	time.Sleep(40 * time.Millisecond)
 
 	mu.Lock()

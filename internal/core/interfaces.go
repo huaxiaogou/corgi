@@ -28,6 +28,11 @@ type ReplyDelivery struct {
 	Files []AttachmentDelivery `json:"files,omitempty"`
 }
 
+// AutoUpdater triggers an idle overnight fleet upgrade without coupling internal/core to web.
+type AutoUpdater interface {
+	TryAutoUpdate(ctx context.Context)
+}
+
 // ChannelSink receives outbound notifications from the Super-Agent core without
 // coupling internal/core to specific channel implementations (Web SSE, WeCom WSS).
 type ChannelSink interface {

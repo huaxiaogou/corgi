@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { FleetUpdateController } from "../../hooks/useFleetUpdate";
 import { api } from "../../lib/api";
 import type { DeviceView, Machine, MemorySnapshot, PendingWeComUser, Policy, Settings, Timer, TriggerView } from "../../types/api";
 import { DevicesTab } from "./DevicesTab";
@@ -28,7 +29,13 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "devices", label: "设备与多机" },
 ];
 
-export function AutomationView({ onToast }: { onToast: (msg: string) => void }) {
+export function AutomationView({
+  fleetUpdate,
+  onToast,
+}: {
+  fleetUpdate: FleetUpdateController;
+  onToast: (msg: string) => void;
+}) {
   const [tab, setTab] = useState<TabKey>("settings");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [allowText, setAllowText] = useState("");
@@ -173,6 +180,7 @@ export function AutomationView({ onToast }: { onToast: (msg: string) => void }) 
             <DevicesTab
               devices={devices}
               machines={machines}
+              fleetUpdate={fleetUpdate}
               pairResult={pairResult}
               onGenPair={genPair}
               onRevoke={(id) => runAction(() => api(`/api/devices/${encodeURIComponent(id)}/delete`, {}))}

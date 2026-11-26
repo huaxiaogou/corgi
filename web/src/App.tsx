@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Menu, Plus, RefreshCw } from "lucide-react";
 import { CorgiMark, StatusDot } from "./components/CorgiMark";
 import { Sidebar, type AppRoute } from "./components/Sidebar";
+import { UpdatePill } from "./components/UpdatePill";
 import { AgentPaneView } from "./features/agents/AgentPaneView";
 import { LoginView } from "./features/auth/LoginView";
 import { AutomationView } from "./features/automation/AutomationView";
@@ -9,6 +10,7 @@ import { CorgiChatView } from "./features/chat/CorgiChatView";
 import { FileDrawer } from "./features/files/FileDrawer";
 import { LauncherModal } from "./features/launcher/LauncherModal";
 import { useCorgiStream } from "./hooks/useCorgiStream";
+import { useFleetUpdate } from "./hooks/useFleetUpdate";
 import { onWebBuildChange } from "./lib/api";
 
 export function App() {
@@ -39,6 +41,8 @@ export function App() {
     window.setTimeout(() => setToastMsg((cur) => (cur === msg ? "" : cur)), 2400);
   };
 
+  const fleetUpdate = useFleetUpdate(authed === true, paneState?.machines ?? [], toast);
+
   const toggleTheme = () => {
     const next = !dark;
     setDark(next);
@@ -60,7 +64,8 @@ export function App() {
       a.name !== "corgi" &&
       a.name !== "corgi-dream" &&
       a.workspace_label !== "corgi · router" &&
-      a.workspace_label !== "corgi · dream"
+      a.workspace_label !== "corgi · dream" &&
+      !a.workspace_label?.startsWith("corgi · dream · ")
   );
   const shells = paneState?.shells ?? [];
   const machines = paneState?.machines ?? [];
@@ -94,9 +99,12 @@ export function App() {
             <span>Corgi</span>
             {pendingCount > 0 && <StatusDot status="blocked" />}
           </div>
-          <button type="button" onClick={() => setLaunchOpen(true)} className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer" title="手动新建">
-            <Plus className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-1.5">
+            <UpdatePill fleetUpdate={fleetUpdate} compact />
+            <button type="button" onClick={() => setLaunchOpen(true)} className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer" title="手动新建">
+              <Plus className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         <Sidebar
@@ -107,6 +115,7 @@ export function App() {
           machines={machines}
           connected={connected}
           dark={dark}
+          fleetUpdate={fleetUpdate}
           onSelect={selectRoute}
           onOpenLauncher={() => setLaunchOpen(true)}
           onToggleTheme={toggleTheme}
@@ -125,6 +134,7 @@ export function App() {
                 machines={machines}
                 connected={connected}
                 dark={dark}
+                fleetUpdate={fleetUpdate}
                 onSelect={selectRoute}
                 onOpenLauncher={() => setLaunchOpen(true)}
                 onToggleTheme={toggleTheme}
@@ -160,7 +170,7 @@ export function App() {
               onToast={toast}
             />
           )}
-          {route.view === "auto" && <AutomationView onToast={toast} />}
+          {route.view === "auto" && <AutomationView fleetUpdate={fleetUpdate} onToast={toast} />}
           <FileDrawer target={fileTarget} onClose={() => setFileTarget(null)} />
         </main>
       </div>

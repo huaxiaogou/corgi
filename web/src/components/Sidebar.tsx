@@ -4,6 +4,8 @@ import { api } from "../lib/api";
 import type { AgentView, Machine, SuperView } from "../types/api";
 import { AgentGlyph, CorgiMark, StatusDot } from "./CorgiMark";
 import { HistorySection } from "./HistorySection";
+import { UpdatePill } from "./UpdatePill";
+import type { FleetUpdateController } from "../hooks/useFleetUpdate";
 
 function formatIdleAge(iso?: string, nowMs = Date.now()): string {
   if (!iso) return "";
@@ -27,6 +29,7 @@ interface Props {
   connected: boolean;
   dark: boolean;
   mobile?: boolean;
+  fleetUpdate: FleetUpdateController;
   onSelect: (r: AppRoute) => void;
   onOpenLauncher: () => void;
   onToggleTheme: () => void;
@@ -43,6 +46,7 @@ export function Sidebar({
   connected,
   dark,
   mobile = false,
+  fleetUpdate,
   onSelect,
   onOpenLauncher,
   onToggleTheme,
@@ -61,7 +65,8 @@ export function Sidebar({
     a.name === "corgi" ||
     a.name === "corgi-dream" ||
     a.workspace_label === "corgi · router" ||
-    a.workspace_label === "corgi · dream";
+    a.workspace_label === "corgi · dream" ||
+    Boolean(a.workspace_label?.startsWith("corgi · dream · "));
   const visibleAgents = agents.filter((a) => !isInternalPane(a));
   const visibleShells = shells.filter((s) => !isInternalPane(s));
   const blocked = visibleAgents.filter((a) => a.status === "blocked");
@@ -177,6 +182,10 @@ export function Sidebar({
             <div className="text-[11px] text-muted truncate">企微 · 接入 · 记忆 · 多机</div>
           </div>
         </button>
+
+        <div className="pt-1">
+          <UpdatePill fleetUpdate={fleetUpdate} />
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-2.5 pt-4 pb-3 space-y-4">

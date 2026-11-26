@@ -37,6 +37,7 @@ type Fleet struct {
 	seenAt   map[string]time.Time
 	doneAt   map[string]time.Time
 	onChange func()
+	subs     map[chan struct{}]struct{}
 }
 
 // NewFleet creates a Fleet rooted at the hub's local herdr client.
@@ -59,6 +60,7 @@ func NewFleet(localHerdr *herdr.Client, hostname, home, version string, localAge
 		runs:    map[string][2]string{},
 		seenAt:  map[string]time.Time{},
 		doneAt:  map[string]time.Time{},
+		subs:    map[chan struct{}]struct{}{},
 	}
 }
 
@@ -78,6 +80,32 @@ func (f *Fleet) SetOnChange(fn func()) {
 	f.mu.Lock()
 	f.onChange = fn
 	f.mu.Unlock()
+}
+
+// SubscribeChanges returns a buffered notification channel signaled on every Attach/Detach
+// together with an unsubscribe function.
+func (f *Fleet) SubscribeChanges() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	f.mu.Lock()
+	if f.subs == nil {
+		f.subs = map[chan struct{}]struct{}{}
+	}
+	f.subs[ch] = struct{}{}
+	f.mu.Unlock()
+	return ch, func() {
+		f.mu.Lock()
+		delete(f.subs, ch)
+		f.mu.Unlock()
+	}
+}
+
+func (f *Fleet) notifySubscribersLocked() {
+	for ch := range f.subs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // UpdateLocalAgents refreshes the detected installed agent kinds on the hub host.
@@ -111,6 +139,7 @@ func (f *Fleet) Attach(rm *RemoteMachine) {
 	rm.Info.Online = true
 	rm.Info.Since = time.Now()
 	f.remotes[rm.Info.ID] = rm
+	f.notifySubscribersLocked()
 	cb := f.onChange
 	f.mu.Unlock()
 
@@ -139,6 +168,7 @@ func (f *Fleet) Detach(id string, match *RemoteMachine) {
 		return
 	}
 	delete(f.remotes, id)
+	f.notifySubscribersLocked()
 	cb := f.onChange
 	f.mu.Unlock()
 
@@ -205,6 +235,33 @@ func (f *Fleet) HTTPClient(machine string) (*http.Client, error) {
 		return nil, fmt.Errorf("machine %q is offline", machine)
 	}
 	return rm.HTTPClient, nil
+}
+
+// RemoteMachineByID looks up a connected remote node strictly by exact device ID.
+// Unlike ResolveMachine, it never maps "hub", "local", or a hostname to the local Hub.
+func (f *Fleet) RemoteMachineByID(id string) (model.Machine, *http.Client, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.Machine{}, nil, false
+	}
+	f.mu.RLock()
+	rm := f.remotes[id]
+	f.mu.RUnlock()
+	if rm == nil || rm.HTTPClient == nil || !rm.Info.Online {
+		return model.Machine{}, nil, false
+	}
+	return rm.Info, rm.HTTPClient, true
+}
+
+// LocalWorkspaces returns workspaces strictly from the Hub's local herdr daemon.
+func (f *Fleet) LocalWorkspaces(ctx context.Context) ([]model.Workspace, error) {
+	f.mu.RLock()
+	lh := f.localH
+	f.mu.RUnlock()
+	if lh == nil {
+		return nil, fmt.Errorf("local herdr unavailable")
+	}
+	return lh.Workspaces(ctx)
 }
 
 func (f *Fleet) clientFor(machine string) (*herdr.Client, error) {
@@ -307,11 +364,19 @@ func (f *Fleet) Panes(ctx context.Context) ([]model.Pane, error) {
 
 // Agents fans out agent.list across all online machines and updates the name->pane map.
 func (f *Fleet) Agents(ctx context.Context) ([]model.Agent, error) {
+	ags, _, err := f.AgentsWithScanned(ctx)
+	return ags, err
+}
+
+// AgentsWithScanned fans out agent.list across all online machines and also returns
+// the set of machine IDs ("" for Hub) whose scan succeeded on this call.
+func (f *Fleet) AgentsWithScanned(ctx context.Context) ([]model.Agent, map[string]bool, error) {
 	clients := f.allClients()
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
 		merged   []model.Agent
+		scanned  = make(map[string]bool, len(clients))
 		localErr error
 	)
 	for _, tc := range clients {
@@ -327,6 +392,7 @@ func (f *Fleet) Agents(ctx context.Context) ([]model.Agent, error) {
 				}
 				return
 			}
+			scanned[tc.machine] = true
 			for i := range ags {
 				ags[i].PaneID = JoinID(ags[i].PaneID, tc.machine)
 				ags[i].WorkspaceID = JoinID(ags[i].WorkspaceID, tc.machine)
@@ -343,7 +409,7 @@ func (f *Fleet) Agents(ctx context.Context) ([]model.Agent, error) {
 		}
 	}
 	f.mu.Unlock()
-	return merged, localErr
+	return merged, scanned, localErr
 }
 
 // RememberName remembers the pane ID of a named agent.

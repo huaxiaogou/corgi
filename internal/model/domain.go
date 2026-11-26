@@ -227,6 +227,7 @@ type Settings struct {
 	MorningDigest     *bool    `json:"morning_digest,omitempty"`      // nil = default true
 	RotatePct         int      `json:"rotate_pct,omitempty"`          // 0 = default 90, -1 = never
 	DreamAt           string   `json:"dream_at,omitempty"`            // "HH:MM", "" = "04:00", "off" = disabled
+	AutoUpdate        bool     `json:"auto_update,omitempty"`         // opt-in overnight idle auto-update (default false)
 	NotifyLevel       string   `json:"notify_level,omitempty"`        // quiet | normal
 	AskPermissions    bool     `json:"ask_permissions,omitempty"`
 	Paused            bool     `json:"paused,omitempty"`

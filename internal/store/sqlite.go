@@ -285,6 +285,55 @@ func (s *Store) SetKV(ctx context.Context, key, val string) error {
 	return nil
 }
 
+// DeleteKV removes a key from the kv table.
+func (s *Store) DeleteKV(ctx context.Context, key string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM kv WHERE k = ?`, key); err != nil {
+		return fmt.Errorf("delete kv %q: %w", key, err)
+	}
+	return nil
+}
+
+// CommitActiveDreamFinish atomically verifies that kv['active_dream'] still belongs to runID,
+// removes 'active_dream', and upserts the provided kv updates in one SQLite transaction.
+// Returns committed=false when another run or prior finalization already cleared active_dream.
+func (s *Store) CommitActiveDreamFinish(ctx context.Context, runID string, updates map[string]string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin dream finish tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var raw string
+	err = tx.QueryRowContext(ctx, `SELECT v FROM kv WHERE k = 'active_dream'`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read active_dream: %w", err)
+	}
+	var marker struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(raw), &marker); err != nil || marker.ID != runID {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM kv WHERE k = 'active_dream'`); err != nil {
+		return false, fmt.Errorf("delete active_dream: %w", err)
+	}
+	for k, v := range updates {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO kv(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
+			k, v,
+		); err != nil {
+			return false, fmt.Errorf("upsert kv %q: %w", k, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit dream finish tx: %w", err)
+	}
+	return true, nil
+}
+
 // LoadSettings loads Settings from kv, falling back to DefaultSettings.
 func (s *Store) LoadSettings(ctx context.Context, home string) (model.Settings, error) {
 	st := model.DefaultSettings(home)

@@ -202,7 +202,7 @@ func TestMainChatQueueSteerAndDrain(t *testing.T) {
 		t.Fatalf("SteerChatPrompt failed: trig=%+v err=%v", trig, err)
 	}
 	live := map[string]liveInfo{model.RouterName: {pane: "w0:p1", status: "working", ready: true, kind: "claude"}}
-	eng.deliverQueued(ctx, live)
+	eng.deliverQueued(ctx, live, map[string]bool{"": true})
 	mu.Lock()
 	if len(prompts) != 1 || !strings.Contains(prompts[0], "第二条插队引导") {
 		t.Fatalf("expected steered #2 delivered mid-turn, got %v", prompts)

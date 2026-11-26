@@ -104,6 +104,7 @@ func runHub(dir string) {
 		logger.Error("init super-agent engine", "err", err)
 		os.Exit(1)
 	}
+	eng.SetVersion(version)
 
 	settings := eng.Settings()
 	var wcCfg wecom.Config
@@ -152,8 +153,10 @@ func runHub(dir string) {
 		Port:           tcpAddr.Port,
 		PublicURLs:     pubURLs,
 		Logger:         logger,
+		ServerCtx:      ctx,
 		ExecutablePath: exe,
 	}
+	eng.SetAutoUpdater(srv)
 
 	printBanner(srv, tcpAddr, master)
 
@@ -237,6 +240,7 @@ func runNode(dir string, args []string) {
 		Version:        version,
 		NodeOnly:       true,
 		Logger:         logger,
+		ServerCtx:      ctx,
 		ExecutablePath: nodeExe,
 	}
 
