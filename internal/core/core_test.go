@@ -638,8 +638,8 @@ func TestDecisionReceiptLinkingFollowUpAndSnapshot(t *testing.T) {
 }
 
 func TestDefaultRotatePctAndNormalization(t *testing.T) {
-	if got := model.DefaultSettings("").RotatePct; got != 90 {
-		t.Fatalf("DefaultSettings().RotatePct = %d, want 90", got)
+	if got := model.DefaultSettings("").RotatePct; got != 70 {
+		t.Fatalf("DefaultSettings().RotatePct = %d, want 70", got)
 	}
 
 	dir := t.TempDir()
@@ -656,8 +656,8 @@ func TestDefaultRotatePctAndNormalization(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if snap := eng.Snapshot(ctx, model.MainThread); snap.Router.RotateAt != 90 {
-		t.Fatalf("initial Snapshot Router.RotateAt = %d, want 90", snap.Router.RotateAt)
+	if snap := eng.Snapshot(ctx, model.MainThread); snap.Router.RotateAt != 70 {
+		t.Fatalf("initial Snapshot Router.RotateAt = %d, want 70", snap.Router.RotateAt)
 	}
 
 	cases := []struct {
@@ -665,11 +665,11 @@ func TestDefaultRotatePctAndNormalization(t *testing.T) {
 		input        int
 		wantRotateAt int
 	}{
-		{name: "zero falls back to 90", input: 0, wantRotateAt: 90},
+		{name: "zero falls back to 70", input: 0, wantRotateAt: 70},
 		{name: "negative disables handover", input: -1, wantRotateAt: 0},
 		{name: "valid explicit value kept", input: 75, wantRotateAt: 75},
-		{name: "below min resets to default 90", input: 10, wantRotateAt: 90},
-		{name: "above max resets to default 90", input: 99, wantRotateAt: 90},
+		{name: "below min resets to default 70", input: 10, wantRotateAt: 70},
+		{name: "above max resets to default 70", input: 99, wantRotateAt: 70},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

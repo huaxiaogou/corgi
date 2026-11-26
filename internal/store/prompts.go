@@ -95,3 +95,20 @@ func (s *Store) ListQueuedPrompts(ctx context.Context, scope string) ([]*model.Q
 	}
 	return out, rows.Err()
 }
+
+// FindQueuedPromptByClientMsgID returns an existing queued prompt matching scope and clientMsgID, if any.
+func (s *Store) FindQueuedPromptByClientMsgID(ctx context.Context, scope, clientMsgID string) (*model.QueuedPrompt, error) {
+	if clientMsgID == "" {
+		return nil, ErrNotFound
+	}
+	items, err := s.ListQueuedPrompts(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range items {
+		if p.ClientMsgID == clientMsgID {
+			return p, nil
+		}
+	}
+	return nil, ErrNotFound
+}

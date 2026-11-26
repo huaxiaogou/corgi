@@ -384,7 +384,38 @@ func (e *Engine) writeDreamInput(ctx context.Context) error {
 	if !since.IsZero() {
 		sinceStr = since.Format("2006-01-02 15:04")
 	}
-	fmt.Fprintf(&b, "# What happened since the last dream (%s)\n\n## Chat & event log\n\n", sinceStr)
+	fmt.Fprintf(&b, "# What happened since the last dream (%s)\n\n", sinceStr)
+
+	b.WriteString("## Authoritative Open Work Items (Hub SQLite)\n\n")
+	if openWork, err := e.store.ListWorkItems(ctx, false); err != nil {
+		fmt.Fprintf(&b, "(error reading work_items: %v)\n", err)
+	} else if len(openWork) == 0 {
+		b.WriteString("(none)\n")
+	} else {
+		for _, wi := range openWork {
+			fmt.Fprintf(&b, "- %s [%s] %s", wi.ID, wi.Thread, wi.Title)
+			if wi.NextStep != "" {
+				fmt.Fprintf(&b, " | next: %s", wi.NextStep)
+			}
+			if len(wi.Workers) > 0 {
+				fmt.Fprintf(&b, " | workers: %s", strings.Join(wi.Workers, ","))
+			}
+			if len(wi.Branches) > 0 {
+				fmt.Fprintf(&b, " | branches: %s", strings.Join(wi.Branches, ","))
+			}
+			if len(wi.Artifacts) > 0 {
+				fmt.Fprintf(&b, " | delivered_files: %d", len(wi.Artifacts))
+			}
+			b.WriteByte('\n')
+		}
+	}
+	if pendingActs, err := e.store.ListPendingActions(ctx); err == nil && len(pendingActs) > 0 {
+		b.WriteString("\n## Pending User Actions\n\n")
+		for _, a := range pendingActs {
+			fmt.Fprintf(&b, "- %s (%s) %s\n", a.ID, a.Kind, oneLineClip(a.Title, 120))
+		}
+	}
+	b.WriteString("\n## Chat & event log\n\n")
 
 	entries, _, _ := e.store.ListEntries(ctx, "", 500)
 	var lines []string
@@ -514,7 +545,7 @@ const dreamPromptTemplate = `[corgi] Dream. You are Corgi's memory keeper runnin
 Run ` + "`{{BIN}} list`" + ` to check which workers and timers are still active.
 
 Consolidate memory/ and keep up-front files (instructions.md, notes/index.md, open tasks) under ~{{BUDGET}} KB combined:
-1. Archive stale tasks: move finished, abandoned, or dead-worker tasks from tasks/private/ and tasks/groups/ to tasks/done/ with a closing line.
+1. Positive archive rule for task notes: ONLY move a note from tasks/private/ or tasks/groups/ to tasks/done/ if its Hub work_item is explicitly CLOSED (absent from "Authoritative Open Work Items" in dream/input.md and ` + "`{{BIN}} list`" + `) AND no active worker, unmerged branch, or pending user action remains. Moving a .md file NEVER closes a Hub SQLite work_item; never treat a local prototype/build without confirmed delivery as done.
 2. Rewrite instructions.md cleanly: one standing preference/rule per line (≤80 Chinese chars); move procedures/history into notes/ with a pointer ("见 notes/x.md"). Remove recurring schedules already backed by an active timer + notes/ workflow; merge duplicates.
 3. Capture cross-session patterns seen more than once (repeated corrections, implicit preferences, recurring mistakes) into instructions.md or notes/, marked "(inferred)".
 4. File reusable engineering findings (data paths, working commands, pitfalls, agent/model track records in notes/agents.md) into notes/<topic>.md and keep notes/index.md accurate. Store pointers, not copies.

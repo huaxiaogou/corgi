@@ -46,6 +46,91 @@ func (s *Store) UpdateTrigger(ctx context.Context, t *model.Trigger) error {
 	return nil
 }
 
+// GetTriggerByIdemKey loads an existing trigger by its unique non-empty idempotency key.
+func (s *Store) GetTriggerByIdemKey(ctx context.Context, idemKey string) (*model.Trigger, error) {
+	idemKey = strings.TrimSpace(idemKey)
+	if idemKey == "" {
+		return nil, ErrNotFound
+	}
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT data FROM triggers WHERE idem_key = ?`, idemKey).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get trigger by idem_key %q: %w", idemKey, err)
+	}
+	var t model.Trigger
+	if err := json.Unmarshal([]byte(raw), &t); err != nil {
+		return nil, fmt.Errorf("decode trigger by idem_key %q: %w", idemKey, err)
+	}
+	return &t, nil
+}
+
+// CommitSayEntryAndTrigger atomically persists a human chat entry and its trigger in one SQLite
+// transaction. If trig.IdemKey already exists, no duplicate entry is written and the original
+// trigger + entry are returned with duplicate=true.
+func (s *Store) CommitSayEntryAndTrigger(ctx context.Context, e *model.Entry, t *model.Trigger) (*model.Entry, *model.Trigger, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("begin commit say: %w", err)
+	}
+	defer tx.Rollback()
+
+	trigData, err := mustJSON(t)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("encode trigger: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO triggers(id, seq, source, thread, status, idem_key, data, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.ID, t.Seq, t.Source, t.Thread, t.Status, t.IdemKey, trigData, t.At.Unix())
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: triggers.idem_key") && t.IdemKey != "" {
+			var rawTrig string
+			if qErr := tx.QueryRowContext(ctx, `SELECT data FROM triggers WHERE idem_key = ?`, t.IdemKey).Scan(&rawTrig); qErr != nil {
+				return nil, nil, true, nil
+			}
+			var existingTrig model.Trigger
+			if json.Unmarshal([]byte(rawTrig), &existingTrig) != nil {
+				return nil, nil, true, nil
+			}
+			var existingEntry *model.Entry
+			if existingTrig.Ref != "" {
+				var rawEntry string
+				if eErr := tx.QueryRowContext(ctx, `SELECT data FROM entries WHERE id = ?`, existingTrig.Ref).Scan(&rawEntry); eErr == nil {
+					var ent model.Entry
+					if json.Unmarshal([]byte(rawEntry), &ent) == nil {
+						existingEntry = &ent
+					}
+				}
+			}
+			return existingEntry, &existingTrig, true, nil
+		}
+		return nil, nil, false, fmt.Errorf("insert trigger %s: %w", t.ID, err)
+	}
+
+	entryData, err := mustJSON(e)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("encode entry: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO entries(id, seq, thread, role, channel, text, action_id, pinned, data, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			text = excluded.text,
+			action_id = excluded.action_id,
+			pinned = excluded.pinned,
+			data = excluded.data
+	`, e.ID, e.Seq, e.Thread, e.Role, e.Channel, e.Text, e.ActionID, boolInt(e.Pinned), entryData, e.At.Unix()); err != nil {
+		return nil, nil, false, fmt.Errorf("insert entry %s: %w", e.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, false, fmt.Errorf("commit say %s: %w", e.ID, err)
+	}
+	return e, t, false, nil
+}
+
 // GetTrigger loads one trigger by ID.
 func (s *Store) GetTrigger(ctx context.Context, id string) (*model.Trigger, error) {
 	var raw string
@@ -331,7 +416,9 @@ func (s *Store) DismissAction(ctx context.Context, id string) (*model.Action, er
 
 // ExpireWorkerActions expires any pending worker_dialog actions for a worker that moved on or exited.
 func (s *Store) ExpireWorkerActions(ctx context.Context, workerName string) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, data FROM actions WHERE target_worker = ? AND status = ?`, workerName, model.ActionPending)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, data FROM actions WHERE target_worker = ? AND kind = ? AND status = ?`,
+		workerName, model.ActionKindWorkerDialog, model.ActionPending)
 	if err != nil {
 		return fmt.Errorf("query worker actions: %w", err)
 	}
@@ -351,14 +438,15 @@ func (s *Store) ExpireWorkerActions(ctx context.Context, workerName string) erro
 	now := time.Now()
 	for _, p := range items {
 		var a model.Action
-		if json.Unmarshal([]byte(p.raw), &a) != nil {
+		if json.Unmarshal([]byte(p.raw), &a) != nil || a.Kind != model.ActionKindWorkerDialog {
 			continue
 		}
 		a.Status = model.ActionExpired
 		a.ResolvedAt = &now
 		if updated, err := mustJSON(&a); err == nil {
-			s.db.ExecContext(ctx, `UPDATE actions SET status = ?, data = ?, resolved_at = ? WHERE id = ? AND status = ?`,
-				model.ActionExpired, updated, now.Unix(), p.id, model.ActionPending)
+			s.db.ExecContext(ctx,
+				`UPDATE actions SET status = ?, data = ?, resolved_at = ? WHERE id = ? AND kind = ? AND status = ?`,
+				model.ActionExpired, updated, now.Unix(), p.id, model.ActionKindWorkerDialog, model.ActionPending)
 		}
 	}
 	return nil
@@ -515,7 +603,8 @@ func (s *Store) MarkActionPushedToWeCom(ctx context.Context, id string) error {
 	return tx.Commit()
 }
 
-// ExpireStalePendingActions expires pending non-dialog actions older than maxAge (e.g. 7 days).
+// ExpireStalePendingActions expires pending choice/digest actions older than maxAge (e.g. 7 days),
+// preserving live terminal dialogs and explicit review check reminders.
 func (s *Store) ExpireStalePendingActions(ctx context.Context, maxAge time.Duration) (int, error) {
 	if maxAge <= 0 {
 		return 0, nil
@@ -528,7 +617,7 @@ func (s *Store) ExpireStalePendingActions(ctx context.Context, maxAge time.Durat
 	cutoff := now.Add(-maxAge)
 	expired := 0
 	for _, a := range pending {
-		if a.Kind == model.ActionKindWorkerDialog {
+		if a.Kind == model.ActionKindWorkerDialog || a.Kind == model.ActionKindRouterCheck {
 			continue
 		}
 		if a.CreatedAt.IsZero() || !a.CreatedAt.Before(cutoff) {

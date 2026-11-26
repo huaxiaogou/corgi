@@ -87,7 +87,11 @@ func (e *Engine) checkHandover(ctx context.Context, live map[string]liveInfo, ha
 	if ad, err := e.agents.Get(kind); err == nil {
 		if path := ad.LocateTranscript(e.home, e.memory.RouterDir(), li.session, launched); path != "" {
 			transcriptPath = path
-			usage = ad.ReadContextUsage(path, e.claudeContextWindow(routerModel))
+			defaultWindow := 0
+			if kind == "claude" {
+				defaultWindow = e.claudeContextWindow(routerModel)
+			}
+			usage = ad.ReadContextUsage(path, defaultWindow)
 		}
 	}
 

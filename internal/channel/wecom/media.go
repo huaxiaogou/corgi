@@ -279,26 +279,24 @@ func (c *Client) UploadMedia(ctx context.Context, mediaType, filename string, da
 	return finBody.MediaID, nil
 }
 
-// SendFile uploads data as a file media and sends it to chatID via aibot_send_msg.
+// SendFile uploads data as a file media and sends it to chatID via aibot_send_msg, awaiting WeCom ACK.
 func (c *Client) SendFile(ctx context.Context, chatID, filename string, data []byte) error {
 	chatID = c.resolveTarget(chatID)
 	if chatID == "" {
-		return nil
+		return errors.New("wecom target chatid is empty (no default recipient configured)")
 	}
 	mediaID, err := c.UploadMedia(ctx, "file", filename, data)
 	if err != nil {
 		return fmt.Errorf("upload wecom file %s: %w", filename, err)
 	}
-	frame := map[string]any{
-		"cmd":     "aibot_send_msg",
-		"headers": map[string]any{"req_id": c.nextReqID()},
-		"body": map[string]any{
-			"chatid":  chatID,
-			"msgtype": "file",
-			"file":    map[string]any{"media_id": mediaID},
-		},
+	if _, err := c.callRPC(ctx, "aibot_send_msg", map[string]any{
+		"chatid":  chatID,
+		"msgtype": "file",
+		"file":    map[string]any{"media_id": mediaID},
+	}); err != nil {
+		return fmt.Errorf("send wecom file %s: %w", filename, err)
 	}
-	return c.send(ctx, frame)
+	return nil
 }
 
 // SendStreamReply sends a streaming reply chunk using aibot_respond_msg.

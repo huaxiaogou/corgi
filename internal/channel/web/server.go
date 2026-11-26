@@ -117,6 +117,7 @@ func (s *Server) registerMachineRoutes(mux *http.ServeMux, wrap func(http.Handle
 	mux.Handle("POST /api/update", wrap(s.handleSelfUpdate))
 	mux.Handle("GET /api/dirs", wrap(s.handleListDirs))
 	mux.Handle("GET /api/file", wrap(s.handleReadFile))
+	mux.Handle("POST /api/attachments/read", wrap(s.handleReadAttachment))
 	mux.Handle("POST /api/uploads", wrap(s.handleUpload))
 	mux.Handle("GET /api/models", wrap(s.handleListModels))
 	mux.Handle("GET /api/transcript", wrap(s.handleGetTranscript))
@@ -152,6 +153,9 @@ func (s *Server) registerSuperRoutes(mux *http.ServeMux, api func(string, http.H
 	api("POST /api/super/answer", s.handleSuperAnswer)
 	api("GET /api/super/show/{id}", s.handleSuperShow)
 	api("GET /api/super/list", s.handleSuperList)
+	api("GET /api/super/tasks", s.handleSuperTasks)
+	api("POST /api/super/tasks", s.handleSuperSetTask)
+	api("POST /api/super/tasks/{id}/done", s.handleSuperDoneTask)
 	api("GET /api/super/triggers", s.handleSuperTriggers)
 	api("GET /api/super/timers", s.handleSuperTimers)
 	api("POST /api/super/timers", s.handleSuperAddTimer)
@@ -385,7 +389,7 @@ func (s *Server) routed(h http.HandlerFunc) http.HandlerFunc {
 		}
 		var body []byte
 		switch {
-		case r.URL.Path == "/api/dirs", r.URL.Path == "/api/file", r.URL.Path == "/api/uploads",
+		case r.URL.Path == "/api/dirs", r.URL.Path == "/api/file", r.URL.Path == "/api/attachments/read", r.URL.Path == "/api/uploads",
 			r.URL.Path == "/api/models", r.URL.Path == "/api/transcript", r.URL.Path == "/api/update",
 			r.URL.Path == "/api/git/inspect", r.URL.Path == "/api/git/worktree/create", r.URL.Path == "/api/git/worktree/cleanup":
 			machine = s.Fleet.ResolveMachine(r.URL.Query().Get("machine"))

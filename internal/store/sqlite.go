@@ -24,7 +24,7 @@ var (
 	ErrDuplicateTrigger = errors.New("duplicate trigger")
 )
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 var migrations = []struct {
 	version int
@@ -134,6 +134,26 @@ CREATE TABLE IF NOT EXISTS queued_prompts (
 	created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_queued_prompts_scope_seq ON queued_prompts(scope, seq);
+`,
+	},
+	{
+		version: 3,
+		sql: `
+CREATE TABLE IF NOT EXISTS work_items (
+	id             TEXT PRIMARY KEY,
+	thread         TEXT NOT NULL,
+	title          TEXT NOT NULL,
+	next_step      TEXT NOT NULL DEFAULT '',
+	workers_json   TEXT NOT NULL DEFAULT '[]',
+	branches_json  TEXT NOT NULL DEFAULT '[]',
+	artifacts_json TEXT NOT NULL DEFAULT '[]',
+	created_at     INTEGER NOT NULL,
+	updated_at     INTEGER NOT NULL,
+	closed_at      INTEGER NOT NULL DEFAULT 0,
+	close_note     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_work_items_open ON work_items(closed_at, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_work_items_thread ON work_items(thread, closed_at, updated_at DESC);
 `,
 	},
 }

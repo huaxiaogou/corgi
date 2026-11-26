@@ -29,14 +29,14 @@ function renderLinkNode(
           type="button"
           onClick={() => onOpenFile(target.path, target.machine)}
           title={title}
-          className="font-mono-code text-[12.5px] px-1.5 py-0.5 rounded surface-rail hover:underline cursor-pointer mx-0.5"
+          className="font-mono-code text-[12.5px] px-1.5 py-0.5 rounded surface-rail hover:underline cursor-pointer mx-0.5 break-words [overflow-wrap:anywhere] text-left max-w-full"
         >
           {label}
         </button>
       );
     }
     return (
-      <code key={key} title={title} className="font-mono-code text-[12.5px] px-1.5 py-0.5 rounded surface-rail border border-hairline">
+      <code key={key} title={title} className="font-mono-code text-[12.5px] px-1.5 py-0.5 rounded surface-rail border border-hairline break-words [overflow-wrap:anywhere] max-w-full">
         {label}
       </code>
     );
@@ -73,7 +73,7 @@ function renderInline(line: string, onOpenFile?: (path: string, machine?: string
     }
     if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
       return (
-        <code key={idx} className="font-mono-code text-[12.5px] px-1.5 py-0.5 rounded surface-rail border border-hairline">
+        <code key={idx} className="font-mono-code text-[12.5px] px-1.5 py-0.5 rounded surface-rail border border-hairline break-words [overflow-wrap:anywhere] max-w-full">
           {part.slice(1, -1)}
         </code>
       );
@@ -178,7 +178,7 @@ export function MarkdownText({ text, onOpenFile }: Props) {
             <thead>
               <tr className="surface-rail border-b border-hairline">
                 {headers.map((h, hi) => (
-                  <th key={hi} className="px-3 py-2 font-semibold text-primary">
+                  <th key={hi} className="px-3 py-2 font-semibold text-primary align-top break-words [overflow-wrap:anywhere]">
                     {renderInline(h, onOpenFile)}
                   </th>
                 ))}
@@ -188,7 +188,7 @@ export function MarkdownText({ text, onOpenFile }: Props) {
               {rows.map((r, ri) => (
                 <tr key={ri}>
                   {r.map((c, ci) => (
-                    <td key={ci} className="px-3 py-2 text-secondary">
+                    <td key={ci} className="px-3 py-2 text-secondary align-top break-words [overflow-wrap:anywhere]">
                       {renderInline(c, onOpenFile)}
                     </td>
                   ))}

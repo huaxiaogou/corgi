@@ -108,9 +108,10 @@ type QueuedPrompt struct {
 	ReEntryID string    `json:"re,omitempty"`
 	Machine   string    `json:"machine,omitempty"`
 	Kind      string    `json:"kind,omitempty"`
-	Model     string    `json:"model,omitempty"`
-	Effort    string    `json:"effort,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Model       string    `json:"model,omitempty"`
+	Effort      string    `json:"effort,omitempty"`
+	ClientMsgID string    `json:"client_msg_id,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // PaneState is the aggregated fleet pane snapshot pushed over SSE.

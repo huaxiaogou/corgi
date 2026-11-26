@@ -52,7 +52,7 @@ func TestOutboxCoalescingAndQuietSuppression(t *testing.T) {
 
 	// 1. Quiet mode + Web actively seen suppresses redundant main-thread plain replies.
 	bus.RecordWebSeen()
-	bus.OnReply(ctx, &model.Entry{Thread: model.MainThread, Text: "安静模式下网页在线应被抑制"}, nil)
+	bus.OnReply(ctx, &model.Entry{Thread: model.MainThread, Text: "安静模式下网页在线应被抑制"}, nil, nil)
 	time.Sleep(15 * time.Millisecond)
 	bus.FlushDue(ctx, false)
 	mu.Lock()
@@ -62,8 +62,8 @@ func TestOutboxCoalescingAndQuietSuppression(t *testing.T) {
 	mu.Unlock()
 
 	// 2. Group thread replies still deliver and coalesce multiple rapid messages into one push.
-	bus.OnReply(ctx, &model.Entry{Thread: "wecom:grp-1", Text: "第一条进展"}, nil)
-	bus.OnReply(ctx, &model.Entry{Thread: "wecom:grp-1", Text: "第二条进展"}, nil)
+	bus.OnReply(ctx, &model.Entry{Thread: "wecom:grp-1", Text: "第一条进展"}, nil, nil)
+	bus.OnReply(ctx, &model.Entry{Thread: "wecom:grp-1", Text: "第二条进展"}, nil, nil)
 	time.Sleep(15 * time.Millisecond)
 	bus.FlushDue(ctx, false)
 	mu.Lock()
@@ -79,7 +79,7 @@ func TestOutboxCoalescingAndQuietSuppression(t *testing.T) {
 	if err := eng.SaveConfig(ctx, &cur, nil); err != nil {
 		t.Fatal(err)
 	}
-	bus.OnReply(ctx, &model.Entry{Thread: model.MainThread, Text: "常规模式直推"}, nil)
+	bus.OnReply(ctx, &model.Entry{Thread: model.MainThread, Text: "常规模式直推"}, nil, nil)
 	bus.FlushDue(ctx, true)
 	mu.Lock()
 	if len(sent) != 1 || sent[0].chat != "" || sent[0].body != "常规模式直推" {
@@ -138,7 +138,7 @@ func TestWebGroupSyncReportAttachmentAndWorkerTag(t *testing.T) {
 		Ref:    "api-profiler",
 		Text:   "剖析完成，详单见附件",
 		Files:  []string{reportPath},
-	}, nil)
+	}, nil, nil)
 	bus.FlushDue(ctx, true)
 
 	mu.Lock()

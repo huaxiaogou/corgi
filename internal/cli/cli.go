@@ -29,6 +29,7 @@ var Commands = map[string]func(corgiDir string, args []string) error{
 	"answer":    cmdAnswer,
 	"show":      cmdShow,
 	"list":      cmdList,
+	"task":      cmdTask,
 	"timer":     cmdTimer,
 	"hook":      cmdHook,
 	"pair":      cmdPair,
@@ -63,6 +64,10 @@ func resolveTarget(corgiDir string) (base, token string, err error) {
 }
 
 func apiCall(corgiDir, method, path string, body any) ([]byte, error) {
+	return apiCallWithTimeout(corgiDir, method, path, body, 30*time.Second)
+}
+
+func apiCallWithTimeout(corgiDir, method, path string, body any, timeout time.Duration) ([]byte, error) {
 	base, tok, err := resolveTarget(corgiDir)
 	if err != nil {
 		return nil, err
@@ -81,7 +86,10 @@ func apiCall(corgiDir, method, path string, body any) ([]byte, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("连接 Hub 失败: %w", err)
 	}
@@ -210,10 +218,12 @@ func cmdReply(dir string, args []string) error {
 	digest := fs.Bool("digest", false, "mark as consolidated patrol/morning digest (replaces prior digest card)")
 	worker := fs.String("worker", "", "optional related worker name")
 	category := fs.String("category", "", "optional action category (morning | patrol | stale | worktree | decision)")
+	machine := fs.String("machine", "", "source machine for --file attachments (default Hub local)")
+	work := fs.String("work", "", "optional work item id to record delivered file artifacts")
 	var opts stringList
 	fs.Var(&opts, "opt", "quick-choice option button (repeatable)")
 	var files stringList
-	fs.Var(&files, "file", "explicit local absolute file path to attach (repeatable)")
+	fs.Var(&files, "file", "explicit absolute file path to attach (repeatable)")
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
@@ -221,10 +231,15 @@ func cmdReply(dir string, args []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := apiCall(dir, http.MethodPost, "/api/super/reply", map[string]any{
-		"thread": *thread, "re": *re, "text": text, "options": []string(opts), "files": []string(files), "check": *check,
+	timeout := 30 * time.Second
+	if len(files) > 0 {
+		timeout = 90 * time.Second
+	}
+	out, err := apiCallWithTimeout(dir, http.MethodPost, "/api/super/reply", map[string]any{
+		"thread": *thread, "re": *re, "text": text, "options": []string(opts), "files": []string(files),
+		"machine": *machine, "work_id": *work, "check": *check,
 		"digest": *digest, "worker": *worker, "category": *category,
-	})
+	}, timeout)
 	if err == nil {
 		fmt.Println(strings.TrimSpace(string(out)))
 	}
@@ -263,6 +278,8 @@ func cmdSpawn(dir string, args []string) error {
 	resume := fs.String("resume", "", "stopped worker name to resume")
 	worktree := fs.Bool("worktree", false, "force isolated git worktree")
 	noWorktree := fs.Bool("no-worktree", false, "disable automatic git worktree isolation")
+	work := fs.String("work", "", "attach worker to an existing open work item id")
+	ephemeral := fs.Bool("ephemeral", false, "do not create a durable work item (one-off lookup only)")
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
@@ -279,7 +296,7 @@ func cmdSpawn(dir string, args []string) error {
 	body := map[string]any{
 		"kind": *kind, "machine": *machine, "cwd": *cwd, "thread": *thread,
 		"name": *name, "model": *modelName, "effort": *effort, "resume": *resume,
-		"worktree": wtMode, "task": task, "by": caller(),
+		"worktree": wtMode, "work_id": *work, "ephemeral": *ephemeral, "task": task, "by": caller(),
 	}
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "subscribe" {
@@ -296,14 +313,15 @@ func cmdSpawn(dir string, args []string) error {
 func cmdSend(dir string, args []string) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	thread := fs.String("thread", "", "thread id")
+	work := fs.String("work", "", "optional work item id to attach this worker to")
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: corgi send <worker> <text>")
+		return fmt.Errorf("usage: corgi send [--work WI] <worker> <text>")
 	}
 	out, err := apiCall(dir, http.MethodPost, "/api/super/send", map[string]any{
-		"to": fs.Arg(0), "text": normalizeEscapedNewlines(strings.Join(fs.Args()[1:], " ")), "thread": *thread,
+		"to": fs.Arg(0), "text": normalizeEscapedNewlines(strings.Join(fs.Args()[1:], " ")), "thread": *thread, "work_id": *work,
 	})
 	if err == nil {
 		fmt.Println(strings.TrimSpace(string(out)))
@@ -405,6 +423,72 @@ func cmdList(dir string, _ []string) error {
 		fmt.Println(strings.TrimSpace(string(out)))
 	}
 	return err
+}
+
+func cmdTask(dir string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: corgi task ls|set|done ...")
+	}
+	switch args[0] {
+	case "ls", "list":
+		fs := flag.NewFlagSet("task ls", flag.ContinueOnError)
+		all := fs.Bool("all", false, "include closed work items")
+		if err := parseInterspersed(fs, args[1:]); err != nil {
+			return err
+		}
+		path := "/api/super/tasks"
+		if *all {
+			path += "?all=1"
+		}
+		out, err := apiCall(dir, http.MethodGet, path, nil)
+		if err == nil {
+			fmt.Println(strings.TrimSpace(string(out)))
+		}
+		return err
+	case "set":
+		fs := flag.NewFlagSet("task set", flag.ContinueOnError)
+		thread := fs.String("thread", model.MainThread, "thread id (when creating)")
+		title := fs.String("title", "", "work item title")
+		next := fs.String("next", "", "next step")
+		worker := fs.String("worker", "", "attach worker name")
+		branch := fs.String("branch", "", "attach git branch")
+		if err := parseInterspersed(fs, args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 1 {
+			return fmt.Errorf("usage: corgi task set <id|new> [--title ...] [--next ...] [--worker W] [--branch B]")
+		}
+		out, err := apiCall(dir, http.MethodPost, "/api/super/tasks", map[string]any{
+			"id":        fs.Arg(0),
+			"thread":    *thread,
+			"title":     *title,
+			"next_step": *next,
+			"worker":    *worker,
+			"branch":    *branch,
+		})
+		if err == nil {
+			fmt.Println(strings.TrimSpace(string(out)))
+		}
+		return err
+	case "done", "close":
+		fs := flag.NewFlagSet("task done", flag.ContinueOnError)
+		if err := parseInterspersed(fs, args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() < 2 {
+			return fmt.Errorf(`usage: corgi task done <id> "<closing reason>"`)
+		}
+		note := normalizeEscapedNewlines(strings.Join(fs.Args()[1:], " "))
+		out, err := apiCall(dir, http.MethodPost, "/api/super/tasks/"+fs.Arg(0)+"/done", map[string]any{
+			"note": note,
+		})
+		if err == nil {
+			fmt.Println(strings.TrimSpace(string(out)))
+		}
+		return err
+	default:
+		return fmt.Errorf("unknown task subcommand %q", args[0])
+	}
 }
 
 func cmdTimer(dir string, args []string) error {

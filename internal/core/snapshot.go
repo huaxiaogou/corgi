@@ -50,6 +50,9 @@ func (e *Engine) Show(ctx context.Context, id string) (any, error) {
 	if act, err := e.store.GetAction(ctx, id); err == nil {
 		return act, nil
 	}
+	if wi, err := e.store.GetWorkItem(ctx, id); err == nil {
+		return wi, nil
+	}
 	if w, err := e.store.GetWorker(ctx, id); err == nil {
 		trigs, _ := e.store.ListWorkerTriggers(ctx, w.Name, 15)
 		out := map[string]any{"worker": w, "triggers": trigs}

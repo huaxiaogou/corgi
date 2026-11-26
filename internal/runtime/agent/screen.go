@@ -584,11 +584,49 @@ func HasBackgroundTask(screen string) bool {
 	return false
 }
 
+var (
+	nonFatalWarningRe = regexp.MustCompile(`(?i)(^\s*(⚠|warning\b[:：]?)|model .*?(deprecated|falling back|fallback)|falling back to|using fallback|switched to fallback|deprecated model)`)
+	warningContRuneRe = regexp.MustCompile(`^\s*[└├│⎿╰┃↳]`)
+)
+
+// stripNonFatalWarningBanners removes non-fatal CLI warning banners (e.g. `⚠ Warning: ...`
+// or model deprecation/fallback notices) along with their indented or box-drawing continuation
+// lines BEFORE error-pattern scanning so benign notices never trigger false backoff retries.
+func stripNonFatalWarningBanners(screen string) []string {
+	rawLines := strings.Split(strings.ReplaceAll(screen, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(rawLines))
+	inWarning := false
+	for _, raw := range rawLines {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			inWarning = false
+			continue
+		}
+		if nonFatalWarningRe.MatchString(raw) {
+			inWarning = true
+			continue
+		}
+		if inWarning {
+			if warningContRuneRe.MatchString(raw) || strings.HasPrefix(raw, "  ") || strings.HasPrefix(raw, "\t") {
+				continue
+			}
+			inWarning = false
+		}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
 // ExtractQuotaError scans the bottom of a terminal for provider rate limits / auth errors,
-// ignoring lines whose matched error phrase already appears in the assistant's own summary.
+// ignoring non-fatal CLI warning banners and lines whose matched error phrase already appears
+// in the assistant's own summary.
 func ExtractQuotaError(screen, summary string) string {
 	lowSummary := strings.ToLower(summary)
-	for _, l := range nonEmptyTail(screen, 12) {
+	filtered := stripNonFatalWarningBanners(screen)
+	if len(filtered) > 12 {
+		filtered = filtered[len(filtered)-12:]
+	}
+	for _, l := range filtered {
 		cleaned := strings.Trim(l, "⎿⏺●•✗✘⚠■│ ")
 		if match := quotaErrRe.FindString(cleaned); match != "" {
 			if !strings.Contains(lowSummary, strings.ToLower(match)) {

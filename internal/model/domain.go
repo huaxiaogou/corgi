@@ -8,7 +8,7 @@ const (
 	RouterLabel         = "corgi · router"
 	DreamName           = "corgi-dream"
 	DreamLabel          = "corgi · dream"
-	DefaultRotatePct    = 90
+	DefaultRotatePct    = 70
 	DefaultReplyChars   = 200
 	PendingActionMaxAge = 7 * 24 * time.Hour
 )
@@ -33,11 +33,37 @@ type Entry struct {
 	Ref      string    `json:"ref,omitempty"`
 	Tone     string    `json:"tone,omitempty"` // spawn | done | blocked | info | error
 	Re       *Quote    `json:"re,omitempty"`
-	ActionID string    `json:"action_id,omitempty"`
-	Options  []string  `json:"options,omitempty"`
-	Files    []string  `json:"files,omitempty"`
-	Check    bool      `json:"check,omitempty"`
-	Pinned   bool      `json:"pinned,omitempty"`
+	ActionID    string    `json:"action_id,omitempty"`
+	Options     []string  `json:"options,omitempty"`
+	Files       []string  `json:"files,omitempty"`
+	FileMachine string    `json:"file_machine,omitempty"`
+	WorkItemID  string    `json:"work_item_id,omitempty"`
+	Check       bool      `json:"check,omitempty"`
+	Pinned      bool      `json:"pinned,omitempty"`
+}
+
+// WorkArtifact records a file deliverable explicitly confirmed as delivered for a WorkItem.
+type WorkArtifact struct {
+	Path        string    `json:"path"`
+	Machine     string    `json:"machine,omitempty"`
+	EntryID     string    `json:"entry_id,omitempty"`
+	DeliveredAt time.Time `json:"delivered_at,omitempty"`
+}
+
+// WorkItem is a Hub-owned durable ledger record for an ongoing user project or deliverable.
+// ClosedAt == nil indicates the item is still open.
+type WorkItem struct {
+	ID        string         `json:"id"`
+	Thread    string         `json:"thread"`
+	Title     string         `json:"title"`
+	NextStep  string         `json:"next_step,omitempty"`
+	Workers   []string       `json:"workers,omitempty"`
+	Branches  []string       `json:"branches,omitempty"`
+	Artifacts []WorkArtifact `json:"artifacts,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	ClosedAt  *time.Time     `json:"closed_at,omitempty"`
+	CloseNote string         `json:"close_note,omitempty"`
 }
 
 // SearchHit is one matched user/corgi entry from full-text search.
@@ -115,6 +141,7 @@ type Worker struct {
 	IdlePatrolCount int        `json:"idle_patrol_count,omitempty"`
 	Keep            bool       `json:"keep,omitempty"`
 	SnoozeUntil     *time.Time `json:"snooze_until,omitempty"`
+	WorkItemID      string     `json:"work_item_id,omitempty"`
 }
 
 const (

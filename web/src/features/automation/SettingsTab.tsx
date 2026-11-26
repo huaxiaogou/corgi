@@ -167,7 +167,7 @@ export function SettingsTab({
               type="number"
               min={-1}
               max={95}
-              value={settings.rotate_pct === undefined || settings.rotate_pct === 0 ? 90 : settings.rotate_pct}
+              value={settings.rotate_pct === undefined || settings.rotate_pct === 0 ? 70 : settings.rotate_pct}
               onChange={(e) => onChange({ ...settings, rotate_pct: Number(e.target.value) })}
               className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
             />

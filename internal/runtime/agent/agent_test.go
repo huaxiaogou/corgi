@@ -116,6 +116,21 @@ Esc to cancel
 	if got := ExtractQuotaError("Error: usage limit", "Fixed the usage limit retry test"); got != "" {
 		t.Fatalf("expected false positive suppressed, got %q", got)
 	}
+	// Non-fatal CLI warning banners with tree/indented continuations must be ignored.
+	warningBanner := strings.Join([]string{
+		"⚠ Warning: model gpt-6-luna hit rate limit fallback",
+		"  └ using fallback model gpt-6-mini for this request",
+		"  │ try again in 5s if needed",
+		"Done.",
+	}, "\n")
+	if got := ExtractQuotaError(warningBanner, ""); got != "" {
+		t.Fatalf("expected non-fatal warning banner ignored, got %q", got)
+	}
+	// Real fatal error after a warning banner must still be caught.
+	withFatal := warningBanner + "\nAPI Error: 529 overloaded_error\n"
+	if got := ExtractQuotaError(withFatal, ""); !strings.Contains(got, "529") {
+		t.Fatalf("expected fatal error after warning banner caught, got %q", got)
+	}
 }
 
 func TestTranscriptReaderIncrementalAndImageExtraction(t *testing.T) {
@@ -186,6 +201,34 @@ func TestCodeBuddyTranscriptAndModelDiscovery(t *testing.T) {
 	usage := cb.ReadContextUsage(logPath, 200000)
 	if usage.Used != 42000 || usage.Pct() != 21 {
 		t.Fatalf("unexpected codebuddy usage: %+v", usage)
+	}
+
+	// Real gpt-6-luna format: model-usage with top-level camelCase usage + providerData.rawUsage.
+	// Trailing turn-metrics in the same turn must NOT overwrite exact explicit usage,
+	// whereas a newer turn lacking explicit usage MUST update via turn-metrics.
+	lunaPath := filepath.Join(dir, "luna.jsonl")
+	lunaSample := strings.Join([]string{
+		`{"type":"model-usage","model":"gpt-6-luna","usage":{"inputTokens":156798,"outputTokens":122,"totalTokens":156920},"providerData":{"messageId":"m1","rawUsage":{"prompt_tokens":156798,"completion_tokens":122,"total_tokens":156920}}}`,
+		`{"type":"turn-metrics","tokenDelta":90000}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(lunaPath, []byte(lunaSample), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	u1 := cb.ReadContextUsage(lunaPath, 0)
+	if u1.Used != 156920 || u1.Window != 200000 || u1.Pct() != 78 {
+		t.Fatalf("expected exact model-usage 156920/200000 (78%%), got %+v", u1)
+	}
+
+	// Append a newer turn that only writes turn-metrics (no explicit model-usage): latest turn must win.
+	f, err := os.OpenFile(lunaPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"type":"turn-metrics","tokenDelta":172000}` + "\n")
+	_ = f.Close()
+	u2 := cb.ReadContextUsage(lunaPath, 0)
+	if u2.Used != 172000 || u2.Pct() != 86 {
+		t.Fatalf("expected newer turn-metrics 172000 (86%%) to supersede older explicit turn, got %+v", u2)
 	}
 }
 

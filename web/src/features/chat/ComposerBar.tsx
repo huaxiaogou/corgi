@@ -9,6 +9,13 @@ import type { Entry, Machine, ModelCatalog } from "../../types/api";
 const ALL_KINDS = ["claude", "codex", "agy", "codebuddy"];
 const IMG_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
 
+function createClientMsgId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `cm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 interface Props {
   machines: Machine[];
   replyTo: Entry | null;
@@ -18,7 +25,14 @@ interface Props {
   embedded?: boolean;
   onStop?: () => void;
   onClearReply: () => void;
-  onSend: (payload: { text: string; machine: string; kind: string; model: string; effort: string }) => Promise<void>;
+  onSend: (payload: {
+    text: string;
+    machine: string;
+    kind: string;
+    model: string;
+    effort: string;
+    clientMsgId: string;
+  }) => Promise<void>;
   onToast: (msg: string) => void;
 }
 
@@ -42,9 +56,12 @@ export function ComposerBar({
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
   const [attachments, setAttachments] = useState<{ name: string; path: string }[]>([]);
   const [dragging, setDragging] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imeRef = useRef(createIMETracker());
+  const submittingRef = useRef(false);
+  const clientMsgIdRef = useRef("");
 
   useAutoResizeTextarea(textareaRef, text, { minHeight: 24, maxHeight: 180 });
 
@@ -114,14 +131,29 @@ export function ComposerBar({
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    if (submittingRef.current) return;
     let payload = text.trim();
     if (!payload && attachments.length === 0) return;
     if (attachments.length > 0) {
       payload = (payload ? payload + "\n\n" : "") + "附件：\n" + attachments.map((a) => a.path).join("\n");
     }
-    setText("");
-    setAttachments([]);
-    await onSend({ text: payload, machine: machine === "local" ? "" : machine, kind, model, effort });
+    if (!clientMsgIdRef.current) {
+      clientMsgIdRef.current = createClientMsgId();
+    }
+    const msgId = clientMsgIdRef.current;
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await onSend({ text: payload, machine: machine === "local" ? "" : machine, kind, model, effort, clientMsgId: msgId });
+      setText("");
+      setAttachments([]);
+      clientMsgIdRef.current = "";
+    } catch {
+      // Keep draft, attachments, replyTo, and the same clientMsgId so retrying is lossless and idempotent.
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
   };
 
   const machineQuery = machine && machine !== "local" ? `&machine=${encodeURIComponent(machine)}` : "";
@@ -291,7 +323,8 @@ export function ComposerBar({
             )}
             <button
               type="submit"
-              className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer hover:opacity-85 shrink-0"
+              disabled={submitting}
+              className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer hover:opacity-85 shrink-0 disabled:opacity-50"
               title={working || queuedCount > 0 ? "加入待发送队列" : "发送"}
             >
               <ArrowUp className="w-4 h-4" strokeWidth={2} />

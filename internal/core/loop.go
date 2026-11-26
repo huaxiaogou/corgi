@@ -119,11 +119,17 @@ func (e *Engine) tick(parent context.Context) {
 	e.handleRouterLifecycle(ctx, live, now)
 
 	queued, _ := e.store.ListQueuedTriggers(ctx)
-	hasQueued := len(queued) > 0
+	hasRouterQueued := false
+	for _, t := range queued {
+		if len(t.Targets) == 0 || slices.Contains(t.Targets, model.RouterName) {
+			hasRouterQueued = true
+			break
+		}
+	}
 
 	// 4. Drive or trigger nightly memory consolidation (Dream) and context handover.
-	e.checkDream(ctx, live, hasQueued)
-	e.checkHandover(ctx, live, hasQueued)
+	e.checkDream(ctx, live, hasRouterQueued)
+	e.checkHandover(ctx, live, hasRouterQueued)
 
 	if e.Settings().Paused || e.Dreaming() || e.handingOver() {
 		return
@@ -578,6 +584,20 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 		b.WriteString("  " + strings.ReplaceAll(body, "\n", "\n  ") + "\n")
 	}
 	if target == model.RouterName {
+		injectWork := fresh
+		if !injectWork {
+			for _, t := range list {
+				if t.Source == "chat" || t.Source == "wecom" {
+					injectWork = true
+					break
+				}
+			}
+		}
+		if injectWork {
+			if openWork, wErr := e.store.ListWorkItems(ctx, false); wErr == nil && len(openWork) > 0 {
+				b.WriteString(formatOpenWorkItemsSummary(openWork, e.binPath))
+			}
+		}
 		fmt.Fprintf(&b, "\nReply with `%s reply` (usually ≤%d Chinese chars / English words; for 2+ items use `- ` Markdown bullets via stdin heredoc `<<'EOF'`, never pack into one semicolon-separated line).", e.binPath, chars)
 	}
 
@@ -710,12 +730,27 @@ func (e *Engine) ensureRouter(ctx context.Context) {
 
 // RestartRouter closes the current Router workspace so the next tick spawns a fresh session.
 func (e *Engine) RestartRouter(ctx context.Context) error {
-	if ws, err := e.fleet.Workspaces(ctx); err == nil {
-		for _, w := range ws {
-			if w.Label == model.RouterLabel {
-				_ = e.fleet.CloseWorkspace(ctx, w.ID)
+	if e.fleet == nil {
+		return fmt.Errorf("fleet not configured")
+	}
+	ws, err := e.fleet.Workspaces(ctx)
+	if err != nil {
+		e.logger.Warn("restart router: list workspaces failed", "err", err)
+		return fmt.Errorf("list workspaces: %w", err)
+	}
+	var closeErr error
+	for _, w := range ws {
+		if w.Label == model.RouterLabel {
+			if cErr := e.fleet.CloseWorkspace(ctx, w.ID); cErr != nil {
+				e.logger.Warn("restart router: close workspace failed", "workspace_id", w.ID, "err", cErr)
+				if closeErr == nil {
+					closeErr = fmt.Errorf("close router workspace %s: %w", w.ID, cErr)
+				}
 			}
 		}
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	_ = e.store.SetKV(ctx, "router_run", "")
 	e.mu.Lock()

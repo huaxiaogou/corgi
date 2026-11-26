@@ -123,6 +123,9 @@ func (s *Server) handleSuperReply(w http.ResponseWriter, r *http.Request) {
 		Options  []string `json:"options"`
 		File     string   `json:"file"`
 		Files    []string `json:"files"`
+		Machine  string   `json:"machine"`
+		WorkID   string   `json:"work_id"`
+		Work     string   `json:"work"`
 		Check    bool     `json:"check"`
 		Digest   bool     `json:"digest"`
 		Worker   string   `json:"worker"`
@@ -135,12 +138,18 @@ func (s *Server) handleSuperReply(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(body.File) != "" {
 		files = append([]string{body.File}, files...)
 	}
-	entry, act, warn, err := s.Engine.ReplyWithMeta(r.Context(), core.ReplyRequest{
+	workID := strings.TrimSpace(body.WorkID)
+	if workID == "" {
+		workID = strings.TrimSpace(body.Work)
+	}
+	out, err := s.Engine.ReplyDetailed(r.Context(), core.ReplyRequest{
 		Thread:   body.Thread,
 		Text:     body.Text,
 		ReID:     body.Re,
 		Options:  body.Options,
 		Files:    files,
+		Machine:  body.Machine,
+		WorkID:   workID,
 		Check:    body.Check,
 		Digest:   body.Digest,
 		Worker:   body.Worker,
@@ -150,12 +159,15 @@ func (s *Server) handleSuperReply(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	res := map[string]any{"ok": true, "entry": entry.ID}
-	if act != nil {
-		res["action"] = act.ID
+	res := map[string]any{"ok": true, "entry": out.Entry.ID}
+	if out.Action != nil {
+		res["action"] = out.Action.ID
 	}
-	if warn != "" {
-		res["warning"] = warn
+	if out.Warning != "" {
+		res["warning"] = out.Warning
+	}
+	if len(out.Delivery.Files) > 0 {
+		res["files"] = out.Delivery.Files
 	}
 	writeJSON(w, http.StatusOK, res)
 }
@@ -281,6 +293,9 @@ func (s *Server) handleSuperSpawn(w http.ResponseWriter, r *http.Request) {
 		res["worktree_branch"] = wk.WorktreeBranch
 		res["worktree_path"] = wk.WorktreePath
 	}
+	if wk.WorkItemID != "" {
+		res["work_item_id"] = wk.WorkItemID
+	}
 	writeJSON(w, http.StatusAccepted, res)
 }
 
@@ -289,16 +304,30 @@ func (s *Server) handleSuperSend(w http.ResponseWriter, r *http.Request) {
 		To     string `json:"to"`
 		Text   string `json:"text"`
 		Thread string `json:"thread"`
+		WorkID string `json:"work_id"`
+		Work   string `json:"work"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	trig, err := s.Engine.SendToWorker(r.Context(), body.To, body.Thread, body.Text)
+	workID := strings.TrimSpace(body.WorkID)
+	if workID == "" {
+		workID = strings.TrimSpace(body.Work)
+	}
+	trig, resolvedWorkID, err := s.Engine.SendToWorkerWithWork(r.Context(), body.To, body.Thread, body.Text, workID)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		code := http.StatusNotFound
+		if strings.Contains(err.Error(), "multiple open work items") || errors.Is(err, store.ErrWorkItemClosed) {
+			code = http.StatusBadRequest
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"trigger": trig.ID})
+	res := map[string]any{"trigger": trig.ID}
+	if resolvedWorkID != "" {
+		res["work_item_id"] = resolvedWorkID
+	}
+	writeJSON(w, http.StatusAccepted, res)
 }
 
 func (s *Server) handleSuperReport(w http.ResponseWriter, r *http.Request) {
@@ -374,12 +403,35 @@ func (s *Server) handleSuperShow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSuperList(w http.ResponseWriter, r *http.Request) {
-	workers, _ := s.Store.ListWorkers(r.Context())
-	threads, _ := s.Store.ListThreads(r.Context(), 50)
-	timers, _ := s.Store.ListTimers(r.Context())
+	ctx := r.Context()
+	workItems, err := s.Store.ListWorkItems(ctx, false)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	pendingActions, err := s.Store.ListPendingActions(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	workers, err := s.Store.ListWorkers(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	threads, err := s.Store.ListThreads(ctx, 50)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	timers, err := s.Store.ListTimers(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
 	liveAgents := []map[string]any{}
 	if s.Fleet != nil {
-		if ags, err := s.Fleet.Agents(r.Context()); err == nil {
+		if ags, aErr := s.Fleet.Agents(ctx); aErr == nil {
 			for _, a := range ags {
 				name := ""
 				if a.Name != nil {
@@ -403,13 +455,76 @@ func (s *Server) handleSuperList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	machines := []model.Machine{}
+	if s.Fleet != nil {
+		machines = s.Fleet.Machines()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"machines": s.Fleet.Machines(),
-		"agents":   liveAgents,
-		"workers":  workers,
-		"threads":  threads,
-		"timers":   timers,
+		"work_items":      workItems,
+		"pending_actions": pendingActions,
+		"machines":        machines,
+		"agents":          liveAgents,
+		"workers":         workers,
+		"threads":         threads,
+		"timers":          timers,
 	})
+}
+
+func (s *Server) handleSuperTasks(w http.ResponseWriter, r *http.Request) {
+	includeClosed := r.URL.Query().Get("all") == "1" || strings.EqualFold(r.URL.Query().Get("all"), "true")
+	items, err := s.Engine.ListWorkItems(r.Context(), includeClosed)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"work_items": items})
+}
+
+func (s *Server) handleSuperSetTask(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID       string `json:"id"`
+		Thread   string `json:"thread"`
+		Title    string `json:"title"`
+		NextStep string `json:"next_step"`
+		Worker   string `json:"worker"`
+		Branch   string `json:"branch"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	wi, err := s.Engine.SetWorkItem(r.Context(), body.ID, body.Thread, body.Title, body.NextStep, body.Worker, body.Branch)
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
+		} else if errors.Is(err, store.ErrWorkItemClosed) {
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "work_item": wi})
+}
+
+func (s *Server) handleSuperDoneTask(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Note string `json:"note"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	wi, err := s.Engine.CloseWorkItem(r.Context(), r.PathValue("id"), body.Note)
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
+		} else if errors.Is(err, store.ErrWorkItemClosed) {
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "work_item": wi})
 }
 
 func (s *Server) handleSuperTimers(w http.ResponseWriter, r *http.Request) {
@@ -599,6 +714,9 @@ func (s *Server) handleSaveMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRestartRouter(w http.ResponseWriter, r *http.Request) {
-	_ = s.Engine.RestartRouter(r.Context())
+	if err := s.Engine.RestartRouter(r.Context()); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
 }

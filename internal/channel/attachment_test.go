@@ -3,10 +3,15 @@ package channel
 import (
 	"bytes"
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kiperjing/corgi/internal/core"
@@ -162,7 +167,7 @@ func TestExplicitReplyAttachmentsAnyExtensionSpacesAndNoRegexScraping(t *testing
 		bus.OnReply(ctx, &model.Entry{
 			Thread: "wecom:grp-explicit",
 			Text:   "正文仅提及路径 " + mdPath + " 与 " + htmlPath + "，未显式传 --file",
-		}, nil)
+		}, nil, nil)
 		if got := readFiles(); len(got) != 0 {
 			t.Fatalf("expected zero attachments without explicit Files, got %+v", got)
 		}
@@ -173,7 +178,7 @@ func TestExplicitReplyAttachmentsAnyExtensionSpacesAndNoRegexScraping(t *testing
 		bus.OnReply(ctx, &model.Entry{
 			Thread: "wecom:grp-explicit",
 			Text:   strings.Repeat("超长分析正文内容", 260),
-		}, nil)
+		}, nil, nil)
 		got := readFiles()
 		if len(got) != 1 || !strings.HasPrefix(got[0].name, "corgi-report-") || !strings.HasSuffix(got[0].name, ".md") {
 			t.Fatalf("expected fallback corgi-report-*.md attachment, got %+v", got)
@@ -287,7 +292,7 @@ func TestExplicitReplyAttachmentsRejectRelativeInvalidDirectoriesAndUnsafePaths(
 				Thread: "wecom:grp-safe",
 				Text:   "直接投递防御测试",
 				Files:  []string{tc.path},
-			}, nil)
+			}, nil, nil)
 			if got := readFiles(); len(got) != 0 {
 				t.Fatalf("Bus.OnReply unexpectedly sent attachment for %q: %+v", tc.path, got)
 			}
@@ -307,4 +312,170 @@ func TestExplicitReplyAttachmentsRejectRelativeInvalidDirectoriesAndUnsafePaths(
 			t.Fatal("expected error when exceeding MaxReplyAttachments")
 		}
 	})
+}
+
+type rewriteHostRT struct {
+	base   http.RoundTripper
+	target *url.URL
+}
+
+func (rt rewriteHostRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	r2 := r.Clone(r.Context())
+	r2.URL.Scheme = rt.target.Scheme
+	r2.URL.Host = rt.target.Host
+	r2.Host = rt.target.Host
+	return rt.base.RoundTrip(r2)
+}
+
+func TestCrossMachineReplyAttachmentSingleFetchQuietBypassAndArtifactEvidence(t *testing.T) {
+	dir := t.TempDir()
+	remoteDir := t.TempDir()
+	remoteHTML := filepath.Join(remoteDir, "corgi-inbox-prototype.html")
+	remoteBody := []byte("<!doctype html><h1>Remote Mac Prototype</h1>")
+	if err := os.WriteFile(remoteHTML, remoteBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remoteSecond := filepath.Join(remoteDir, "notes.txt")
+	if err := os.WriteFile(remoteSecond, []byte("second file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var fetchCalls atomic.Int32
+	nodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/attachments/read" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		fetchCalls.Add(1)
+		var body struct {
+			Path string `json:"path"`
+		}
+		raw, _ := os.ReadFile(remoteHTML)
+		_ = raw
+		var decErr error
+		if err := func() error {
+			var b bytes.Buffer
+			_, _ = b.ReadFrom(r.Body)
+			if strings.Contains(b.String(), "corgi-inbox-prototype.html") {
+				body.Path = remoteHTML
+			} else if strings.Contains(b.String(), "notes.txt") {
+				body.Path = remoteSecond
+			} else {
+				body.Path = "/etc/hosts"
+			}
+			return nil
+		}(); err != nil {
+			decErr = err
+		}
+		_ = decErr
+		name, data, cleanPath, err := core.ReadAttachmentFile(body.Path)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"` + err.Error() + `"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("X-Corgi-Filename", url.PathEscape(name))
+		w.Header().Set("X-Corgi-Clean-Path", url.PathEscape(cleanPath))
+		_, _ = w.Write(data)
+	}))
+	defer nodeSrv.Close()
+
+	parsedURL, _ := url.Parse(nodeSrv.URL)
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"claude"})
+	fl.Attach(&fleet.RemoteMachine{
+		Info: model.Machine{ID: "mac-node", Name: "MacBook", Online: true, Agents: []string{"agy"}},
+		HTTPClient: &http.Client{
+			Transport: rewriteHostRT{base: nodeSrv.Client().Transport, target: parsedURL},
+		},
+	})
+	ctx := context.Background()
+	eng, err := core.NewEngine(ctx, st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		mu       sync.Mutex
+		sent     []sentAttachment
+		failName string
+	)
+	bus := NewBus(eng, nil, nil)
+	bus.sendFn = func(context.Context, string, string) error { return nil }
+	bus.sendFileFn = func(_ context.Context, chatID, filename string, data []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if failName != "" && filename == failName {
+			return errors.New("wecom errcode=850003: permission denied")
+		}
+		sent = append(sent, sentAttachment{chat: chatID, name: filename, data: append([]byte(nil), data...)})
+		return nil
+	}
+
+	wi, err := eng.SetWorkItem(ctx, "new", model.MainThread, "收纳箱原型企微交付", "发送 HTML", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate user actively looking at Web in quiet mode: explicit --file MUST still bypass suppression!
+	bus.RecordWebSeen()
+	res, err := eng.ReplyDetailed(ctx, core.ReplyRequest{
+		Thread:  model.MainThread,
+		Text:    "原型已发到企微",
+		Machine: "MacBook",
+		WorkID:  wi.ID,
+		Files:   []string{remoteHTML},
+	})
+	if err != nil {
+		t.Fatalf("ReplyDetailed remote attachment failed: %v", err)
+	}
+	if fetchCalls.Load() != 1 {
+		t.Fatalf("expected single remote fetch, got %d", fetchCalls.Load())
+	}
+	if res.Entry.FileMachine != "mac-node" {
+		t.Fatalf("expected entry.FileMachine=mac-node, got %q", res.Entry.FileMachine)
+	}
+	if len(res.Delivery.Files) != 1 || res.Delivery.Files[0].Status != "delivered" {
+		t.Fatalf("expected delivered outcome, got %+v", res.Delivery.Files)
+	}
+	mu.Lock()
+	if len(sent) != 1 || sent[0].name != "corgi-inbox-prototype.html" || !bytes.Equal(sent[0].data, remoteBody) {
+		t.Fatalf("unexpected remote bytes sent: %+v", sent)
+	}
+	mu.Unlock()
+
+	// Verify confirmed delivery artifact was recorded on the work item.
+	updatedWI, err := st.GetWorkItem(ctx, wi.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updatedWI.Artifacts) != 1 || updatedWI.Artifacts[0].EntryID != res.Entry.ID || updatedWI.Artifacts[0].Machine != "mac-node" {
+		t.Fatalf("expected artifact evidence recorded on work item, got %+v", updatedWI.Artifacts)
+	}
+
+	// Partial delivery failure: first file delivers, second fails -> caller gets exact per-file status.
+	mu.Lock()
+	failName = "notes.txt"
+	mu.Unlock()
+	res2, err := eng.ReplyDetailed(ctx, core.ReplyRequest{
+		Thread:  model.MainThread,
+		Text:    "双附件测试",
+		Machine: "mac-node",
+		Files:   []string{remoteHTML, remoteSecond},
+	})
+	if err != nil {
+		t.Fatalf("partial failure should still return entry + per-file outcomes, got err=%v", err)
+	}
+	if len(res2.Delivery.Files) != 2 || res2.Delivery.Files[0].Status != "delivered" || res2.Delivery.Files[1].Status != "failed" {
+		t.Fatalf("expected [delivered, failed] per-file outcomes, got %+v", res2.Delivery.Files)
+	}
+	if !strings.Contains(res2.Warning, "850003") {
+		t.Fatalf("expected warning mentioning failure reason, got %q", res2.Warning)
+	}
 }

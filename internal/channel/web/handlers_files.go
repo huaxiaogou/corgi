@@ -310,6 +310,32 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"path": dest, "name": name, "size": n})
 }
 
+// handleReadAttachment serves a strictly validated local file (5 MiB max, safe paths only)
+// for Hub-to-Node cross-machine `corgi reply --machine M --file PATH` attachment delivery.
+func (s *Server) handleReadAttachment(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path string `json:"path"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	name, data, cleanPath, err := core.ReadAttachmentFile(body.Path)
+	if err != nil {
+		code := http.StatusBadRequest
+		if os.IsNotExist(err) {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Corgi-Filename", url.PathEscape(name))
+	w.Header().Set("X-Corgi-Clean-Path", url.PathEscape(cleanPath))
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
 func sanitizeFilename(name string) string {
 	name = filepath.Base(strings.ReplaceAll(strings.TrimSpace(name), "\\", "/"))
 	ext := unsafeUploadRe.ReplaceAllString(filepath.Ext(name), "")

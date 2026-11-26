@@ -155,7 +155,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const routerWorking = router?.status === "working";
   const hasThreadContent = entries.length > 0 || pendingActions.length > 0 || routerWorking;
 
-  const { containerRef, contentRef, onScroll, showJumpBottom, scrollToBottom, capturePrependAnchor } = useAutoScroll({
+  const { containerRef, contentRef, onScroll, showJumpBottom, scrollToBottom, capturePrependAnchor, captureVisibleAnchor } = useAutoScroll({
     resetKey: `${thread}:${focusSeq}`,
     contentKey: [
       liveEntries.length,
@@ -211,6 +211,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
 
   const resolveInlineAction = async (act: Action, choice: string, toastText: string) => {
     if (busyActionId === act.id) return;
+    captureVisibleAnchor();
     setBusyActionId(act.id);
     try {
       await api(`/api/super/actions/${encodeURIComponent(act.id)}/resolve`, { choice, by: "web" });
@@ -224,6 +225,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
 
   const dismissInlineAction = async (act: Action) => {
     if (busyActionId === act.id) return;
+    captureVisibleAnchor();
     setBusyActionId(act.id);
     try {
       await api(`/api/super/actions/${encodeURIComponent(act.id)}/dismiss`, {});
@@ -566,7 +568,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                         : `已将确认发送至 ${eventAction.target_worker || "终端"}`
                       : undefined;
                   return (
-                    <div key={entry.id} id={`entry-${entry.id}`} className={`pl-0 sm:pl-10 ${hlClass}`}>
+                    <div key={entry.id} id={`entry-${entry.id}`} data-entry-id={entry.id} className={`pl-0 sm:pl-10 ${hlClass}`}>
                       <DecisionReceiptCard
                         action={eventAction}
                         at={entry.at}
@@ -581,7 +583,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                 const histRef = entry.ref?.startsWith("h:") ? entry.ref.slice(2) : "";
                 if (histRef) {
                   return (
-                    <div key={entry.id} id={`entry-${entry.id}`} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
+                    <div key={entry.id} id={`entry-${entry.id}`} data-entry-id={entry.id} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
                       <StatusDot status={entry.tone === "error" ? "blocked" : "idle"} />
                       <span className="font-mono-code text-[11px]">{new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                       <button
@@ -601,7 +603,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                   const wk = data?.workers.find((w) => w.name === entry.ref);
                   const badge = workerSpawnStatusBadge(wk);
                   return (
-                    <div key={entry.id} id={`entry-${entry.id}`} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
+                    <div key={entry.id} id={`entry-${entry.id}`} data-entry-id={entry.id} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
                       <StatusDot status={badge.dot} />
                       <span className="font-mono-code text-[11px]">{new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                       <button
@@ -619,7 +621,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                 }
                 if (entry.ref === "corgi" && router?.pane_id) {
                   return (
-                    <div key={entry.id} id={`entry-${entry.id}`} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
+                    <div key={entry.id} id={`entry-${entry.id}`} data-entry-id={entry.id} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
                       <StatusDot status={entry.tone === "error" || entry.tone === "blocked" ? "blocked" : "idle"} />
                       <span className="font-mono-code text-[11px]">{new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                       <button
@@ -633,7 +635,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                   );
                 }
                 return (
-                  <div key={entry.id} id={`entry-${entry.id}`} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
+                  <div key={entry.id} id={`entry-${entry.id}`} data-entry-id={entry.id} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
                     <StatusDot status={entry.tone === "blocked" || entry.tone === "error" ? "blocked" : entry.tone === "done" ? "done" : "idle"} />
                     <span className="font-mono-code text-[11px]">{new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                     <span>{entry.text}</span>
@@ -662,7 +664,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                       ? "Corgi 正在处理…"
                       : "已同步至对话";
                   return (
-                    <div key={entry.id} id={`entry-${entry.id}`} className={`pl-0 sm:pl-10 ${hlClass}`}>
+                    <div key={entry.id} id={`entry-${entry.id}`} data-entry-id={entry.id} className={`pl-0 sm:pl-10 ${hlClass}`}>
                       <DecisionReceiptCard
                         action={receiptAction}
                         at={entry.at}
@@ -676,7 +678,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                   );
                 }
                 return (
-                  <div key={entry.id} id={`entry-${entry.id}`} className={`flex flex-col items-end gap-1 ${hlClass}`}>
+                  <div key={entry.id} id={`entry-${entry.id}`} data-entry-id={entry.id} className={`flex flex-col items-end gap-1 ${hlClass}`}>
                     {entry.re && <QuoteBlock quote={entry.re} align="right" onJumpToEntry={jumpToEntry} />}
                     <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-sm text-[14px] leading-relaxed pill-user whitespace-pre-wrap">{entry.text}</div>
                     <span className="text-[11px] text-muted pr-1">
@@ -692,7 +694,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
               const inlineAction = pendingByEntryId.get(entry.id);
               const inlineBusy = inlineAction ? busyActionId === inlineAction.id : false;
               return (
-                <div key={entry.id} id={`entry-${entry.id}`} className={`group flex items-start gap-3 ${hlClass}`}>
+                <div key={entry.id} id={`entry-${entry.id}`} data-entry-id={entry.id} className={`group flex items-start gap-3 ${hlClass}`}>
                   <div className="w-7 h-7 rounded-lg border border-hairline flex items-center justify-center shrink-0 mt-0.5">
                     <CorgiMark className="w-4 h-4" />
                   </div>
@@ -897,9 +899,8 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
           }}
           onClearReply={() => setReplyTo(null)}
           onToast={onToast}
-          onSend={async ({ text, machine, kind, model, effort }) => {
+          onSend={async ({ text, machine, kind, model, effort, clientMsgId }) => {
             const reId = replyTo?.id ?? "";
-            setReplyTo(null);
             const shouldQueue = router?.status === "working" || effectiveQueue.length > 0;
             const tmpId = shouldQueue ? `tmp-${++tmpSeqRef.current}` : "";
             if (tmpId) {
@@ -914,8 +915,10 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                 kind,
                 model,
                 effort,
+                client_msg_id: clientMsgId,
                 mode: shouldQueue ? "queue" : "auto",
               });
+              setReplyTo(null);
               if (tmpId) {
                 setOptimisticQueued((prev) => {
                   const without = prev.filter((x) => x.id !== tmpId);
@@ -932,6 +935,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                 setOptimisticQueued((prev) => prev.filter((x) => x.id !== tmpId));
               }
               onToast(err instanceof Error ? err.message : "发送失败");
+              throw err;
             }
           }}
         />

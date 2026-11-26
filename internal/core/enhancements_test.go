@@ -116,21 +116,32 @@ func TestNaturalReplyAutoResolveSilentAckAndSevenDayExpiry(t *testing.T) {
 		t.Fatalf("unquoted sibling action should stay pending: %+v", gotNew)
 	}
 
-	// 4. 7-day expiry expires old non-dialog pending actions while keeping worker_dialog & fresh ones.
-	stale := &model.Action{
-		ID: "a_stale_8d", Kind: model.ActionKindRouterCheck, Thread: model.MainThread,
-		Title: "8天前待办", Status: model.ActionPending, CreatedAt: time.Now().Add(-8 * 24 * time.Hour),
+	// 4. 7-day expiry expires old router_choice/patrol_digest actions while preserving worker_dialog & router_check.
+	staleChoice := &model.Action{
+		ID: "a_stale_8d_choice", Kind: model.ActionKindRouterChoice, Thread: model.MainThread,
+		Title: "8天前选项", Status: model.ActionPending, CreatedAt: time.Now().Add(-8 * 24 * time.Hour),
 	}
-	if err := st.InsertAction(ctx, stale); err != nil {
+	staleCheck := &model.Action{
+		ID: "a_stale_8d_check", Kind: model.ActionKindRouterCheck, Thread: model.MainThread,
+		Title: "8天前待确认", Status: model.ActionPending, CreatedAt: time.Now().Add(-8 * 24 * time.Hour),
+	}
+	if err := st.InsertAction(ctx, staleChoice); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertAction(ctx, staleCheck); err != nil {
 		t.Fatal(err)
 	}
 	snap := eng.Snapshot(ctx, model.MainThread)
-	gotStale, _ := st.GetAction(ctx, stale.ID)
-	if gotStale.Status != model.ActionExpired || gotStale.ResolvedBy != "expired" {
-		t.Fatalf("expected 8-day-old pending action expired, got %+v", gotStale)
+	gotStaleChoice, _ := st.GetAction(ctx, staleChoice.ID)
+	if gotStaleChoice.Status != model.ActionExpired || gotStaleChoice.ResolvedBy != "expired" {
+		t.Fatalf("expected 8-day-old router_choice expired, got %+v", gotStaleChoice)
+	}
+	gotStaleCheck, _ := st.GetAction(ctx, staleCheck.ID)
+	if gotStaleCheck.Status != model.ActionPending {
+		t.Fatalf("expected router_check exempted from 7-day expiry, got %+v", gotStaleCheck)
 	}
 	for _, a := range snap.Actions {
-		if a.ID == stale.ID {
+		if a.ID == staleChoice.ID {
 			t.Fatalf("expired action leaked into Snapshot.Actions: %+v", a)
 		}
 	}

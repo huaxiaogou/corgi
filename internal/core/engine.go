@@ -47,6 +47,8 @@ type SpawnRequest struct {
 	Subscribe *bool  `json:"subscribe"`
 	Resume    string `json:"resume"`
 	Worktree  string `json:"worktree,omitempty"` // auto (default) | on | off
+	WorkID    string `json:"work_id,omitempty"`
+	Ephemeral bool   `json:"ephemeral,omitempty"`
 }
 
 // SayRequest represents an incoming human message from Web, WeCom, or CLI.
@@ -64,6 +66,7 @@ type SayRequest struct {
 	Model         string `json:"model,omitempty"`
 	Effort        string `json:"effort,omitempty"`
 	IdemKey       string `json:"idem_key,omitempty"`
+	ClientMsgID   string `json:"client_msg_id,omitempty"`
 }
 
 type screenMark struct {
@@ -344,6 +347,16 @@ func (e *Engine) Say(ctx context.Context, req SayRequest) (*model.Entry, *model.
 	return e.sayWithSteer(ctx, req, false)
 }
 
+func normalizeSayIdemKey(req SayRequest) string {
+	if k := strings.TrimSpace(req.IdemKey); k != "" {
+		return k
+	}
+	if cid := strings.TrimSpace(req.ClientMsgID); cid != "" {
+		return "client:" + cid
+	}
+	return ""
+}
+
 func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (*model.Entry, *model.Trigger, error) {
 	text := strings.TrimSpace(req.Text)
 	if text == "" {
@@ -357,6 +370,7 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 	if channel == "" {
 		channel = "web"
 	}
+	idemKey := normalizeSayIdemKey(req)
 
 	var quote *model.Quote
 	if req.ReEntryID != "" {
@@ -379,6 +393,11 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 	if err != nil {
 		return nil, nil, err
 	}
+	tid, tseq, err := e.store.NextID(ctx, "t")
+	if err != nil {
+		return nil, nil, err
+	}
+	now := time.Now()
 	entry := &model.Entry{
 		ID:       eid,
 		Seq:      eseq,
@@ -386,7 +405,7 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 		Thread:   thread,
 		Channel:  channel,
 		Text:     text,
-		At:       time.Now(),
+		At:       now,
 		Re:       quote,
 		ActionID: strings.TrimSpace(req.ActionID),
 	}
@@ -414,19 +433,41 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 	if channel == "wecom" {
 		source = "wecom"
 	}
-	trig, err := e.Ingest(ctx, source, thread, req.From, promptText, req.IdemKey, directTarget, entry.ID)
+	pol := e.policyFor(source)
+	decision := pol.Action
+	if len(pol.Allow) > 0 && !slices.Contains(pol.Allow, req.From) {
+		decision = "ignore"
+	}
+	trig := &model.Trigger{
+		ID:      tid,
+		Seq:     tseq,
+		Source:  source,
+		Thread:  thread,
+		From:    req.From,
+		Text:    promptText,
+		At:      now,
+		Policy:  decision,
+		Status:  "queued",
+		IdemKey: idemKey,
+		Ref:     entry.ID,
+		Steer:   steer,
+	}
+	if decision == "ignore" {
+		trig.Status = "ignored"
+	} else if directTarget != "" {
+		trig.Targets = []string{directTarget}
+	}
+
+	savedEntry, savedTrig, dup, err := e.store.CommitSayEntryAndTrigger(ctx, entry, trig)
 	if err != nil {
 		return nil, nil, err
 	}
-	if steer && trig != nil {
-		trig.Steer = true
-		_ = e.store.UpdateTrigger(ctx, trig)
+	if dup {
+		return savedEntry, savedTrig, nil
 	}
-	if err := e.store.InsertEntry(ctx, entry); err != nil {
-		return nil, nil, err
-	}
+
 	if strings.TrimSpace(req.ActionID) == "" {
-		e.autoResolvePendingOnUserReply(ctx, thread, req.ReEntryID, channel, text)
+		e.autoResolvePendingOnUserReply(ctx, thread, req.ReEntryID, req.QuoteText, channel, text)
 	}
 	if recent, _, err := e.store.ListEntries(ctx, "", 30); err == nil {
 		_ = e.memory.WriteMessages(recent)
@@ -435,9 +476,9 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 	e.mu.Lock()
 	sink := e.sink
 	e.mu.Unlock()
-	sink.OnUserMessage(ctx, entry)
+	sink.OnUserMessage(ctx, savedEntry)
 	sink.OnStateChanged()
-	return entry, trig, nil
+	return savedEntry, savedTrig, nil
 }
 
 // MarkActionPushedToWeCom persists that a pending Action card was pushed to WeCom.
@@ -445,9 +486,15 @@ func (e *Engine) MarkActionPushedToWeCom(ctx context.Context, actionID string) e
 	return e.store.MarkActionPushedToWeCom(ctx, actionID)
 }
 
-// autoResolvePendingOnUserReply resolves pending non-dialog actions in thread when the human
-// naturally replies in chat (matching either an explicit quoted entry or the latest Corgi prompt).
-func (e *Engine) autoResolvePendingOnUserReply(ctx context.Context, thread, reEntryID, channel, text string) {
+// autoResolvePendingOnUserReply resolves pending actions in thread when the human replies in chat:
+// - Explicit quoted entry (reEntryID != "") resolves only the matching action (including router_check).
+// - WeCom quoted text with unknown entry ID (reEntryID == "" && quoteText != "") never guesses.
+// - Unquoted follow-up replies only auto-resolve router_choice / patrol_digest (never router_check or worker_dialog).
+func (e *Engine) autoResolvePendingOnUserReply(ctx context.Context, thread, reEntryID, quoteText, channel, text string) {
+	reID := strings.TrimSpace(reEntryID)
+	if reID == "" && strings.TrimSpace(quoteText) != "" {
+		return
+	}
 	pending, err := e.store.ListPendingActions(ctx)
 	if err != nil || len(pending) == 0 {
 		return
@@ -457,6 +504,9 @@ func (e *Engine) autoResolvePendingOnUserReply(ctx context.Context, thread, reEn
 		if a.Thread != thread || a.Kind == model.ActionKindWorkerDialog {
 			continue
 		}
+		if reID == "" && a.Kind == model.ActionKindRouterCheck {
+			continue
+		}
 		candidates = append(candidates, a)
 	}
 	if len(candidates) == 0 {
@@ -464,7 +514,6 @@ func (e *Engine) autoResolvePendingOnUserReply(ctx context.Context, thread, reEn
 	}
 
 	entries, _, _ := e.store.ListEntries(ctx, thread, 60)
-	reID := strings.TrimSpace(reEntryID)
 	e.mu.Lock()
 	sink := e.sink
 	e.mu.Unlock()
@@ -539,17 +588,27 @@ func (e *Engine) buildDispatchHint(req SayRequest) string {
 }
 
 // ReplyRequest describes a Corgi outbound reply with optional quick-choice buttons,
-// review check, digest replacement, or explicit local file attachments.
+// review check, digest replacement, work item linkage, or explicit file attachments.
 type ReplyRequest struct {
 	Thread   string
 	Text     string
 	ReID     string
 	Options  []string
 	Files    []string
+	Machine  string
+	WorkID   string
 	Check    bool
 	Digest   bool
 	Worker   string
 	Category string
+}
+
+// ReplyResult carries the persisted entry, optional action, warning string, and per-file delivery outcomes.
+type ReplyResult struct {
+	Entry    *model.Entry
+	Action   *model.Action
+	Warning  string
+	Delivery ReplyDelivery
 }
 
 // Reply records Corgi's outbound message and creates a synchronized Action if options/check are set.
@@ -566,19 +625,39 @@ func (e *Engine) Reply(ctx context.Context, thread, text, reID string, options [
 // ReplyWithMeta records Corgi's outbound message and creates a synchronized Action,
 // replacing any prior pending patrol digest card when req.Digest is true.
 func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.Entry, *model.Action, string, error) {
+	res, err := e.ReplyDetailed(ctx, req)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return res.Entry, res.Action, res.Warning, nil
+}
+
+// ReplyDetailed validates and fetches any explicit attachments once on the selected machine before
+// persisting the entry/action, passes the exact fetched bytes to ChannelSink, records confirmed
+// delivery evidence on req.WorkID when set, and returns per-file delivery outcomes.
+func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyResult, error) {
 	text := strings.TrimSpace(req.Text)
 	if text == "" {
-		return nil, nil, "", fmt.Errorf("empty reply")
+		return nil, fmt.Errorf("empty reply")
 	}
-	files, err := ValidateAttachmentPaths(req.Files)
+	opts, err := cleanOptions(req.Options)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("validate reply attachments: %w", err)
+		return nil, err
+	}
+	workID := strings.TrimSpace(req.WorkID)
+	if workID != "" {
+		if _, wErr := e.store.GetWorkItem(ctx, workID); wErr != nil {
+			return nil, fmt.Errorf("invalid --work %q: %w", workID, wErr)
+		}
+	}
+	fetchedFiles, files, fileMachine, err := e.readReplyAttachments(ctx, req.Machine, req.Files)
+	if err != nil {
+		return nil, fmt.Errorf("validate reply attachments: %w", err)
 	}
 	thread := req.Thread
 	if thread == "" {
 		thread = model.MainThread
 	}
-	opts := cleanOptions(req.Options)
 	hasOpts := len(opts) > 0
 	wantCheck := !hasOpts && req.Check
 
@@ -597,28 +676,30 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 
 	eid, eseq, err := e.store.NextID(ctx, "e")
 	if err != nil {
-		return nil, nil, "", err
+		return nil, err
 	}
 	now := time.Now()
 	entry := &model.Entry{
-		ID:      eid,
-		Seq:     eseq,
-		Role:    "corgi",
-		Thread:  thread,
-		Channel: "corgi",
-		Text:    text,
-		At:      now,
-		Re:      quote,
-		Options: opts,
-		Files:   files,
-		Check:   req.Check,
+		ID:          eid,
+		Seq:         eseq,
+		Role:        "corgi",
+		Thread:      thread,
+		Channel:     "corgi",
+		Text:        text,
+		At:          now,
+		Re:          quote,
+		Options:     opts,
+		Files:       files,
+		FileMachine: fileMachine,
+		WorkItemID:  workID,
+		Check:       req.Check,
 	}
 
 	var action *model.Action
 	if hasOpts || wantCheck {
 		aid, _, err := e.store.NextID(ctx, "a")
 		if err != nil {
-			return nil, nil, "", err
+			return nil, err
 		}
 		kind := model.ActionKindRouterChoice
 		var choices []model.ActionChoice
@@ -666,12 +747,12 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 		}
 		entry.ActionID = aid
 		if err := e.store.InsertAction(ctx, action); err != nil {
-			return nil, nil, "", err
+			return nil, err
 		}
 	}
 
 	if err := e.store.InsertEntry(ctx, entry); err != nil {
-		return nil, nil, "", err
+		return nil, err
 	}
 	if recent, _, err := e.store.ListEntries(ctx, "", 30); err == nil {
 		_ = e.memory.WriteMessages(recent)
@@ -697,10 +778,30 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 			warns = append(warns, fmt.Sprintf("reply is %d units (usual budget ≤%d; ok if detail or list was requested)", n, limit))
 		}
 	}
-	warn := strings.Join(warns, "; ")
-	sink.OnReply(ctx, entry, action)
+	delivery := sink.OnReply(ctx, entry, action, fetchedFiles)
+	for _, fd := range delivery.Files {
+		if fd.Status == "delivered" && workID != "" {
+			_, _ = e.store.RecordWorkItemArtifact(ctx, workID, model.WorkArtifact{
+				Path:        fd.Path,
+				Machine:     fd.Machine,
+				EntryID:     entry.ID,
+				DeliveredAt: time.Now(),
+			})
+		} else if fd.Status != "delivered" {
+			detail := fd.Status
+			if fd.Error != "" {
+				detail += ": " + fd.Error
+			}
+			warns = append(warns, fmt.Sprintf("attachment %s %s", fd.Path, detail))
+		}
+	}
 	sink.OnStateChanged()
-	return entry, action, warn, nil
+	return &ReplyResult{
+		Entry:    entry,
+		Action:   action,
+		Warning:  strings.Join(warns, "; "),
+		Delivery: delivery,
+	}, nil
 }
 
 // Ingest stores a Trigger after applying deterministic fast-path policies.
@@ -835,18 +936,26 @@ func (e *Engine) notifyChanged() {
 	sink.OnStateChanged()
 }
 
-func cleanOptions(raw []string) []string {
+const maxOptionRunes = 240
+
+func cleanOptions(raw []string) ([]string, error) {
 	var out []string
-	for _, s := range raw {
-		s = oneLineClip(s, 80)
-		if s != "" && !slices.Contains(out, s) {
+	for i, s := range raw {
+		s = strings.Join(strings.Fields(s), " ")
+		if s == "" {
+			continue
+		}
+		if n := len([]rune(s)); n > maxOptionRunes {
+			return nil, fmt.Errorf("option %d exceeds %d characters (%d)", i+1, maxOptionRunes, n)
+		}
+		if !slices.Contains(out, s) {
 			out = append(out, s)
 			if len(out) >= 6 {
 				break
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 func removeStr(list []string, v string) []string {

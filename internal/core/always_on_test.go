@@ -72,8 +72,8 @@ func TestHandoverTriggersAndArchivesSession(t *testing.T) {
 	}
 	sessID := "11111111-2222-3333-4444-555555555555"
 	trPath := filepath.Join(projDir, sessID+".jsonl")
-	trLine70 := `{"type":"assistant","message":{"usage":{"input_tokens":140000,"output_tokens":500}}}` + "\n"
-	if err := os.WriteFile(trPath, []byte(trLine70), 0o600); err != nil {
+	trLine55 := `{"type":"assistant","message":{"usage":{"input_tokens":110000,"output_tokens":500}}}` + "\n"
+	if err := os.WriteFile(trPath, []byte(trLine55), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -112,20 +112,20 @@ func TestHandoverTriggersAndArchivesSession(t *testing.T) {
 		model.RouterName: {pane: "w-router:p1", status: "idle", ready: true, kind: "claude", session: sessID},
 	}
 
-	// 0. At 70% (< 90% default threshold), handover must NOT trigger yet.
+	// 0. At 55% (< 70% default threshold), handover must NOT trigger yet.
 	eng.checkHandover(ctx, live, false)
 	if eng.handingOver() {
-		t.Fatal("handover must not start at 70% under default 90% threshold")
+		t.Fatal("handover must not start at 55% under default 70% threshold")
 	}
 
-	// 1. Advance transcript to 184k/200k tokens (92% >= 90% default) -> triggers handover flush prompt.
-	trLine92 := `{"type":"assistant","message":{"usage":{"input_tokens":184000,"output_tokens":500}}}` + "\n"
-	if err := os.WriteFile(trPath, []byte(trLine92), 0o600); err != nil {
+	// 1. Advance transcript to 146k/200k tokens (73% >= 70% default) -> triggers handover flush prompt.
+	trLine73 := `{"type":"assistant","message":{"usage":{"input_tokens":146000,"output_tokens":500}}}` + "\n"
+	if err := os.WriteFile(trPath, []byte(trLine73), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	eng.checkHandover(ctx, live, false)
 	if !eng.handingOver() {
-		t.Fatal("expected handover to start at 92% context fill")
+		t.Fatal("expected handover to start at 73% context fill")
 	}
 	mu.Lock()
 	if len(prompts) != 1 || !strings.Contains(prompts[0], "Handover") {

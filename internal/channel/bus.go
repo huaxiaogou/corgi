@@ -165,12 +165,19 @@ func (b *Bus) wecomDeliveryState(thread string, now time.Time) (suppress bool, w
 	return suppress, wecomRecent
 }
 
-func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Action) {
+func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Action, attachments []core.AttachmentFile) core.ReplyDelivery {
 	chatID := threadToWeComChat(entry.Thread)
 	now := time.Now()
 	suppress, wecomRecent := b.wecomDeliveryState(entry.Thread, now)
+	hasExplicitFiles := len(attachments) > 0 || len(entry.Files) > 0
 	if suppress {
-		return
+		if !hasExplicitFiles {
+			return core.ReplyDelivery{}
+		}
+		// Explicit --file deliveries bypass quiet-mode Web suppression so requested files still reach WeCom.
+		return core.ReplyDelivery{
+			Files: b.sendReplyAttachments(ctx, chatID, entry, attachments, false),
+		}
 	}
 
 	// Decision cards (--opt / --check) bypass Outbox batching and push immediately when not suppressed.
@@ -185,32 +192,34 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 				}
 			}
 		}
-		if len(entry.Files) > 0 {
-			b.sendReplyAttachments(ctx, chatID, entry, false)
+		if hasExplicitFiles {
+			return core.ReplyDelivery{
+				Files: b.sendReplyAttachments(ctx, chatID, entry, attachments, false),
+			}
 		}
-		return
+		return core.ReplyDelivery{}
 	}
 
-	if !b.canSendMarkdown() {
-		return
-	}
-
-	body := formatWeComReply(entry)
-	b.mu.Lock()
-	if wecomRecent {
-		// Active WeCom conversation: deliver immediately instead of holding 20s in Outbox.
-		send := b.sendFn
-		b.mu.Unlock()
-		if err := send(ctx, chatID, body); err != nil {
-			b.logger.Warn("immediate wecom reply failed", "chat_id", chatID, "err", err)
+	if b.canSendMarkdown() {
+		body := formatWeComReply(entry)
+		b.mu.Lock()
+		if wecomRecent {
+			// Active WeCom conversation: deliver immediately instead of holding 20s in Outbox.
+			send := b.sendFn
+			b.mu.Unlock()
+			if err := send(ctx, chatID, body); err != nil {
+				b.logger.Warn("immediate wecom reply failed", "chat_id", chatID, "err", err)
+			}
+		} else {
+			b.outbox[chatID] = append(b.outbox[chatID], outboxItem{text: body, at: now})
+			b.mu.Unlock()
 		}
-	} else {
-		b.outbox[chatID] = append(b.outbox[chatID], outboxItem{text: body, at: now})
-		b.mu.Unlock()
 	}
 
 	// Explicit attachment delivery (or offline-readable .md fallback for very long plain replies).
-	b.sendReplyAttachments(ctx, chatID, entry, true)
+	return core.ReplyDelivery{
+		Files: b.sendReplyAttachments(ctx, chatID, entry, attachments, true),
+	}
 }
 
 func formatWeComReply(entry *model.Entry) string {
@@ -230,33 +239,88 @@ func formatWeComReply(entry *model.Entry) string {
 	return txt
 }
 
-func (b *Bus) sendReplyAttachments(ctx context.Context, chatID string, entry *model.Entry, allowLongFallback bool) {
-	if entry == nil || b.sendFileFn == nil || (b.wecom != nil && !b.wecom.Online()) {
-		return
+func (b *Bus) sendReplyAttachments(ctx context.Context, chatID string, entry *model.Entry, attachments []core.AttachmentFile, allowLongFallback bool) []core.AttachmentDelivery {
+	if entry == nil {
+		return nil
+	}
+	wecomReady := b.sendFileFn != nil && (b.wecom == nil || b.wecom.Online())
+
+	// 1. Pre-fetched attachments validated once by Engine.ReplyDetailed (supports Hub & remote nodes).
+	if len(attachments) > 0 {
+		out := make([]core.AttachmentDelivery, 0, len(attachments))
+		for _, att := range attachments {
+			res := core.AttachmentDelivery{
+				Path:    att.Path,
+				Machine: att.Machine,
+				Name:    att.Name,
+			}
+			if !wecomReady {
+				res.Status = "skipped"
+				res.Error = "wecom offline or not configured"
+				out = append(out, res)
+				continue
+			}
+			if err := b.sendFileFn(ctx, chatID, att.Name, att.Data); err != nil {
+				b.logger.Warn("push reply attachment to wecom failed", "path", att.Path, "machine", att.Machine, "err", err)
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					res.Status = "unknown"
+				} else {
+					res.Status = "failed"
+				}
+				res.Error = err.Error()
+			} else {
+				res.Status = "delivered"
+			}
+			out = append(out, res)
+		}
+		return out
 	}
 
-	// 1. Send explicitly attached local files after full path/type/size validation (no regex scraping).
+	// 2. Fallback for direct Bus.OnReply callers passing entry.Files without pre-fetched bytes (local Hub disk only).
 	if len(entry.Files) > 0 {
+		out := make([]core.AttachmentDelivery, 0, len(entry.Files))
 		for _, rawPath := range entry.Files {
+			res := core.AttachmentDelivery{Path: rawPath, Machine: entry.FileMachine}
+			if !wecomReady {
+				res.Status = "skipped"
+				res.Error = "wecom offline or not configured"
+				out = append(out, res)
+				continue
+			}
 			name, data, cleanPath, err := core.ReadAttachmentFile(rawPath)
 			if err != nil {
 				b.logger.Warn("skip invalid reply attachment", "path", rawPath, "err", err)
+				res.Status = "failed"
+				res.Error = err.Error()
+				out = append(out, res)
 				continue
 			}
+			res.Path = cleanPath
+			res.Name = name
 			if err := b.sendFileFn(ctx, chatID, name, data); err != nil {
 				b.logger.Warn("push reply attachment to wecom failed", "path", cleanPath, "err", err)
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					res.Status = "unknown"
+				} else {
+					res.Status = "failed"
+				}
+				res.Error = err.Error()
+			} else {
+				res.Status = "delivered"
 			}
+			out = append(out, res)
 		}
-		return
+		return out
 	}
 
-	// 2. If plain reply body itself is very long (>1800 runes), attach as an offline-readable .md file.
-	if allowLongFallback && len([]rune(entry.Text)) > 1800 {
+	// 3. If plain reply body itself is very long (>1800 runes), attach as an offline-readable .md file.
+	if allowLongFallback && wecomReady && len([]rune(entry.Text)) > 1800 {
 		name := "corgi-report-" + time.Now().Format("150405") + ".md"
 		if err := b.sendFileFn(ctx, chatID, name, []byte(entry.Text)); err != nil {
 			b.logger.Warn("push long reply attachment to wecom failed", "err", err)
 		}
 	}
+	return nil
 }
 
 // FlushDue delivers coalesced Outbox messages whose buffer window has elapsed (or all when force=true).

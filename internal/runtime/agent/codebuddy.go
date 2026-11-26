@@ -369,39 +369,72 @@ func (c *CodeBuddyAdapter) ReadContextUsage(transcriptPath string, defaultWindow
 		_, _ = f.Seek(fi.Size()-tail, io.SeekStart)
 	}
 	var (
-		lastExplicit model.ContextUsage
-		lastMetric   model.ContextUsage
+		latest       model.ContextUsage
+		turnExplicit model.ContextUsage
 		lastModel    string
 		stepIDs      = map[string]struct{}{}
 	)
+	type usageFields struct {
+		TotalTokens      int `json:"totalTokens"`
+		InputTokens      int `json:"inputTokens"`
+		OutputTokens     int `json:"outputTokens"`
+		Total            int `json:"total_tokens"`
+		Input            int `json:"input_tokens"`
+		Output           int `json:"output_tokens"`
+		Prompt           int `json:"prompt_tokens"`
+		Completion       int `json:"completion_tokens"`
+	}
+	extractUsed := func(u *usageFields) int {
+		if u == nil {
+			return 0
+		}
+		if u.TotalTokens > 0 {
+			return u.TotalTokens
+		}
+		if u.InputTokens > 0 || u.OutputTokens > 0 {
+			return u.InputTokens + u.OutputTokens
+		}
+		if u.Total > 0 {
+			return u.Total
+		}
+		if u.Input > 0 || u.Output > 0 {
+			return u.Input + u.Output
+		}
+		if u.Prompt > 0 || u.Completion > 0 {
+			return u.Prompt + u.Completion
+		}
+		return 0
+	}
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64<<10), 8<<20)
 	for sc.Scan() {
 		line := sc.Bytes()
 		if !bytes.Contains(line, []byte(`"turn-metrics"`)) &&
+			!bytes.Contains(line, []byte(`"model-usage"`)) &&
 			!bytes.Contains(line, []byte(`"providerData"`)) &&
 			!bytes.Contains(line, []byte(`"usage"`)) {
 			continue
 		}
 		var e struct {
-			Type         string `json:"type"`
-			TokenDelta   int    `json:"tokenDelta"`
+			Type         string       `json:"type"`
+			Model        string       `json:"model"`
+			TokenDelta   int          `json:"tokenDelta"`
+			Usage        *usageFields `json:"usage"`
 			ProviderData *struct {
-				MessageID      string `json:"messageId"`
-				Model          string `json:"model"`
-				RequestModelID string `json:"requestModelId"`
-				Usage          *struct {
-					Total      int `json:"total_tokens"`
-					Input      int `json:"input_tokens"`
-					Output     int `json:"output_tokens"`
-					Prompt     int `json:"prompt_tokens"`
-					Completion int `json:"completion_tokens"`
-				} `json:"usage"`
+				MessageID      string       `json:"messageId"`
+				Model          string       `json:"model"`
+				RequestModelID string       `json:"requestModelId"`
+				Usage          *usageFields `json:"usage"`
+				RawUsage       *usageFields `json:"rawUsage"`
 			} `json:"providerData"`
 		}
 		if json.Unmarshal(line, &e) != nil {
 			continue
 		}
+		if m := strings.TrimSpace(e.Model); m != "" {
+			lastModel = m
+		}
+		explicitUsed := 0
 		if e.ProviderData != nil {
 			if m := strings.TrimSpace(e.ProviderData.RequestModelID); m != "" {
 				lastModel = m
@@ -411,37 +444,39 @@ func (c *CodeBuddyAdapter) ReadContextUsage(transcriptPath string, defaultWindow
 			if e.ProviderData.MessageID != "" {
 				stepIDs[e.ProviderData.MessageID] = struct{}{}
 			}
-			if u := e.ProviderData.Usage; u != nil {
-				used := u.Total
-				if used <= 0 {
-					used = u.Input + u.Output
-				}
-				if used <= 0 {
-					used = u.Prompt + u.Completion
-				}
-				if used > 0 {
-					win := codeBuddyWindowForModel(lastModel, defaultWindow, used)
-					lastExplicit = model.ContextUsage{Used: used, Window: win}
-				}
+			if u := extractUsed(e.ProviderData.RawUsage); u > 0 {
+				explicitUsed = u
+			} else if u := extractUsed(e.ProviderData.Usage); u > 0 {
+				explicitUsed = u
 			}
 		}
-		if e.Type == "turn-metrics" && e.TokenDelta > 0 {
-			steps := len(stepIDs)
-			if steps <= 0 {
-				steps = 1
+		if u := extractUsed(e.Usage); u > 0 {
+			explicitUsed = u
+		}
+		if explicitUsed > 0 {
+			win := codeBuddyWindowForModel(lastModel, defaultWindow, explicitUsed)
+			turnExplicit = model.ContextUsage{Used: explicitUsed, Window: win}
+			latest = turnExplicit
+		}
+		if e.Type == "turn-metrics" {
+			if turnExplicit.Used > 0 {
+				latest = turnExplicit
+			} else if e.TokenDelta > 0 {
+				steps := len(stepIDs)
+				if steps <= 0 {
+					steps = 1
+				}
+				estUsed := e.TokenDelta / steps
+				if estUsed > 0 {
+					win := codeBuddyWindowForModel(lastModel, defaultWindow, 0)
+					latest = model.ContextUsage{Used: estUsed, Window: win}
+				}
 			}
-			estUsed := e.TokenDelta / steps
-			if estUsed > 0 {
-				win := codeBuddyWindowForModel(lastModel, defaultWindow, 0)
-				lastMetric = model.ContextUsage{Used: estUsed, Window: win}
-			}
+			turnExplicit = model.ContextUsage{}
 			clear(stepIDs)
 		}
 	}
-	if lastExplicit.Used > 0 {
-		return lastExplicit
-	}
-	return lastMetric
+	return latest
 }
 
 func codeBuddyWindowForModel(modelName string, fallback, used int) int {

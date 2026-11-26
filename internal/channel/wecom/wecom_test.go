@@ -174,6 +174,13 @@ func TestDecryptDownloadMediaAndChunkedUpload(t *testing.T) {
 					"body":    map[string]any{"media_id": "mid-999"},
 				})
 				_ = conn.Write(r.Context(), websocket.MessageText, resp)
+			case "aibot_send_msg":
+				resp, _ := json.Marshal(map[string]any{
+					"headers": map[string]any{"req_id": reqID},
+					"errcode": 0,
+					"errmsg":  "ok",
+				})
+				_ = conn.Write(r.Context(), websocket.MessageText, resp)
 			}
 		}
 	}))
@@ -212,6 +219,12 @@ func TestDecryptDownloadMediaAndChunkedUpload(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected cmd %s in %s", want, joined)
 		}
+	}
+
+	// Empty recipient target must return an explicit error instead of silent nil.
+	emptyClient := NewClient(Config{}, Handlers{}, nil)
+	if err := emptyClient.SendFile(ctx, "", "audit.md", wantPlain); err == nil {
+		t.Fatal("expected error when SendFile has no target chatid")
 	}
 }
 

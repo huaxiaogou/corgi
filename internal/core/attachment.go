@@ -1,12 +1,18 @@
 package core
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -71,6 +77,119 @@ func ReadAttachmentFile(raw string) (filename string, data []byte, cleanPath str
 		return "", nil, "", fmt.Errorf("attachment %q exceeds %d MB limit", clean, MaxReplyAttachmentBytes>>20)
 	}
 	return filepath.Base(clean), data, clean, nil
+}
+
+// readReplyAttachments validates and fetches all explicit attachment paths ONCE from the selected
+// machine (Hub local disk when machine is empty, or the specified remote node over its Fleet tunnel).
+func (e *Engine) readReplyAttachments(ctx context.Context, rawMachine string, rawPaths []string) ([]AttachmentFile, []string, string, error) {
+	if len(rawPaths) == 0 {
+		return nil, nil, "", nil
+	}
+	if len(rawPaths) > MaxReplyAttachments {
+		return nil, nil, "", fmt.Errorf("too many attachments: %d exceeds limit %d", len(rawPaths), MaxReplyAttachments)
+	}
+
+	resolvedMachine := ""
+	if m := strings.TrimSpace(rawMachine); m != "" {
+		if e.fleet == nil {
+			return nil, nil, "", fmt.Errorf("machine %q is offline", m)
+		}
+		mc, ok := e.fleet.Machine(m)
+		if !ok {
+			return nil, nil, "", fmt.Errorf("machine %q is not connected", m)
+		}
+		if !mc.Local {
+			resolvedMachine = mc.ID
+		}
+	}
+
+	seen := make(map[string]struct{}, len(rawPaths))
+	cleanPaths := make([]string, 0, len(rawPaths))
+	files := make([]AttachmentFile, 0, len(rawPaths))
+
+	for _, raw := range rawPaths {
+		norm, err := normalizeExplicitAttachmentPath(raw)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		if _, dup := seen[norm]; dup {
+			continue
+		}
+		seen[norm] = struct{}{}
+
+		var (
+			name      string
+			data      []byte
+			cleanPath string
+		)
+		if resolvedMachine == "" {
+			name, data, cleanPath, err = ReadAttachmentFile(norm)
+		} else {
+			name, data, cleanPath, err = e.readRemoteAttachmentFile(ctx, resolvedMachine, norm)
+		}
+		if err != nil {
+			return nil, nil, "", err
+		}
+		cleanPaths = append(cleanPaths, cleanPath)
+		files = append(files, AttachmentFile{
+			Path:    cleanPath,
+			Machine: resolvedMachine,
+			Name:    name,
+			Data:    data,
+		})
+	}
+	return files, cleanPaths, resolvedMachine, nil
+}
+
+func (e *Engine) readRemoteAttachmentFile(ctx context.Context, machine, cleanPath string) (string, []byte, string, error) {
+	if e.fleet == nil {
+		return "", nil, "", fmt.Errorf("machine %q is offline", machine)
+	}
+	hc, err := e.fleet.HTTPClient(machine)
+	if err != nil {
+		return "", nil, "", err
+	}
+	tctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+
+	body, _ := json.Marshal(map[string]string{"path": cleanPath})
+	req, err := http.NewRequestWithContext(tctx, http.MethodPost, "http://node/api/attachments/read", bytes.NewReader(body))
+	if err != nil {
+		return "", nil, "", fmt.Errorf("build remote attachment request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("fetch attachment %q from %s: %w", cleanPath, machine, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 16<<10)).Decode(&errBody)
+		if errBody.Error != "" {
+			return "", nil, "", fmt.Errorf("remote %s: %s", machine, errBody.Error)
+		}
+		return "", nil, "", fmt.Errorf("fetch attachment %q from %s failed: HTTP %d", cleanPath, machine, resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxReplyAttachmentBytes+1))
+	if err != nil {
+		return "", nil, "", fmt.Errorf("read remote attachment %q from %s: %w", cleanPath, machine, err)
+	}
+	if len(data) == 0 {
+		return "", nil, "", fmt.Errorf("attachment %q on %s is empty", cleanPath, machine)
+	}
+	if int64(len(data)) > MaxReplyAttachmentBytes {
+		return "", nil, "", fmt.Errorf("attachment %q on %s exceeds %d MB limit", cleanPath, machine, MaxReplyAttachmentBytes>>20)
+	}
+	name := filepath.Base(cleanPath)
+	if rawName := strings.TrimSpace(resp.Header.Get("X-Corgi-Filename")); rawName != "" {
+		if dec, uErr := url.PathUnescape(rawName); uErr == nil && dec != "" {
+			name = filepath.Base(dec)
+		}
+	}
+	return name, data, cleanPath, nil
 }
 
 func openValidatedAttachment(raw string) (clean string, file *os.File, info os.FileInfo, err error) {

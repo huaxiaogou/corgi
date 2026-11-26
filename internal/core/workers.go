@@ -21,7 +21,11 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		return nil, fmt.Errorf("task is required")
 	}
 	st := e.Settings()
-	var sessionID string
+	var (
+		sessionID    string
+		resumeWorkID string
+		resumeBranch string
+	)
 	if req.Resume != "" {
 		old, err := e.store.GetWorker(ctx, req.Resume)
 		if err != nil {
@@ -34,6 +38,8 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 			return nil, fmt.Errorf("worker %q has no saved session id to resume; spawn a fresh worker", req.Resume)
 		}
 		req.Kind, req.Cwd, req.Machine, sessionID = old.Kind, old.Cwd, old.Machine, old.Session
+		resumeWorkID = old.WorkItemID
+		resumeBranch = old.WorktreeBranch
 		if old.RepoRoot != "" {
 			req.Cwd = e.resolveResumeCwd(ctx, old.Machine, old.Cwd, old.RepoRoot)
 		}
@@ -125,6 +131,22 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		}
 	}
 
+	// Resolve work-item assignment before acquiring wtMu/tx so NextID never contends with an open tx.
+	targetWorkID := strings.TrimSpace(req.WorkID)
+	if !req.Ephemeral && targetWorkID == "" && resumeWorkID != "" {
+		if existingWI, wiErr := e.store.GetWorkItem(ctx, resumeWorkID); wiErr == nil && existingWI.ClosedAt == nil {
+			targetWorkID = existingWI.ID
+		}
+	}
+	var newWorkID string
+	if !req.Ephemeral && targetWorkID == "" {
+		var idErr error
+		newWorkID, _, idErr = e.store.NextID(ctx, "wi")
+		if idErr != nil {
+			return nil, idErr
+		}
+	}
+
 	e.wtMu.Lock()
 	var wtPrep *worktreePrep
 	if sessionID == "" {
@@ -159,10 +181,17 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		wk.WorktreeBranch = wtPrep.WorktreeBranch
 		wk.WorktreeBase = wtPrep.BaseCommit
 	}
-	err = e.store.UpsertWorker(ctx, wk)
+	if req.Ephemeral {
+		err = e.store.UpsertWorker(ctx, wk)
+	} else {
+		_, err = e.store.AttachWorkerAndUpsert(ctx, wk, targetWorkID, newWorkID, oneLineClip(req.Task, 90), "等待 "+name+" 完成并验收")
+	}
 	e.wtMu.Unlock()
 	if err != nil {
 		return nil, err
+	}
+	if !req.Ephemeral && resumeBranch != "" && wk.WorkItemID != "" {
+		_ = e.store.RecordWorkItemBranch(ctx, wk.WorkItemID, resumeBranch)
 	}
 	sub := thread != model.MainThread
 	if req.Subscribe != nil {
@@ -466,22 +495,71 @@ func (e *Engine) failSpawnedWorker(ctx context.Context, wk *model.Worker, paneID
 // SendToWorker queues a steering message for an active worker, or adopts a live
 // manually-started agent matching workerName so the Router can delegate directly to it.
 func (e *Engine) SendToWorker(ctx context.Context, workerName, thread, text string) (*model.Trigger, error) {
+	trig, _, err := e.SendToWorkerWithWork(ctx, workerName, thread, text, "")
+	return trig, err
+}
+
+// SendToWorkerWithWork steers an active or newly-adopted worker while ensuring durable work-item linkage:
+// explicit workID attaches to that item; otherwise inherits the worker's open item, requires disambiguation
+// when multiple open items reference the worker, or creates a new item if unassigned.
+func (e *Engine) SendToWorkerWithWork(ctx context.Context, workerName, thread, text, workID string) (*model.Trigger, string, error) {
 	wk, err := e.store.GetWorker(ctx, workerName)
 	if err != nil || wk.Ended {
 		adopted, adoptErr := e.adoptLiveAgent(ctx, workerName, thread, text)
 		if adoptErr != nil {
-			return nil, fmt.Errorf("no running worker or live agent named %q", workerName)
+			return nil, "", fmt.Errorf("no running worker or live agent named %q", workerName)
 		}
 		wk = adopted
 	}
 	if thread == "" {
 		thread = wk.Thread
 	}
+	prevBranch := wk.WorktreeBranch
 	if wk.IdleSince != nil || wk.IdlePatrolCount > 0 || wk.SnoozeUntil != nil {
 		resetWorkerIdle(wk)
-		_ = e.store.UpsertWorker(ctx, wk)
 	}
-	return e.Ingest(ctx, "router", thread, model.RouterName, text, "", wk.Name, wk.Name)
+
+	targetWorkID := strings.TrimSpace(workID)
+	if targetWorkID == "" && wk.WorkItemID != "" {
+		if existingWI, wiErr := e.store.GetWorkItem(ctx, wk.WorkItemID); wiErr == nil && existingWI.ClosedAt == nil {
+			targetWorkID = existingWI.ID
+		}
+	}
+	if targetWorkID == "" {
+		matches, mErr := e.store.FindOpenWorkItemsByWorker(ctx, wk.Name)
+		if mErr != nil {
+			return nil, "", mErr
+		}
+		if len(matches) == 1 {
+			targetWorkID = matches[0].ID
+		} else if len(matches) > 1 {
+			ids := make([]string, 0, len(matches))
+			for _, m := range matches {
+				ids = append(ids, m.ID)
+			}
+			return nil, "", fmt.Errorf("worker %q belongs to multiple open work items (%s); specify --work <id>", wk.Name, strings.Join(ids, ", "))
+		}
+	}
+	var newWorkID string
+	if targetWorkID == "" {
+		var idErr error
+		newWorkID, _, idErr = e.store.NextID(ctx, "wi")
+		if idErr != nil {
+			return nil, "", idErr
+		}
+	}
+	wi, err := e.store.AttachWorkerAndUpsert(ctx, wk, targetWorkID, newWorkID, oneLineClip(text, 90), "等待 "+wk.Name+" 完成并验收")
+	if err != nil {
+		return nil, "", err
+	}
+	if prevBranch != "" && wi != nil {
+		_ = e.store.RecordWorkItemBranch(ctx, wi.ID, prevBranch)
+	}
+	trig, err := e.Ingest(ctx, "router", thread, model.RouterName, text, "", wk.Name, wk.Name)
+	if err != nil {
+		return nil, "", err
+	}
+	return trig, wk.WorkItemID, nil
 }
 
 func (e *Engine) adoptLiveAgent(ctx context.Context, target, thread, task string) (*model.Worker, error) {
@@ -610,6 +688,9 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 	}
 	if wk.WorkspaceID != "" && e.fleet != nil {
 		_ = e.fleet.CloseWorkspace(ctx, wk.WorkspaceID)
+	}
+	if wk.WorkItemID != "" && wk.WorktreeBranch != "" {
+		_ = e.store.RecordWorkItemBranch(ctx, wk.WorkItemID, wk.WorktreeBranch)
 	}
 	wk.Ended = true
 	wk.Status = "done"

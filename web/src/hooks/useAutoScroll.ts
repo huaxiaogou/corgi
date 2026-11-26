@@ -38,6 +38,7 @@ export function useAutoScroll({
   const raf1Ref = useRef<number | null>(null);
   const raf2Ref = useRef<number | null>(null);
   const prependSnapRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const visibleAnchorRef = useRef<{ entryId: string; topOffset: number; expiresAt: number } | null>(null);
   const [showJumpBottom, setShowJumpBottom] = useState(false);
 
   const cancelRafs = useCallback(() => {
@@ -136,11 +137,45 @@ export function useAutoScroll({
     };
   }, [cancelRafs, clearJumpGuard]);
 
+  const captureVisibleAnchor = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const gap = Math.max(0, el.scrollHeight - el.scrollTop - el.clientHeight);
+    if (gap <= STICK_THRESHOLD_PX && stickToBottomRef.current && !userScrolledUpRef.current) {
+      return;
+    }
+    const cRect = el.getBoundingClientRect();
+    const nodes = el.querySelectorAll<HTMLElement>("[data-entry-id]");
+    let chosen: { entryId: string; topOffset: number } | null = null;
+    for (const node of nodes) {
+      const r = node.getBoundingClientRect();
+      if (r.bottom > cRect.top + 4) {
+        const entryId = node.dataset.entryId ?? "";
+        if (entryId) {
+          chosen = { entryId, topOffset: r.top - cRect.top };
+          break;
+        }
+      }
+    }
+    if (!chosen) return;
+    cancelRafs();
+    clearJumpGuard();
+    pendingInitialRef.current = false;
+    stickToBottomRef.current = false;
+    userScrolledUpRef.current = true;
+    initialSettleUntilRef.current = 0;
+    visibleAnchorRef.current = {
+      ...chosen,
+      expiresAt: performance.now() + 2000,
+    };
+  }, [cancelRafs, clearJumpGuard]);
+
   const scrollToBottom = useCallback((smooth = false) => {
     const el = containerRef.current;
     stickToBottomRef.current = true;
     userScrolledUpRef.current = false;
     prependSnapRef.current = null;
+    visibleAnchorRef.current = null;
     setShowJumpBottom(false);
     if (!el) return;
     if (smooth) {
@@ -169,6 +204,7 @@ export function useAutoScroll({
     userGestureUntilRef.current = 0;
     initialSettleUntilRef.current = 0;
     prependSnapRef.current = null;
+    visibleAnchorRef.current = null;
     setShowJumpBottom(false);
   }, [resetKey, enabled, cancelRafs, clearJumpGuard]);
 
@@ -184,11 +220,29 @@ export function useAutoScroll({
     updateScrollState(el, false);
   }, [prependKey, enabled, updateScrollState]);
 
-  // Synchronously snap to bottom before paint on initial load and while stuck to bottom.
+  // Synchronously snap to bottom before paint on initial load and while stuck to bottom,
+  // or restore an armed visible entry anchor when resolving inline buttons above the bottom.
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!enabled || !el || !hasContent) return;
     if (prependSnapRef.current) return;
+    const anchor = visibleAnchorRef.current;
+    if (anchor) {
+      if (performance.now() > anchor.expiresAt) {
+        visibleAnchorRef.current = null;
+      } else {
+        const target = el.querySelector<HTMLElement>(`#entry-${anchor.entryId}`);
+        if (target) {
+          const delta = target.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.topOffset;
+          if (Math.abs(delta) > 0.5) {
+            el.scrollTop = Math.max(0, el.scrollTop + delta);
+            lastScrollTopRef.current = el.scrollTop;
+          }
+          updateScrollState(el, false);
+        }
+        return;
+      }
+    }
     if (pendingInitialRef.current) {
       pendingInitialRef.current = false;
       stickToBottomRef.current = true;
@@ -204,7 +258,7 @@ export function useAutoScroll({
       snapNow(el);
       scheduleSnapConfirm();
     }
-  }, [resetKey, contentKey, hasContent, enabled, snapNow, scheduleSnapConfirm]);
+  }, [resetKey, contentKey, hasContent, enabled, snapNow, scheduleSnapConfirm, updateScrollState]);
 
   // Keep pinned to bottom across container resize, initial layout settle, and inline image loads.
   useEffect(() => {
@@ -213,6 +267,7 @@ export function useAutoScroll({
 
     const markUserGesture = () => {
       userGestureUntilRef.current = performance.now() + USER_GESTURE_WINDOW_MS;
+      visibleAnchorRef.current = null;
       if (jumpingRef.current) {
         clearJumpGuard();
       }
@@ -287,5 +342,6 @@ export function useAutoScroll({
     showJumpBottom,
     scrollToBottom,
     capturePrependAnchor,
+    captureVisibleAnchor,
   };
 }

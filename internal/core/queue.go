@@ -196,6 +196,25 @@ func (e *Engine) SubmitChatSay(ctx context.Context, req SayRequest, mode string)
 	}
 	scope := RouterQueueScope(thread)
 	mode = strings.ToLower(strings.TrimSpace(mode))
+	clientMsgID := strings.TrimSpace(req.ClientMsgID)
+	idemKey := normalizeSayIdemKey(req)
+
+	// Deduplicate retries BEFORE deciding queue vs immediate delivery so a client retry
+	// after router status flips never produces both a queued item and a direct entry.
+	if idemKey != "" {
+		if existingTrig, err := e.store.GetTriggerByIdemKey(ctx, idemKey); err == nil && existingTrig != nil {
+			var existingEntry *model.Entry
+			if existingTrig.Ref != "" {
+				existingEntry, _ = e.store.GetEntry(ctx, existingTrig.Ref)
+			}
+			return false, nil, existingEntry, existingTrig, nil
+		}
+	}
+	if clientMsgID != "" {
+		if existingItem, err := e.store.FindQueuedPromptByClientMsgID(ctx, scope, clientMsgID); err == nil && existingItem != nil {
+			return true, existingItem, nil, nil, nil
+		}
+	}
 
 	if mode == "steer" {
 		e.setQueuePaused(scope, false)
@@ -216,17 +235,18 @@ func (e *Engine) SubmitChatSay(ctx context.Context, req SayRequest, mode string)
 				return false, nil, nil, nil, err
 			}
 			item := &model.QueuedPrompt{
-				ID:        id,
-				Seq:       seq,
-				Scope:     scope,
-				Thread:    thread,
-				Text:      text,
-				ReEntryID: req.ReEntryID,
-				Machine:   req.Machine,
-				Kind:      req.Kind,
-				Model:     req.Model,
-				Effort:    req.Effort,
-				CreatedAt: time.Now(),
+				ID:          id,
+				Seq:         seq,
+				Scope:       scope,
+				Thread:      thread,
+				Text:        text,
+				ReEntryID:   req.ReEntryID,
+				Machine:     req.Machine,
+				Kind:        req.Kind,
+				Model:       req.Model,
+				Effort:      req.Effort,
+				ClientMsgID: clientMsgID,
+				CreatedAt:   time.Now(),
 			}
 			if err := e.store.InsertQueuedPrompt(ctx, item); err != nil {
 				return false, nil, nil, nil, err
@@ -257,15 +277,16 @@ func (e *Engine) SteerChatPrompt(ctx context.Context, thread, qid string) (*mode
 		return nil, nil, store.ErrNotFound
 	}
 	entry, trig, err := e.sayWithSteer(ctx, SayRequest{
-		Thread:    item.Thread,
-		Channel:   "web",
-		From:      "you",
-		Text:      item.Text,
-		ReEntryID: item.ReEntryID,
-		Machine:   item.Machine,
-		Kind:      item.Kind,
-		Model:     item.Model,
-		Effort:    item.Effort,
+		Thread:      item.Thread,
+		Channel:     "web",
+		From:        "you",
+		Text:        item.Text,
+		ReEntryID:   item.ReEntryID,
+		Machine:     item.Machine,
+		Kind:        item.Kind,
+		Model:       item.Model,
+		Effort:      item.Effort,
+		ClientMsgID: item.ClientMsgID,
 	}, true)
 	if err != nil {
 		return nil, nil, err
@@ -445,15 +466,16 @@ func (e *Engine) drainRouterPrompts(ctx context.Context, live map[string]liveInf
 			continue
 		}
 		if _, _, err := e.sayWithSteer(ctx, SayRequest{
-			Thread:    item.Thread,
-			Channel:   "web",
-			From:      "you",
-			Text:      item.Text,
-			ReEntryID: item.ReEntryID,
-			Machine:   item.Machine,
-			Kind:      item.Kind,
-			Model:     item.Model,
-			Effort:    item.Effort,
+			Thread:      item.Thread,
+			Channel:     "web",
+			From:        "you",
+			Text:        item.Text,
+			ReEntryID:   item.ReEntryID,
+			Machine:     item.Machine,
+			Kind:        item.Kind,
+			Model:       item.Model,
+			Effort:      item.Effort,
+			ClientMsgID: item.ClientMsgID,
 		}, false); err != nil {
 			e.logger.Warn("drain router queued prompt failed", "id", item.ID, "err", err)
 			return
