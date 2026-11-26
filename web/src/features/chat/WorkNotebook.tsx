@@ -14,7 +14,7 @@ import {
   type EnrichedWorkItem,
   type NotebookMode,
 } from "../../lib/workItems";
-import type { Action, WorkItem, Worker } from "../../types/api";
+import type { Action, FileDrawerTarget, WorkItem, Worker } from "../../types/api";
 
 interface Props {
   items: WorkItem[];
@@ -28,6 +28,7 @@ interface Props {
   onAskCorgi: (item: WorkItem) => void;
   onOpenWorker: (name: string) => void;
   onOpenFile: (path: string, machine?: string) => void;
+  onOpenArtifact?: (target: FileDrawerTarget) => void;
   onToast: (msg: string) => void;
 }
 
@@ -53,6 +54,7 @@ export function WorkNotebook({
   onAskCorgi,
   onOpenWorker,
   onOpenFile,
+  onOpenArtifact,
   onToast,
 }: Props) {
   const [dotFilter, setDotFilter] = useState<"all" | DerivedWorkStatus>("all");
@@ -506,7 +508,10 @@ export function WorkNotebook({
               </div>
             )}
 
-            {(linkedWorkers.length > 0 || (item.branches?.length ?? 0) > 0 || (item.artifacts?.length ?? 0) > 0) && (
+            {(linkedWorkers.length > 0 ||
+              (item.branches?.length ?? 0) > 0 ||
+              (item.snapshots?.length ?? 0) > 0 ||
+              (item.artifacts?.length ?? 0) > 0) && (
               <div className="flex flex-wrap gap-1">
                 {linkedWorkers.map((w) => (
                   <button
@@ -527,17 +532,63 @@ export function WorkNotebook({
                     ⎇ {br}
                   </span>
                 ))}
-                {(item.artifacts ?? []).map((art) => (
-                  <button
-                    key={`${art.machine ?? ""}:${art.path}`}
-                    type="button"
-                    onClick={() => onOpenFile(art.path, art.machine)}
-                    title={art.path}
-                    className="px-1.5 py-0.5 rounded border border-strong surface-hover text-[10.5px] font-mono-code text-primary cursor-pointer"
-                  >
-                    📄 {artifactBasename(art.path)}
-                  </button>
-                ))}
+                {(() => {
+                  const snapIds = new Set<string>();
+                  const snapButtons = (item.snapshots ?? []).map((snap) => {
+                    snapIds.add(snap.id);
+                    if (snap.expired) {
+                      return (
+                        <span
+                          key={snap.id}
+                          title="快照已过期"
+                          className="px-1.5 py-0.5 rounded border border-hairline text-[10.5px] font-mono-code text-muted line-through"
+                        >
+                          📄 {snap.name}
+                        </span>
+                      );
+                    }
+                    return (
+                      <button
+                        key={snap.id}
+                        type="button"
+                        onClick={() =>
+                          onOpenArtifact?.({
+                            artifactId: snap.id,
+                            name: snap.name,
+                            kind: snap.kind,
+                            shareToken: snap.share_token,
+                          })
+                        }
+                        title={`${snap.name}（Hub 快照）`}
+                        className="px-1.5 py-0.5 rounded border border-strong surface-hover text-[10.5px] font-mono-code text-primary cursor-pointer"
+                      >
+                        📄 {snap.name}
+                      </button>
+                    );
+                  });
+                  const legacyButtons = (item.artifacts ?? [])
+                    .filter((art) => !art.artifact_id || !snapIds.has(art.artifact_id))
+                    .map((art) => (
+                      <button
+                        key={art.artifact_id || `${art.machine ?? ""}:${art.path}`}
+                        type="button"
+                        onClick={() =>
+                          art.artifact_id && onOpenArtifact
+                            ? onOpenArtifact({
+                                artifactId: art.artifact_id,
+                                name: art.name || artifactBasename(art.path),
+                                kind: art.kind || "text",
+                              })
+                            : onOpenFile(art.path, art.machine)
+                        }
+                        title={art.path}
+                        className="px-1.5 py-0.5 rounded border border-strong surface-hover text-[10.5px] font-mono-code text-primary cursor-pointer"
+                      >
+                        📄 {art.name || artifactBasename(art.path)}
+                      </button>
+                    ));
+                  return [...snapButtons, ...legacyButtons];
+                })()}
               </div>
             )}
 

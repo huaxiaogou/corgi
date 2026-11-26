@@ -470,6 +470,12 @@ func (c *Client) resolveTarget(chatID string) string {
 	return ""
 }
 
+// ResolveTarget returns the effective outbound WeCom chatid for chatID (explicit group/chat ID ->
+// configured DefaultTo -> most recent allowlisted single-chat sender -> first allowlisted user).
+func (c *Client) ResolveTarget(chatID string) string {
+	return c.resolveTarget(chatID)
+}
+
 // SendMarkdown proactively pushes a markdown message to chatID via aibot_send_msg.
 func (c *Client) SendMarkdown(ctx context.Context, chatID, markdown string) error {
 	chatID = c.resolveTarget(chatID)
@@ -486,6 +492,22 @@ func (c *Client) SendMarkdown(ctx context.Context, chatID, markdown string) erro
 		},
 	}
 	return c.send(ctx, frame)
+}
+
+// SendMarkdownACK pushes a markdown message via aibot_send_msg and awaits WeCom RPC acknowledgement.
+func (c *Client) SendMarkdownACK(ctx context.Context, chatID, markdown string) error {
+	chatID = c.resolveTarget(chatID)
+	if chatID == "" {
+		return fmt.Errorf("wecom target chatid is empty (no default recipient configured)")
+	}
+	if _, err := c.callRPC(ctx, "aibot_send_msg", map[string]any{
+		"chatid":   chatID,
+		"msgtype":  "markdown",
+		"markdown": map[string]any{"content": markdown},
+	}); err != nil {
+		return fmt.Errorf("send wecom markdown: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) send(ctx context.Context, frame any) error {

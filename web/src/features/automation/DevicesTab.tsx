@@ -16,6 +16,8 @@ interface Props {
   devices: DeviceView[];
   machines: Machine[];
   settings: Settings | null;
+  effectivePublicURL?: string;
+  flagPublicURL?: string;
   fleetUpdate: FleetUpdateController;
   pairResult: PairResult | null;
   onGenPair: (kind: "browser" | "machine") => Promise<void>;
@@ -30,6 +32,8 @@ export function DevicesTab({
   devices,
   machines,
   settings,
+  effectivePublicURL = "",
+  flagPublicURL = "",
   fleetUpdate,
   pairResult,
   onGenPair,
@@ -38,6 +42,12 @@ export function DevicesTab({
   onToast,
 }: Props) {
   const [savingAuto, setSavingAuto] = useState(false);
+  const [publicURLDraft, setPublicURLDraft] = useState(settings?.public_url ?? "");
+  const [savingURL, setSavingURL] = useState(false);
+
+  useEffect(() => {
+    setPublicURLDraft(settings?.public_url ?? "");
+  }, [settings?.public_url]);
   const {
     verInfo,
     outdatedOnline,
@@ -73,6 +83,19 @@ export function DevicesTab({
       );
     } finally {
       setSavingAuto(false);
+    }
+  };
+
+  const savePublicURL = async () => {
+    setSavingURL(true);
+    try {
+      const cleaned = publicURLDraft.trim();
+      await onSaveSettingsPatch(
+        { public_url: cleaned },
+        cleaned ? "对外访问地址已保存" : "已清空自定义地址（恢复沿用服务器默认地址）"
+      );
+    } finally {
+      setSavingURL(false);
     }
   };
 
@@ -233,6 +256,47 @@ export function DevicesTab({
           })}
         </div>
       </div>
+
+      {settings && (
+        <section className="p-4 rounded-xl border border-hairline space-y-2.5">
+          <div className="font-semibold text-sm">对外访问地址</div>
+          <div className="text-[11.5px] text-muted leading-relaxed">
+            填写平时访问 Corgi 的网址，用于生成企微里的在线预览链接；留空则沿用服务器启动时的默认地址。
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={publicURLDraft}
+              onChange={(e) => setPublicURLDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void savePublicURL();
+                }
+              }}
+              placeholder={flagPublicURL || "例如 http://9.134.247.217:7788 或反代域名"}
+              className="flex-1 px-3 py-1.5 rounded-lg surface-rail border border-strong text-xs font-mono-code outline-none"
+            />
+            <button
+              type="button"
+              disabled={savingURL}
+              onClick={() => void savePublicURL()}
+              className="px-3.5 py-1.5 rounded-lg btn-accent font-medium cursor-pointer shrink-0 disabled:opacity-50"
+            >
+              保存
+            </button>
+          </div>
+          {effectivePublicURL ? (
+            <div className="text-[11px] text-muted font-mono-code truncate" title={effectivePublicURL}>
+              当前生效：{effectivePublicURL}
+            </div>
+          ) : (
+            <div className="text-[11px] text-muted">
+              当前未配置对外地址，企微交付将仅发送原始文件附件。
+            </div>
+          )}
+        </section>
+      )}
 
       {settings && (
         <section className="p-4 rounded-xl border border-hairline space-y-2">

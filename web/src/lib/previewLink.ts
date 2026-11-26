@@ -122,6 +122,22 @@ export function buildFileAPIURL(
   return `/api/file?${qs.toString()}`;
 }
 
+export function buildArtifactAPIURL(id: string, subpath?: "raw" | "download"): string {
+  const base = `/api/artifacts/${encodeURIComponent(id)}`;
+  return subpath ? `${base}/${subpath}` : base;
+}
+
+export function buildPublicPreviewURL(shareToken: string): string {
+  return `/p/${encodeURIComponent(shareToken)}/`;
+}
+
+export function formatByteSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 export function fileBaseName(filePath: string): string {
   const parts = filePath.split("/").filter(Boolean);
   return parts[parts.length - 1] ?? filePath;

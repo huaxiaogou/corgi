@@ -27,10 +27,11 @@ type Bus struct {
 	wecom      *wecom.Client
 	logger     *slog.Logger
 	flushDelay time.Duration
-	uploadDir  string
-	home       string
-	sendFn     func(ctx context.Context, chatID, markdown string) error
-	sendFileFn func(ctx context.Context, chatID, filename string, data []byte) error
+	uploadDir        string
+	home             string
+	sendFn           func(ctx context.Context, chatID, markdown string) error
+	sendMarkdownACK  func(ctx context.Context, chatID, markdown string) error
+	sendFileFn       func(ctx context.Context, chatID, filename string, data []byte) error
 
 	mu            sync.Mutex
 	flushMu       sync.Mutex
@@ -55,6 +56,7 @@ func NewBus(eng *core.Engine, wc *wecom.Client, logger *slog.Logger) *Bus {
 	}
 	if wc != nil {
 		b.sendFn = wc.SendMarkdown
+		b.sendMarkdownACK = wc.SendMarkdownACK
 		b.sendFileFn = wc.SendFile
 	}
 	eng.SetSink(b)
@@ -167,19 +169,81 @@ func (b *Bus) wecomDeliveryState(thread string, now time.Time) (suppress bool, w
 	return suppress, wecomRecent
 }
 
+func (b *Bus) resolveWeComChat(chatID string) string {
+	if b.wecom != nil {
+		return b.wecom.ResolveTarget(chatID)
+	}
+	return strings.TrimSpace(chatID)
+}
+
+func (b *Bus) sendACKMarkdown(ctx context.Context, chatID, markdown string) (status, errMsg string) {
+	send := b.sendMarkdownACK
+	if send == nil {
+		send = b.sendFn
+	}
+	if send == nil || (b.wecom != nil && !b.wecom.Online()) {
+		return "skipped", "wecom offline or not configured"
+	}
+	if err := send(ctx, chatID, markdown); err != nil {
+		b.logger.Warn("send wecom preview link message failed", "chat_id", chatID, "err", err)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return "unknown", err.Error()
+		}
+		return "failed", err.Error()
+	}
+	return "delivered", ""
+}
+
+func escapeWeComLinkLabel(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `[`, `\[`, `]`, `\]`, `(`, `\(`, `)`, `\)`, "\r", "", "\n", " ").Replace(strings.TrimSpace(s))
+}
+
+func formatPreviewLinksBlock(attachments []core.AttachmentFile) string {
+	var lines []string
+	for _, att := range attachments {
+		if strings.TrimSpace(att.ShareURL) == "" {
+			continue
+		}
+		label := escapeWeComLinkLabel(att.Name)
+		if label == "" {
+			label = "预览文件"
+		}
+		lines = append(lines, "🔗 [在线预览 · "+label+"]("+att.ShareURL+")")
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Action, attachments []core.AttachmentFile) core.ReplyDelivery {
 	chatID := threadToWeComChat(entry.Thread)
 	now := time.Now()
 	suppress, wecomRecent := b.wecomDeliveryState(entry.Thread, now)
 	hasExplicitFiles := len(attachments) > 0 || len(entry.Files) > 0
+	linksBlock := formatPreviewLinksBlock(attachments)
+
+	// Resolve recipient ONCE across the entire reply when delivering explicit files so link + source files never split targets.
+	if hasExplicitFiles {
+		if resolved := b.resolveWeComChat(chatID); resolved != "" {
+			chatID = resolved
+		}
+	}
+
 	if suppress {
 		if !hasExplicitFiles {
 			return core.ReplyDelivery{}
 		}
-		// Explicit --file deliveries bypass quiet-mode Web suppression so requested files still reach WeCom.
-		return core.ReplyDelivery{
-			Files: b.sendReplyAttachments(ctx, chatID, entry, attachments, false),
+		// Explicit --file deliveries bypass quiet-mode Web suppression: keep prose/card quiet,
+		// send 1 compact links-only message (when configured) and all original source files.
+		var del core.ReplyDelivery
+		if len(attachments) > 0 {
+			if linksBlock != "" {
+				del.LinkStatus, del.LinkError = b.sendACKMarkdown(ctx, chatID, linksBlock)
+			} else {
+				del.LinkStatus = "skipped"
+				del.LinkError = "preview link skipped: configure public_url or --url"
+			}
 		}
+		del.Files = b.sendReplyAttachments(ctx, chatID, entry, attachments, false)
+		return del
 	}
 
 	// Decision cards (--opt / --check) bypass Outbox batching and push immediately when not suppressed.
@@ -195,11 +259,44 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 			}
 		}
 		if hasExplicitFiles {
-			return core.ReplyDelivery{
-				Files: b.sendReplyAttachments(ctx, chatID, entry, attachments, false),
+			var del core.ReplyDelivery
+			if len(attachments) > 0 {
+				if linksBlock != "" {
+					del.LinkStatus, del.LinkError = b.sendACKMarkdown(ctx, chatID, linksBlock)
+				} else {
+					del.LinkStatus = "skipped"
+					del.LinkError = "preview link skipped: configure public_url or --url"
+				}
 			}
+			del.Files = b.sendReplyAttachments(ctx, chatID, entry, attachments, false)
+			return del
 		}
 		return core.ReplyDelivery{}
+	}
+
+	// Ordinary reply with explicit files: bypass 20s Outbox, immediately send 1 Markdown message
+	// containing the reply body + all preview links (via ACK-capable RPC), then send original source files.
+	if hasExplicitFiles {
+		var del core.ReplyDelivery
+		body := formatWeComReply(entry)
+		if linksBlock != "" {
+			if body != "" {
+				body = body + "\n\n" + linksBlock
+			} else {
+				body = linksBlock
+			}
+			del.LinkStatus, del.LinkError = b.sendACKMarkdown(ctx, chatID, body)
+		} else {
+			if len(attachments) > 0 {
+				del.LinkStatus = "skipped"
+				del.LinkError = "preview link skipped: configure public_url or --url"
+			}
+			if b.canSendMarkdown() && body != "" {
+				_, _ = b.sendACKMarkdown(ctx, chatID, body)
+			}
+		}
+		del.Files = b.sendReplyAttachments(ctx, chatID, entry, attachments, false)
+		return del
 	}
 
 	if b.canSendMarkdown() {
@@ -218,7 +315,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 		}
 	}
 
-	// Explicit attachment delivery (or offline-readable .md fallback for very long plain replies).
+	// Offline-readable .md fallback for very long plain replies without explicit files.
 	return core.ReplyDelivery{
 		Files: b.sendReplyAttachments(ctx, chatID, entry, attachments, true),
 	}
@@ -252,9 +349,12 @@ func (b *Bus) sendReplyAttachments(ctx context.Context, chatID string, entry *mo
 		out := make([]core.AttachmentDelivery, 0, len(attachments))
 		for _, att := range attachments {
 			res := core.AttachmentDelivery{
-				Path:    att.Path,
-				Machine: att.Machine,
-				Name:    att.Name,
+				ArtifactID: att.ArtifactID,
+				Path:       att.Path,
+				Machine:    att.Machine,
+				Name:       att.Name,
+				Kind:       att.Kind,
+				PreviewURL: att.ShareURL,
 			}
 			if !wecomReady {
 				res.Status = "skipped"

@@ -5,6 +5,19 @@ export interface Quote {
   text: string;
 }
 
+export interface ArtifactSummary {
+  id: string;
+  name: string;
+  kind: "html" | "image" | "markdown" | "text" | "binary" | string;
+  size: number;
+  share_token?: string;
+  expired?: boolean;
+}
+
+export type FileDrawerTarget =
+  | { artifactId: string; name: string; kind: string; shareToken?: string }
+  | { path: string; machine?: string };
+
 export interface Entry {
   id: string;
   seq: number;
@@ -19,6 +32,9 @@ export interface Entry {
   action_id?: string;
   options?: string[];
   files?: string[];
+  file_machine?: string;
+  artifacts?: ArtifactSummary[];
+  work_item_id?: string;
   check?: boolean;
   pinned?: boolean;
 }
@@ -81,6 +97,10 @@ export interface Worker {
 }
 
 export interface WorkArtifact {
+  artifact_id?: string;
+  name?: string;
+  kind?: string;
+  size?: number;
   path: string;
   machine?: string;
   entry_id?: string;
@@ -95,6 +115,7 @@ export interface WorkItem {
   workers?: string[];
   branches?: string[];
   artifacts?: WorkArtifact[];
+  snapshots?: ArtifactSummary[];
   created_at: string;
   updated_at: string;
   closed_at?: string;
@@ -261,6 +282,7 @@ export interface Settings {
   rotate_pct?: number;
   dream_at?: string;
   auto_update?: boolean;
+  public_url?: string;
   notify_level?: "quiet" | "normal";
   ask_permissions?: boolean;
   paused?: boolean;

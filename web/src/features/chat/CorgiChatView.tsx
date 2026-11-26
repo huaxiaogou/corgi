@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, Check, Pin, X } from "lucide-react";
+import { ArrowDown, Check, Download, ExternalLink, Link2, Pin, X } from "lucide-react";
 import { CorgiButtMark, CorgiMark, StatusDot } from "../../components/CorgiMark";
 import { DecisionCard } from "../../components/DecisionCard";
 import { DecisionReceiptCard } from "../../components/DecisionReceiptCard";
@@ -16,12 +16,18 @@ import {
   type QuoteVisibilityState,
 } from "../../lib/chatFilter";
 import {
+  buildArtifactAPIURL,
+  buildPublicPreviewURL,
+  fileBaseName,
+  formatByteSize,
+} from "../../lib/previewLink";
+import {
   deriveWorkItems,
   formatWorkItemPrompt,
   type DerivedWorkStatus,
   type NotebookMode,
 } from "../../lib/workItems";
-import type { Action, ChatMessage, EndedSession, Entry, Machine, QueuedPrompt, Settings, SuperView, WorkItem } from "../../types/api";
+import type { Action, ArtifactSummary, ChatMessage, EndedSession, Entry, FileDrawerTarget, Machine, QueuedPrompt, Settings, SuperView, WorkItem } from "../../types/api";
 import { ChatHeader } from "./ChatHeader";
 import { ComposerBar } from "./ComposerBar";
 import { WorkNotebook } from "./WorkNotebook";
@@ -65,10 +71,19 @@ interface Props {
   focusSeq?: number;
   onSelectWorker: (paneId: string) => void;
   onOpenFile: (path: string, machine?: string) => void;
+  onOpenArtifact: (target: FileDrawerTarget) => void;
   onToast: (msg: string) => void;
 }
 
-export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWorker, onOpenFile, onToast }: Props) {
+function artifactBadgeLabel(kind: string): string {
+  if (kind === "html") return "HTML";
+  if (kind === "markdown") return "MD";
+  if (kind === "image") return "IMG";
+  if (kind === "text") return "TEXT";
+  return "FILE";
+}
+
+export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWorker, onOpenFile, onOpenArtifact, onToast }: Props) {
   const [replyTo, setReplyTo] = useState<Entry | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQ, setSearchQ] = useState("");
@@ -763,8 +778,149 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                   <div className="flex-1 min-w-0 space-y-1.5">
                     {entry.re && !hideQuote && <QuoteBlock quote={entry.re} align="left" onJumpToEntry={jumpToEntry} />}
                     <div className="text-[14.5px]">
-                      <MarkdownText text={entry.text} onOpenFile={onOpenFile} />
+                      <MarkdownText
+                        text={entry.text}
+                        defaultMachine={entry.file_machine}
+                        entryArtifacts={entry.artifacts}
+                        onOpenFile={onOpenFile}
+                        onOpenArtifact={(art) =>
+                          onOpenArtifact({
+                            artifactId: art.id,
+                            name: art.name,
+                            kind: art.kind,
+                            shareToken: art.share_token,
+                          })
+                        }
+                      />
                     </div>
+                    {entry.artifacts && entry.artifacts.length > 0 ? (
+                      <div className="space-y-1.5 pt-1">
+                        {entry.artifacts.map((art: ArtifactSummary) => {
+                          if (art.expired) {
+                            return (
+                              <div
+                                key={art.id}
+                                className="rounded-xl px-3 py-2 border border-hairline surface-rail flex items-center justify-between gap-2 text-xs"
+                              >
+                                <span className="font-mono-code text-muted line-through truncate">{art.name}</span>
+                                <span className="text-[10.5px] px-1.5 py-0.5 rounded border border-hairline surface-bg text-muted shrink-0">
+                                  快照已过期
+                                </span>
+                              </div>
+                            );
+                          }
+                          const openTarget: FileDrawerTarget = {
+                            artifactId: art.id,
+                            name: art.name,
+                            kind: art.kind,
+                            shareToken: art.share_token,
+                          };
+                          const newTabHref = art.share_token
+                            ? buildPublicPreviewURL(art.share_token)
+                            : buildArtifactAPIURL(art.id, "raw");
+                          const downloadHref = buildArtifactAPIURL(art.id, "download");
+                          return (
+                            <div
+                              key={art.id}
+                              className="rounded-xl px-3 py-2 border border-hairline surface-rail flex items-center justify-between gap-2.5 transition-colors hover:border-[var(--line-2)]"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => onOpenArtifact(openTarget)}
+                                className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer group"
+                              >
+                                <span className="w-8 h-8 rounded-lg surface-bg border border-hairline flex items-center justify-center shrink-0 text-[10.5px] font-semibold font-mono-code text-secondary">
+                                  {artifactBadgeLabel(art.kind)}
+                                </span>
+                                <div className="min-w-0">
+                                  <div className="text-[12.5px] font-medium text-primary truncate group-hover:underline">
+                                    {art.name}
+                                  </div>
+                                  <div className="text-[11px] text-muted font-mono-code">
+                                    {formatByteSize(art.size) || "Hub 快照"}
+                                  </div>
+                                </div>
+                              </button>
+                              <div className="flex items-center gap-1 shrink-0">
+                                {art.kind !== "binary" && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onOpenArtifact(openTarget)}
+                                    className="px-2.5 py-1 rounded-lg border border-strong surface-bg surface-hover text-[11.5px] font-medium text-primary cursor-pointer"
+                                  >
+                                    预览
+                                  </button>
+                                )}
+                                <a
+                                  href={newTabHref}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="w-7 h-7 rounded-lg border border-hairline surface-bg surface-hover flex items-center justify-center text-secondary"
+                                  title="在新标签页打开"
+                                >
+                                  <ExternalLink className="w-3.5 h-3.5" strokeWidth={1.8} />
+                                </a>
+                                {art.share_token && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const full = `${window.location.origin}${buildPublicPreviewURL(art.share_token!)}`;
+                                      void navigator.clipboard
+                                        ?.writeText(full)
+                                        .then(() => onToast("已复制在线预览链接"))
+                                        .catch(() => onToast("复制失败"));
+                                    }}
+                                    className="w-7 h-7 rounded-lg border border-hairline surface-bg surface-hover flex items-center justify-center text-secondary cursor-pointer"
+                                    title="复制在线预览链接"
+                                  >
+                                    <Link2 className="w-3.5 h-3.5" strokeWidth={1.8} />
+                                  </button>
+                                )}
+                                <a
+                                  href={downloadHref}
+                                  className="w-7 h-7 rounded-lg border border-hairline surface-bg surface-hover flex items-center justify-center text-secondary"
+                                  title="下载原件"
+                                >
+                                  <Download className="w-3.5 h-3.5" strokeWidth={1.8} />
+                                </a>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : entry.files && entry.files.length > 0 ? (
+                      <div className="space-y-1.5 pt-1">
+                        {entry.files.map((fp) => (
+                          <div
+                            key={fp}
+                            className="rounded-xl px-3 py-2 border border-hairline surface-rail flex items-center justify-between gap-2.5 text-xs"
+                          >
+                            <button
+                              type="button"
+                              onClick={() => onOpenFile(fp, entry.file_machine)}
+                              className="min-w-0 flex-1 text-left flex items-center gap-2 cursor-pointer group"
+                              title={fp}
+                            >
+                              <span className="font-mono-code text-primary truncate group-hover:underline">
+                                📄 {fileBaseName(fp)}
+                              </span>
+                              {entry.file_machine && (
+                                <span className="text-[10.5px] font-mono-code px-1.5 py-0.5 rounded border border-hairline surface-bg text-muted shrink-0">
+                                  {entry.file_machine}
+                                </span>
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onOpenFile(fp, entry.file_machine)}
+                              className="px-2 py-0.5 rounded-lg border border-strong surface-bg surface-hover text-[11px] text-primary cursor-pointer shrink-0"
+                            >
+                              预览
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                     {inlineAction && (
                       <div className="pt-1 flex flex-wrap items-center gap-1.5">
                         {inlineAction.kind === "router_check" || !inlineAction.choices?.length ? (
@@ -1025,6 +1181,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
         }}
         onOpenWorker={openWorkerByName}
         onOpenFile={onOpenFile}
+        onOpenArtifact={onOpenArtifact}
         onToast={onToast}
       />
       </div>

@@ -33,17 +33,52 @@ type Entry struct {
 	Ref      string    `json:"ref,omitempty"`
 	Tone     string    `json:"tone,omitempty"` // spawn | done | blocked | info | error
 	Re       *Quote    `json:"re,omitempty"`
-	ActionID    string    `json:"action_id,omitempty"`
-	Options     []string  `json:"options,omitempty"`
-	Files       []string  `json:"files,omitempty"`
-	FileMachine string    `json:"file_machine,omitempty"`
-	WorkItemID  string    `json:"work_item_id,omitempty"`
-	Check       bool      `json:"check,omitempty"`
-	Pinned      bool      `json:"pinned,omitempty"`
+	ActionID    string            `json:"action_id,omitempty"`
+	Options     []string          `json:"options,omitempty"`
+	Files       []string          `json:"files,omitempty"`
+	FileMachine string            `json:"file_machine,omitempty"`
+	Artifacts   []ArtifactSummary `json:"artifacts,omitempty"`
+	WorkItemID  string            `json:"work_item_id,omitempty"`
+	Check       bool              `json:"check,omitempty"`
+	Pinned      bool              `json:"pinned,omitempty"`
+}
+
+// ArtifactSummary is the compact, UI-facing descriptor for a Hub-hosted immutable deliverable snapshot.
+// ShareToken and Expired are populated dynamically at read/snapshot time and never stored in reply text.
+type ArtifactSummary struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Kind       string `json:"kind"` // html | image | markdown | text | binary
+	Size       int64  `json:"size"`
+	ShareToken string `json:"share_token,omitempty"`
+	Expired    bool   `json:"expired,omitempty"`
+}
+
+// Artifact is the durable Hub metadata record for one immutable blob stored under ~/.corgi/artifacts/.
+type Artifact struct {
+	ID             string     `json:"id"`
+	EntryID        string     `json:"entry_id"`
+	Ordinal        int        `json:"ordinal"`
+	Thread         string     `json:"thread,omitempty"`
+	WorkItemID     string     `json:"work_item_id,omitempty"`
+	Name           string     `json:"name"`
+	Kind           string     `json:"kind"` // html | image | markdown | text | binary
+	MIME           string     `json:"mime,omitempty"`
+	Size           int64      `json:"size"`
+	SourcePath     string     `json:"source_path,omitempty"`
+	SourceMachine  string     `json:"source_machine,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	ShareExpiresAt time.Time  `json:"share_expires_at"`
+	ExpiresAt      time.Time  `json:"expires_at"`
+	RevokedAt      *time.Time `json:"revoked_at,omitempty"`
 }
 
 // WorkArtifact records a file deliverable explicitly confirmed as delivered for a WorkItem.
 type WorkArtifact struct {
+	ArtifactID  string    `json:"artifact_id,omitempty"`
+	Name        string    `json:"name,omitempty"`
+	Kind        string    `json:"kind,omitempty"`
+	Size        int64     `json:"size,omitempty"`
 	Path        string    `json:"path"`
 	Machine     string    `json:"machine,omitempty"`
 	EntryID     string    `json:"entry_id,omitempty"`
@@ -53,17 +88,18 @@ type WorkArtifact struct {
 // WorkItem is a Hub-owned durable ledger record for an ongoing user project or deliverable.
 // ClosedAt == nil indicates the item is still open.
 type WorkItem struct {
-	ID        string         `json:"id"`
-	Thread    string         `json:"thread"`
-	Title     string         `json:"title"`
-	NextStep  string         `json:"next_step,omitempty"`
-	Workers   []string       `json:"workers,omitempty"`
-	Branches  []string       `json:"branches,omitempty"`
-	Artifacts []WorkArtifact `json:"artifacts,omitempty"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	ClosedAt  *time.Time     `json:"closed_at,omitempty"`
-	CloseNote string         `json:"close_note,omitempty"`
+	ID        string            `json:"id"`
+	Thread    string            `json:"thread"`
+	Title     string            `json:"title"`
+	NextStep  string            `json:"next_step,omitempty"`
+	Workers   []string          `json:"workers,omitempty"`
+	Branches  []string          `json:"branches,omitempty"`
+	Artifacts []WorkArtifact    `json:"artifacts,omitempty"`
+	Snapshots []ArtifactSummary `json:"snapshots,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at"`
+	ClosedAt  *time.Time        `json:"closed_at,omitempty"`
+	CloseNote string            `json:"close_note,omitempty"`
 }
 
 // SearchHit is one matched user/corgi entry from full-text search.
@@ -228,6 +264,7 @@ type Settings struct {
 	RotatePct         int      `json:"rotate_pct,omitempty"`          // 0 = default 90, -1 = never
 	DreamAt           string   `json:"dream_at,omitempty"`            // "HH:MM", "" = "04:00", "off" = disabled
 	AutoUpdate        bool     `json:"auto_update,omitempty"`         // opt-in overnight idle auto-update (default false)
+	PublicURL         string   `json:"public_url,omitempty"`          // optional canonical Hub base URL for outbound preview links
 	NotifyLevel       string   `json:"notify_level,omitempty"`        // quiet | normal
 	AskPermissions    bool     `json:"ask_permissions,omitempty"`
 	Paused            bool     `json:"paused,omitempty"`

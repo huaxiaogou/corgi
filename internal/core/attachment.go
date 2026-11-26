@@ -306,9 +306,13 @@ func isBlockedAttachmentPath(p string) bool {
 		case ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".git":
 			return true
 		case ".corgi":
-			// Block direct runtime secrets/DB under ~/.corgi/ (token, config.json, node.json, corgi.db),
+			// Block direct runtime secrets/DB under ~/.corgi/ (token, config.json, node.json, corgi.db)
+			// and internal Hub artifact snapshot blobs under ~/.corgi/artifacts/,
 			// while still allowing nested deliverables under ~/.corgi/router/, uploads/, worktrees/, etc.
 			if i == len(segs)-2 {
+				return true
+			}
+			if i+1 < len(segs) && segs[i+1] == "artifacts" {
 				return true
 			}
 		}

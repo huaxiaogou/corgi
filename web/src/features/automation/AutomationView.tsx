@@ -12,6 +12,8 @@ type TabKey = "settings" | "hooks" | "memory" | "timers" | "devices";
 
 interface SettingsResp {
   settings: Settings;
+  effective_public_url?: string;
+  flag_public_url?: string;
   policies: Policy[];
   wecom_online: boolean;
   wecom_error?: string;
@@ -38,6 +40,8 @@ export function AutomationView({
 }) {
   const [tab, setTab] = useState<TabKey>("settings");
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [effectivePublicURL, setEffectivePublicURL] = useState("");
+  const [flagPublicURL, setFlagPublicURL] = useState("");
   const [wecomOnline, setWecomOnline] = useState(false);
   const [wecomError, setWecomError] = useState("");
   const [wecomPending, setWecomPending] = useState<PendingWeComUser[]>([]);
@@ -54,6 +58,8 @@ export function AutomationView({
   const loadSettingsMeta = useCallback(async () => {
     const r = await api<SettingsResp>("/api/super/settings");
     setSettings(r.settings);
+    setEffectivePublicURL(r.effective_public_url ?? "");
+    setFlagPublicURL(r.flag_public_url ?? "");
     setWecomOnline(r.wecom_online);
     setWecomError(r.wecom_error ?? "");
     setWecomPending(r.wecom_pending ?? []);
@@ -194,6 +200,8 @@ export function AutomationView({
               devices={devices}
               machines={machines}
               settings={settings}
+              effectivePublicURL={effectivePublicURL}
+              flagPublicURL={flagPublicURL}
               fleetUpdate={fleetUpdate}
               pairResult={pairResult}
               onGenPair={genPair}

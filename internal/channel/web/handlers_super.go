@@ -166,6 +166,15 @@ func (s *Server) handleSuperReply(w http.ResponseWriter, r *http.Request) {
 	if out.Warning != "" {
 		res["warning"] = out.Warning
 	}
+	if len(out.Entry.Artifacts) > 0 {
+		res["artifacts"] = out.Entry.Artifacts
+	}
+	if out.Delivery.LinkStatus != "" {
+		res["link_status"] = out.Delivery.LinkStatus
+	}
+	if out.Delivery.LinkError != "" {
+		res["link_error"] = out.Delivery.LinkError
+	}
 	if len(out.Delivery.Files) > 0 {
 		res["files"] = out.Delivery.Files
 	}
@@ -252,6 +261,7 @@ func (s *Server) handleSuperEarlier(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	s.Engine.HydrateEntriesArtifacts(r.Context(), entries)
 	res := map[string]any{"entries": entries, "more": more}
 	if resolved := s.Engine.ResolvedActionsForEntries(r.Context(), entries); len(resolved) > 0 {
 		res["resolved_actions"] = resolved
@@ -647,14 +657,16 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"settings":      masked,
-		"policies":      s.Engine.Policies(),
-		"wecom_online":  s.Bus.WeComOnline(),
-		"wecom_error":   wecomErr,
-		"wecom_pending": wecomPending,
-		"hub_agents":    hubAgents,
-		"machines":      machines,
-		"hook_key":      hookKey,
+		"settings":           masked,
+		"effective_public_url": s.Engine.EffectivePublicURL(),
+		"flag_public_url":    s.Engine.FlagPublicURL(),
+		"policies":           s.Engine.Policies(),
+		"wecom_online":       s.Bus.WeComOnline(),
+		"wecom_error":        wecomErr,
+		"wecom_pending":      wecomPending,
+		"hub_agents":         hubAgents,
+		"machines":           machines,
+		"hook_key":           hookKey,
 	})
 }
 

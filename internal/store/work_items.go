@@ -324,8 +324,20 @@ func (s *Store) RecordWorkItemArtifact(ctx context.Context, id string, art model
 		art.DeliveredAt = time.Now()
 	}
 	dup := false
-	for _, existing := range wi.Artifacts {
-		if existing.Path == art.Path && existing.Machine == art.Machine && existing.EntryID == art.EntryID {
+	for i, existing := range wi.Artifacts {
+		same := (art.ArtifactID != "" && existing.ArtifactID == art.ArtifactID) ||
+			(existing.Path == art.Path && existing.Machine == art.Machine && existing.EntryID == art.EntryID)
+		if same {
+			if existing.ArtifactID == "" && art.ArtifactID != "" {
+				wi.Artifacts[i].ArtifactID = art.ArtifactID
+				wi.Artifacts[i].Name = art.Name
+				wi.Artifacts[i].Kind = art.Kind
+				wi.Artifacts[i].Size = art.Size
+				wi.UpdatedAt = time.Now()
+				if err := saveWorkItemTx(ctx, tx, wi); err != nil {
+					return nil, err
+				}
+			}
 			dup = true
 			break
 		}

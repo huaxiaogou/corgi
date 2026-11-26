@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -99,6 +100,8 @@ type Engine struct {
 	mu                      sync.Mutex
 	settings                model.Settings
 	policies                []model.Policy
+	flagPublicURLs          []string
+	artifactHMACSecret      []byte
 	routerLaunching         bool
 	routerDispatching       bool
 	hubUpdating             bool
@@ -269,7 +272,11 @@ func (e *Engine) Policies() []model.Policy {
 
 // SaveConfig persists updated Settings and/or Policies and refreshes Router docs.
 func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []model.Policy) error {
-	var routerChanged bool
+	var (
+		routerChanged bool
+		nextSettings  model.Settings
+		nextPolicies  []model.Policy
+	)
 	e.mu.Lock()
 	if st != nil {
 		prev := e.settings
@@ -320,16 +327,17 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 		if ns.WorkerCwd == "" {
 			ns.WorkerCwd = e.home
 		}
+		normPubURL, urlErr := NormalizePublicURL(ns.PublicURL)
+		if urlErr != nil {
+			e.mu.Unlock()
+			return urlErr
+		}
+		ns.PublicURL = normPubURL
 		routerChanged = prev.RouterKind != ns.RouterKind ||
 			prev.RouterModel != ns.RouterModel ||
 			prev.RouterEffort != ns.RouterEffort ||
 			prev.AskPermissions != ns.AskPermissions
-		if prev.AskPermissions && !ns.AskPermissions {
-			clear(e.bypassCheckedAt)
-			clear(e.bypassHealedPID)
-			clear(e.bypassHealFailAt)
-		}
-		e.settings = ns
+		nextSettings = ns
 	}
 	if pols != nil {
 		valid := make([]model.Policy, 0, len(pols))
@@ -340,24 +348,40 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 				valid = append(valid, p)
 			}
 		}
-		e.policies = valid
+		nextPolicies = valid
 	}
-	curSettings := e.settings
-	curPolicies := append([]model.Policy(nil), e.policies...)
 	sink := e.sink
 	e.mu.Unlock()
 
 	if st != nil {
-		if err := e.store.SaveSettings(ctx, curSettings); err != nil {
+		if err := e.store.SaveSettings(ctx, nextSettings); err != nil {
 			return err
-		}
-		if docChanged, err := e.memory.WriteRouterDocsChanged(e.binPath, curSettings); err == nil && docChanged && !routerChanged {
-			e.queueRouterDocReread(ctx)
 		}
 	}
 	if pols != nil {
-		if err := e.store.SavePolicies(ctx, curPolicies); err != nil {
+		if err := e.store.SavePolicies(ctx, nextPolicies); err != nil {
 			return err
+		}
+	}
+
+	e.mu.Lock()
+	if st != nil {
+		if e.settings.AskPermissions && !nextSettings.AskPermissions {
+			clear(e.bypassCheckedAt)
+			clear(e.bypassHealedPID)
+			clear(e.bypassHealFailAt)
+		}
+		e.settings = nextSettings
+	}
+	if pols != nil {
+		e.policies = nextPolicies
+	}
+	curSettings := e.settings
+	e.mu.Unlock()
+
+	if st != nil {
+		if docChanged, err := e.memory.WriteRouterDocsChanged(e.binPath, curSettings); err == nil && docChanged && !routerChanged {
+			e.queueRouterDocReread(ctx)
 		}
 	}
 	if routerChanged && e.fleet != nil {
@@ -674,19 +698,30 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 	if err != nil {
 		return nil, err
 	}
+	thread := req.Thread
+	if thread == "" {
+		thread = model.MainThread
+	}
 	workID := strings.TrimSpace(req.WorkID)
 	if workID != "" {
-		if _, wErr := e.store.GetWorkItem(ctx, workID); wErr != nil {
+		wi, wErr := e.store.GetWorkItem(ctx, workID)
+		if wErr != nil {
 			return nil, fmt.Errorf("invalid --work %q: %w", workID, wErr)
+		}
+		wiThread := wi.Thread
+		if wiThread == "" {
+			wiThread = model.MainThread
+		}
+		if wiThread != thread {
+			return nil, fmt.Errorf("--work %q belongs to thread %q, not %q", workID, wiThread, thread)
 		}
 	}
 	fetchedFiles, files, fileMachine, err := e.readReplyAttachments(ctx, req.Machine, req.Files)
 	if err != nil {
+		if strings.TrimSpace(req.Machine) == "" && errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("validate reply attachments (checked Hub local disk; if the file lives on another machine pass --machine <M>): %w", err)
+		}
 		return nil, fmt.Errorf("validate reply attachments: %w", err)
-	}
-	thread := req.Thread
-	if thread == "" {
-		thread = model.MainThread
 	}
 	hasOpts := len(opts) > 0
 	wantCheck := !hasOpts && req.Check
@@ -709,6 +744,11 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 		return nil, err
 	}
 	now := time.Now()
+	artifactRecs, artifactSummaries, cleanupBlobs, err := e.stageArtifacts(ctx, eid, thread, workID, fetchedFiles, now)
+	if err != nil {
+		return nil, fmt.Errorf("stage reply artifacts: %w", err)
+	}
+
 	entry := &model.Entry{
 		ID:          eid,
 		Seq:         eseq,
@@ -721,14 +761,17 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 		Options:     opts,
 		Files:       files,
 		FileMachine: fileMachine,
+		Artifacts:   artifactSummaries,
 		WorkItemID:  workID,
 		Check:       req.Check,
 	}
 
 	var action *model.Action
+	var expireDigestKind string
 	if hasOpts || wantCheck {
 		aid, _, err := e.store.NextID(ctx, "a")
 		if err != nil {
+			cleanupBlobs()
 			return nil, err
 		}
 		kind := model.ActionKindRouterChoice
@@ -743,12 +786,12 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 			}
 			if req.Digest {
 				kind = model.ActionKindPatrolDigest
-				_ = e.store.ExpireActionsByKind(ctx, thread, model.ActionKindPatrolDigest)
+				expireDigestKind = model.ActionKindPatrolDigest
 			}
 		} else {
 			kind = model.ActionKindRouterCheck
 			if req.Digest {
-				_ = e.store.ExpireActionsByKind(ctx, thread, model.ActionKindPatrolDigest)
+				expireDigestKind = model.ActionKindPatrolDigest
 			}
 		}
 		cat := strings.TrimSpace(req.Category)
@@ -776,12 +819,10 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 			CreatedAt:    now,
 		}
 		entry.ActionID = aid
-		if err := e.store.InsertAction(ctx, action); err != nil {
-			return nil, err
-		}
 	}
 
-	if err := e.store.InsertEntry(ctx, entry); err != nil {
+	if err := e.store.CommitReplyTx(ctx, entry, action, expireDigestKind, artifactRecs); err != nil {
+		cleanupBlobs()
 		return nil, err
 	}
 	if recent, _, err := e.store.ListEntries(ctx, "", 30); err == nil {
@@ -799,9 +840,17 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 	sink := e.sink
 	e.mu.Unlock()
 
+	// Publish committed entry & Hub snapshots to Web SSE immediately before slow channel I/O.
+	sink.OnStateChanged()
+
 	var warns []string
 	if !hasOpts && !wantCheck && req.Digest {
 		warns = append(warns, "ignored --digest without --opt or --check (sent as plain reply; pass 2-4 --opt buttons for a decision or --check for a lightweight review reminder)")
+	}
+	if len(req.Files) == 0 {
+		if p := mentionsDeliverablePath(text); p != "" {
+			warns = append(warns, fmt.Sprintf("reply mentions %s without --file (pass --file %q [--machine M] to publish Hub preview link & WeCom attachment)", p, p))
+		}
 	}
 	if limit > 0 {
 		if n := ReadableReplyLen(text); n > limit {
@@ -809,9 +858,20 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 		}
 	}
 	delivery := sink.OnReply(ctx, entry, action, fetchedFiles)
+	if delivery.LinkStatus != "" && delivery.LinkStatus != "delivered" {
+		detail := delivery.LinkStatus
+		if delivery.LinkError != "" {
+			detail += ": " + delivery.LinkError
+		}
+		warns = append(warns, "wecom preview link "+detail)
+	}
 	for _, fd := range delivery.Files {
 		if fd.Status == "delivered" && workID != "" {
 			_, _ = e.store.RecordWorkItemArtifact(ctx, workID, model.WorkArtifact{
+				ArtifactID:  fd.ArtifactID,
+				Name:        fd.Name,
+				Kind:        fd.Kind,
+				Size:        int64(len(findFetchedBytes(fetchedFiles, fd.ArtifactID))),
 				Path:        fd.Path,
 				Machine:     fd.Machine,
 				EntryID:     entry.ID,
@@ -826,6 +886,9 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 		}
 	}
 	sink.OnStateChanged()
+	if len(artifactRecs) > 0 {
+		go e.SweepArtifacts(context.Background())
+	}
 	return &ReplyResult{
 		Entry:    entry,
 		Action:   action,

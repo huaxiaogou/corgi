@@ -3,13 +3,19 @@ import { ArrowLeft, Download, ExternalLink, Maximize2, Minimize2, RotateCw, X } 
 import { MarkdownText } from "../../components/MarkdownText";
 import { api } from "../../lib/api";
 import { clampSplitWidth, computeSplitBounds } from "../../lib/previewLayout";
-import { buildFileAPIURL, fileBaseName, getPreviewFileKind } from "../../lib/previewLink";
-import type { FileResponse } from "../../types/api";
+import {
+  buildArtifactAPIURL,
+  buildFileAPIURL,
+  buildPublicPreviewURL,
+  fileBaseName,
+  getPreviewFileKind,
+} from "../../lib/previewLink";
+import type { FileDrawerTarget, FileResponse } from "../../types/api";
 import { HtmlPreviewPane } from "./HtmlPreviewPane";
 import { SplitResizer } from "./SplitResizer";
 
 interface Props {
-  target: { path: string; machine?: string } | null;
+  target: FileDrawerTarget | null;
   onClose: () => void;
 }
 
@@ -43,7 +49,15 @@ export function FileDrawer({ target, onClose }: Props) {
     file: typeof window !== "undefined" ? readSavedWidth(WIDTH_STORAGE_KEY_FILE) : null,
   }));
 
-  const kind = target ? getPreviewFileKind(target.path) : "text";
+  const kind = !target
+    ? "text"
+    : "artifactId" in target
+      ? target.kind === "html" || target.kind === "image" || target.kind === "markdown"
+        ? target.kind
+        : target.kind === "binary"
+          ? "binary"
+          : getPreviewFileKind(target.name)
+      : getPreviewFileKind(target.path);
   const isImage = kind === "image";
   const isHTML = kind === "html";
   const isMarkdown = kind === "markdown";
@@ -83,7 +97,8 @@ export function FileDrawer({ target, onClose }: Props) {
 
     if (kind === "image" || kind === "html") return;
     let cancelled = false;
-    void api<FileResponse>(buildFileAPIURL(target))
+    const url = "artifactId" in target ? buildArtifactAPIURL(target.artifactId) : buildFileAPIURL(target);
+    void api<FileResponse>(url)
       .then((res) => {
         if (!cancelled) setFile(res);
       })
@@ -128,9 +143,20 @@ export function FileDrawer({ target, onClose }: Props) {
 
   if (!target) return null;
 
-  const imgSrc = buildFileAPIURL(target, { as: "image" });
-  const htmlSrc = buildFileAPIURL(target, { as: "html" });
-  const downloadSrc = buildFileAPIURL(target, { download: "1" });
+  const displayName = "artifactId" in target ? target.name : fileBaseName(target.path);
+  const subtitle = "artifactId" in target ? "Hub 在线快照" : target.path;
+  const imgSrc =
+    "artifactId" in target ? buildArtifactAPIURL(target.artifactId, "raw") : buildFileAPIURL(target, { as: "image" });
+  const newTabHref =
+    "artifactId" in target
+      ? target.shareToken
+        ? buildPublicPreviewURL(target.shareToken)
+        : buildArtifactAPIURL(target.artifactId, "raw")
+      : buildFileAPIURL(target, { as: "html", scripts: "1" });
+  const downloadSrc =
+    "artifactId" in target
+      ? buildArtifactAPIURL(target.artifactId, "download")
+      : buildFileAPIURL(target, { download: "1" });
 
   return (
     <>
@@ -169,15 +195,21 @@ export function FileDrawer({ target, onClose }: Props) {
             </button>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 min-w-0">
-                <span className="text-[13px] font-semibold truncate">{fileBaseName(target.path)}</span>
-                {target.machine && (
-                  <span className="text-[10.5px] font-mono-code px-1.5 py-0.5 rounded border border-hairline surface-bg text-muted shrink-0">
-                    {target.machine}
+                <span className="text-[13px] font-semibold truncate">{displayName}</span>
+                {"artifactId" in target ? (
+                  <span className="text-[10.5px] px-1.5 py-0.5 rounded border border-hairline surface-bg text-muted shrink-0">
+                    Hub 快照
                   </span>
+                ) : (
+                  target.machine && (
+                    <span className="text-[10.5px] font-mono-code px-1.5 py-0.5 rounded border border-hairline surface-bg text-muted shrink-0">
+                      {target.machine}
+                    </span>
+                  )
                 )}
               </div>
-              <div className="text-[11px] font-mono-code text-muted truncate" title={target.path}>
-                {target.path}
+              <div className="text-[11px] font-mono-code text-muted truncate" title={subtitle}>
+                {subtitle}
               </div>
             </div>
           </div>
@@ -211,11 +243,11 @@ export function FileDrawer({ target, onClose }: Props) {
                   {isWide ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
                 </button>
                 <a
-                  href={htmlSrc}
+                  href={newTabHref}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="w-7 h-7 rounded-lg flex items-center justify-center text-secondary surface-hover"
-                  title="在新标签页打开（沙箱保护）"
+                  title="在新标签页打开"
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
@@ -251,8 +283,10 @@ export function FileDrawer({ target, onClose }: Props) {
 
         {isHTML ? (
           <HtmlPreviewPane
-            path={target.path}
-            machine={target.machine}
+            artifactId={"artifactId" in target ? target.artifactId : undefined}
+            path={"path" in target ? target.path : undefined}
+            machine={"path" in target ? target.machine : undefined}
+            title={displayName}
             rawView={rawView}
             reloadSeq={reloadSeq}
             resizing={resizing}
@@ -262,18 +296,17 @@ export function FileDrawer({ target, onClose }: Props) {
             {err && <div style={{ color: "var(--attn)" }}>{err}</div>}
             {isImage && (
               <button type="button" onClick={() => setLightbox(true)} className="block cursor-zoom-in">
-                <img src={imgSrc} alt={target.path} className="max-w-full rounded-lg border border-hairline" />
+                <img src={imgSrc} alt={displayName} className="max-w-full rounded-lg border border-hairline" />
               </button>
             )}
-            {file && file.kind === "text" && (
-              isMarkdown && !rawView ? (
+            {file && file.kind === "text" &&
+              (isMarkdown && !rawView ? (
                 <div className="text-[13px] text-primary">
                   <MarkdownText text={file.content} />
                 </div>
               ) : (
                 <pre className="font-mono-code leading-relaxed whitespace-pre-wrap text-secondary">{file.content}</pre>
-              )
-            )}
+              ))}
             {file && file.kind === "binary" && (
               <div className="text-muted">二进制文件，请点击右上角下载原件。</div>
             )}
@@ -287,7 +320,7 @@ export function FileDrawer({ target, onClose }: Props) {
           style={{ background: "rgba(0,0,0,0.78)" }}
           onClick={() => setLightbox(false)}
         >
-          <img src={imgSrc} alt={target.path} className="max-w-[92vw] max-h-[90vh] rounded-xl shadow-2xl" />
+          <img src={imgSrc} alt={displayName} className="max-w-[92vw] max-h-[90vh] rounded-xl shadow-2xl" />
         </div>
       )}
     </>

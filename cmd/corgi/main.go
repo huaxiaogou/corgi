@@ -138,6 +138,8 @@ func runHub(dir string) {
 	if *publicURL != "" {
 		pubURLs = strings.Split(*publicURL, ",")
 	}
+	eng.SetPublicURLs(pubURLs)
+	eng.SweepArtifacts(ctx)
 	srv := &web.Server{
 		Store:          st,
 		Engine:         eng,

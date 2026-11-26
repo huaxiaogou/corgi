@@ -479,3 +479,142 @@ func TestCrossMachineReplyAttachmentSingleFetchQuietBypassAndArtifactEvidence(t 
 		t.Fatalf("expected warning mentioning failure reason, got %q", res2.Warning)
 	}
 }
+
+func TestWeComPreviewLinksAcrossAllThreeDeliveryBranches(t *testing.T) {
+	home := t.TempDir()
+	htmlPath := filepath.Join(home, "proto.html")
+	htmlBytes := []byte("<!doctype html><h1>Hello</h1>")
+	if err := os.WriteFile(htmlPath, htmlBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	eng, bus, readFiles, resetFiles := newTestAttachmentBus(t, home)
+	eng.SetPublicURLs([]string{"https://taihu.example/corgi"})
+	ctx := context.Background()
+
+	var (
+		mu   sync.Mutex
+		msgs []struct{ chat, body string }
+	)
+	bus.sendMarkdownACK = func(_ context.Context, chatID, md string) error {
+		mu.Lock()
+		msgs = append(msgs, struct{ chat, body string }{chat: chatID, body: md})
+		mu.Unlock()
+		return nil
+	}
+	readMsgs := func() []struct{ chat, body string } {
+		mu.Lock()
+		defer mu.Unlock()
+		cp := make([]struct{ chat, body string }, len(msgs))
+		copy(cp, msgs)
+		return cp
+	}
+	resetAll := func() {
+		mu.Lock()
+		msgs = nil
+		mu.Unlock()
+		resetFiles()
+	}
+
+	// 1. Ordinary reply with --file: bypasses 20s outbox, sends 1 markdown (prose + preview link) + raw HTML file.
+	resetAll()
+	res1, err := eng.ReplyDetailed(ctx, core.ReplyRequest{
+		Thread: "wecom:grp-demo",
+		Text:   "原型做好了",
+		Files:  []string{htmlPath},
+	})
+	if err != nil {
+		t.Fatalf("ordinary reply failed: %v", err)
+	}
+	if res1.Delivery.LinkStatus != "delivered" {
+		t.Fatalf("want LinkStatus=delivered, got %+v", res1.Delivery)
+	}
+	m1 := readMsgs()
+	f1 := readFiles()
+	if len(m1) != 1 || !strings.Contains(m1[0].body, "原型做好了") || !strings.Contains(m1[0].body, "https://taihu.example/corgi/p/") {
+		t.Fatalf("expected 1 immediate markdown with prose + preview link, got %+v", m1)
+	}
+	if len(f1) != 1 || f1[0].name != "proto.html" || !bytes.Equal(f1[0].data, htmlBytes) {
+		t.Fatalf("expected raw html attachment alongside preview link, got %+v", f1)
+	}
+
+	// 2. Quiet-suppressed reply (active Web on chat:main) with --file: compact links-only message (NO prose) + raw file.
+	resetAll()
+	bus.RecordWebSeen()
+	res2, err := eng.ReplyDetailed(ctx, core.ReplyRequest{
+		Thread: model.MainThread,
+		Text:   "这段正文在静默模式下不应重复发企微",
+		Files:  []string{htmlPath},
+	})
+	if err != nil {
+		t.Fatalf("quiet reply failed: %v", err)
+	}
+	if res2.Delivery.LinkStatus != "delivered" {
+		t.Fatalf("quiet reply want LinkStatus=delivered, got %+v", res2.Delivery)
+	}
+	m2 := readMsgs()
+	f2 := readFiles()
+	if len(m2) != 1 || strings.Contains(m2[0].body, "不应重复发企微") || !strings.Contains(m2[0].body, "https://taihu.example/corgi/p/") {
+		t.Fatalf("quiet mode should send links-only without prose, got %+v", m2)
+	}
+	if len(f2) != 1 || !bytes.Equal(f2[0].data, htmlBytes) {
+		t.Fatalf("quiet mode should still deliver raw file, got %+v", f2)
+	}
+
+	// 3. Action card (--check) with --file on non-suppressed thread: sends compact links-only message + raw file.
+	resetAll()
+	res3, err := eng.ReplyDetailed(ctx, core.ReplyRequest{
+		Thread: "wecom:grp-demo",
+		Text:   "请验收原型",
+		Check:  true,
+		Files:  []string{htmlPath},
+	})
+	if err != nil {
+		t.Fatalf("check reply failed: %v", err)
+	}
+	if res3.Delivery.LinkStatus != "delivered" {
+		t.Fatalf("check reply want LinkStatus=delivered, got %+v", res3.Delivery)
+	}
+	m3 := readMsgs()
+	f3 := readFiles()
+	if len(m3) != 1 || !strings.Contains(m3[0].body, "https://taihu.example/corgi/p/") {
+		t.Fatalf("check card reply should emit preview link message, got %+v", m3)
+	}
+	if len(f3) != 1 || !bytes.Equal(f3[0].data, htmlBytes) {
+		t.Fatalf("check card reply should emit raw file, got %+v", f3)
+	}
+
+	// 4. Without PublicURL configured: preview link skipped cleanly, raw file STILL delivered!
+	resetAll()
+	eng.SetPublicURLs(nil)
+	res4, err := eng.ReplyDetailed(ctx, core.ReplyRequest{
+		Thread: "wecom:grp-demo",
+		Text:   "无公网地址测试",
+		Files:  []string{htmlPath},
+	})
+	if err != nil {
+		t.Fatalf("no-url reply failed: %v", err)
+	}
+	if res4.Delivery.LinkStatus != "skipped" {
+		t.Fatalf("want LinkStatus=skipped without PublicURL, got %+v", res4.Delivery)
+	}
+	if f4 := readFiles(); len(f4) != 1 || !bytes.Equal(f4[0].data, htmlBytes) {
+		t.Fatalf("raw file should still deliver when PublicURL is unset, got %+v", f4)
+	}
+
+	// 5. Prose mentioning deliverable path without --file emits warning hint without sending any file.
+	resetAll()
+	res5, err := eng.ReplyDetailed(ctx, core.ReplyRequest{
+		Thread: "wecom:grp-demo",
+		Text:   "原型已经保存在 " + htmlPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res5.Warning, "--file") {
+		t.Fatalf("expected --file warning hint when prose mentions deliverable path, got %q", res5.Warning)
+	}
+	if f5 := readFiles(); len(f5) != 0 {
+		t.Fatalf("prose without --file must NEVER send file, got %+v", f5)
+	}
+}

@@ -24,7 +24,7 @@ var (
 	ErrDuplicateTrigger = errors.New("duplicate trigger")
 )
 
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 var migrations = []struct {
 	version int
@@ -154,6 +154,31 @@ CREATE TABLE IF NOT EXISTS work_items (
 );
 CREATE INDEX IF NOT EXISTS idx_work_items_open ON work_items(closed_at, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_work_items_thread ON work_items(thread, closed_at, updated_at DESC);
+`,
+	},
+	{
+		version: 4,
+		sql: `
+CREATE TABLE IF NOT EXISTS artifacts (
+	id             TEXT PRIMARY KEY,
+	entry_id       TEXT NOT NULL,
+	ordinal        INTEGER NOT NULL DEFAULT 0,
+	thread         TEXT NOT NULL DEFAULT '',
+	work_item_id   TEXT NOT NULL DEFAULT '',
+	name           TEXT NOT NULL,
+	kind           TEXT NOT NULL,
+	mime           TEXT NOT NULL DEFAULT '',
+	size           INTEGER NOT NULL DEFAULT 0,
+	source_path    TEXT NOT NULL DEFAULT '',
+	source_machine TEXT NOT NULL DEFAULT '',
+	created_at     INTEGER NOT NULL,
+	share_expires  INTEGER NOT NULL DEFAULT 0,
+	expires_at     INTEGER NOT NULL DEFAULT 0,
+	revoked_at     INTEGER NOT NULL DEFAULT 0,
+	UNIQUE(entry_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts_work ON artifacts(work_item_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_artifacts_expires ON artifacts(expires_at);
 `,
 	},
 }

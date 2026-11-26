@@ -12,6 +12,7 @@ import { LauncherModal } from "./features/launcher/LauncherModal";
 import { useCorgiStream } from "./hooks/useCorgiStream";
 import { useFleetUpdate } from "./hooks/useFleetUpdate";
 import { onWebBuildChange } from "./lib/api";
+import type { FileDrawerTarget } from "./types/api";
 
 export function App() {
   const [route, setRoute] = useState<AppRoute>({ view: "corgi", thread: "chat:main" });
@@ -26,7 +27,7 @@ export function App() {
     }
   };
   const [launchOpen, setLaunchOpen] = useState(false);
-  const [fileTarget, setFileTarget] = useState<{ path: string; machine?: string } | null>(null);
+  const [fileTarget, setFileTarget] = useState<FileDrawerTarget | null>(null);
   const [toastMsg, setToastMsg] = useState("");
   const [webOutdated, setWebOutdated] = useState(false);
   const [dark, setDark] = useState(() => document.documentElement.dataset.theme === "dark");
@@ -155,6 +156,7 @@ export function App() {
               focusSeq={navSeq}
               onSelectWorker={(paneId) => selectRoute({ view: "agent", paneId })}
               onOpenFile={(p, m) => setFileTarget({ path: p, machine: m })}
+              onOpenArtifact={(a) => setFileTarget(a)}
               onToast={toast}
             />
           )}

@@ -120,15 +120,18 @@ func (e *Engine) ResolvedActionsForEntries(ctx context.Context, entries []*model
 func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 	_, _ = e.store.ExpireStalePendingActions(ctx, model.PendingActionMaxAge)
 	entries, earlier, _ := e.store.ListEntries(ctx, thread, 200)
+	e.HydrateEntriesArtifacts(ctx, entries)
 	actions, _ := e.store.ListPendingActions(ctx)
 	resolvedActions := e.ResolvedActionsForEntries(ctx, entries)
 	snoozed, _ := e.store.ListSnoozedActions(ctx)
 	pinned, _ := e.store.ListPinnedEntries(ctx, 50)
+	e.HydrateEntriesArtifacts(ctx, pinned)
 	workers, _ := e.store.ListWorkers(ctx)
 	workItems, _ := e.store.ListWorkItems(ctx, false)
 	if workItems == nil {
 		workItems = []*model.WorkItem{}
 	}
+	e.HydrateWorkItemsSnapshots(ctx, workItems)
 	closedWorkCount, _ := e.store.CountClosedWorkItems(ctx, thread)
 	threads, _ := e.store.ListThreads(ctx, 100)
 	queued, _ := e.store.ListQueuedTriggers(ctx)

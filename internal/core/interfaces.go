@@ -8,24 +8,32 @@ import (
 
 // AttachmentFile holds a pre-validated, pre-fetched file ready for outbound channel delivery.
 type AttachmentFile struct {
-	Path    string
-	Machine string
-	Name    string
-	Data    []byte
+	ArtifactID string
+	Path       string
+	Machine    string
+	Name       string
+	Kind       string
+	ShareURL   string
+	Data       []byte
 }
 
 // AttachmentDelivery reports the per-file delivery outcome back to `corgi reply` callers.
 type AttachmentDelivery struct {
-	Path    string `json:"path"`
-	Machine string `json:"machine,omitempty"`
-	Name    string `json:"name,omitempty"`
-	Status  string `json:"status"` // delivered | failed | skipped | unknown
-	Error   string `json:"error,omitempty"`
+	ArtifactID string `json:"artifact_id,omitempty"`
+	Path       string `json:"path"`
+	Machine    string `json:"machine,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	PreviewURL string `json:"preview_url,omitempty"`
+	Status     string `json:"status"` // delivered | failed | skipped | unknown
+	Error      string `json:"error,omitempty"`
 }
 
 // ReplyDelivery summarizes outbound channel delivery outcomes for an Engine reply.
 type ReplyDelivery struct {
-	Files []AttachmentDelivery `json:"files,omitempty"`
+	LinkStatus string               `json:"link_status,omitempty"` // delivered | failed | skipped | unknown
+	LinkError  string               `json:"link_error,omitempty"`
+	Files      []AttachmentDelivery `json:"files,omitempty"`
 }
 
 // AutoUpdater triggers an idle overnight fleet upgrade without coupling internal/core to web.

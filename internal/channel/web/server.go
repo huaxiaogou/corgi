@@ -78,9 +78,28 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("POST /api/pair", s.handleRedeemPair)
 
+	// Public capability preview routes (/p/...) — strictly scoped to single immutable Hub snapshots,
+	// outside session auth and outside machine routing, reserved so bad tokens never fall through to SPA login.
+	mux.HandleFunc("POST /p/render", s.handlePublicArtifactRender)
+	mux.HandleFunc("GET /p/{token}/raw", s.handlePublicArtifactRaw)
+	mux.HandleFunc("HEAD /p/{token}/raw", s.handlePublicArtifactRaw)
+	mux.HandleFunc("GET /p/{token}/download", s.handlePublicArtifactDownload)
+	mux.HandleFunc("HEAD /p/{token}/download", s.handlePublicArtifactDownload)
+	mux.HandleFunc("GET /p/{token}/{$}", s.handlePublicArtifactShell)
+	mux.HandleFunc("HEAD /p/{token}/{$}", s.handlePublicArtifactShell)
+	mux.HandleFunc("GET /p/{token}", s.handlePublicArtifactRedirect)
+	mux.HandleFunc("HEAD /p/{token}", s.handlePublicArtifactRedirect)
+	mux.HandleFunc("/p/", s.handlePublicArtifactNotFound)
+
 	api := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.auth(h)) }
 	api("GET /api/session", s.handleSession)
 	api("GET /api/events", s.handleStreamEvents)
+	api("GET /api/artifacts/{id}", s.handleGetArtifactMeta)
+	api("GET /api/artifacts/{id}/raw", s.handleGetArtifactRaw)
+	api("HEAD /api/artifacts/{id}/raw", s.handleGetArtifactRaw)
+	api("GET /api/artifacts/{id}/download", s.handleGetArtifactDownload)
+	api("HEAD /api/artifacts/{id}/download", s.handleGetArtifactDownload)
+	api("POST /api/artifacts/{id}/revoke", s.handleRevokeArtifact)
 	api("POST /api/pair/new", s.handleNewPair)
 	api("GET /api/qr", s.handleQR)
 	api("GET /api/devices", s.handleListDevices)
@@ -568,7 +587,7 @@ func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		if isHTMLPreviewRequest(r) {
+		if isHTMLPreviewRequest(r) || isFrameableArtifactRequest(r) {
 			w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 		} else {
 			w.Header().Set("X-Frame-Options", "DENY")
