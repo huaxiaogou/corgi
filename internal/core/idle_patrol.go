@@ -12,8 +12,10 @@ import (
 
 const (
 	kvLastMorningDigestDay = "last_morning_digest_day"
+	kvLastIdlePatrolAt     = "last_idle_patrol_at"
 	patrolMaxSummaryItems  = 5
 	patrolMaxStaleNames    = 10
+	minGlobalPatrolGap     = 2 * time.Hour
 )
 
 // ParseActiveHours parses specs like "09:00-22:30" or "24h"/"always".
@@ -143,6 +145,7 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 		if lastDay != todayKey {
 			if e.tryEmitMorningDigest(ctx, st, workers, live, pendingActions, todayStart, now) {
 				_ = e.store.SetKV(ctx, kvLastMorningDigestDay, todayKey)
+				_ = e.store.SetKV(ctx, kvLastIdlePatrolAt, now.UTC().Format(time.RFC3339))
 				return
 			}
 			// Zero-token skip when everything is clean; still mark today done so we don't re-scan morning digest.
@@ -150,16 +153,37 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 		}
 	}
 
-	// 2. Same-Day Backoff Idle Patrol (30m -> 4h, max 2 times per idle cycle).
+	// 2. Same-Day Backoff Idle Patrol (30m -> 4h, max 2 times per idle cycle), guarded by:
+	//    (a) no unresolved patrol_digest card already waiting today,
+	//    (b) global minimum cooldown >= max(2h, 2*firstDur) across all workers (prevents staggered storms),
+	//    (c) no human chat message within the last firstDur (don't nag an actively chatting user).
 	firstMin := st.EffectiveIdlePatrolMinutes()
 	if firstMin <= 0 {
 		return
 	}
+	for _, a := range pendingActions {
+		if a.Kind == model.ActionKindPatrolDigest && !a.CreatedAt.Before(todayStart) {
+			return
+		}
+	}
 	firstDur := time.Duration(firstMin) * time.Minute
+	globalGap := minGlobalPatrolGap
+	if 2*firstDur > globalGap {
+		globalGap = 2 * firstDur
+	}
+	if rawLast, ok, _ := e.store.GetKV(ctx, kvLastIdlePatrolAt); ok && rawLast != "" {
+		if lastAt, pErr := time.Parse(time.RFC3339, rawLast); pErr == nil && now.Sub(lastAt) < globalGap {
+			return
+		}
+	}
+	if e.recentHumanMessage(ctx, model.MainThread, now, firstDur) {
+		return
+	}
 	secondDur := 4 * time.Hour
 	if 4*firstDur > secondDur {
 		secondDur = 4 * firstDur
 	}
+	coalesceDur := firstDur / 2
 
 	type candidate struct {
 		w        *model.Worker
@@ -168,6 +192,7 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 		attempt  int
 	}
 	var due []candidate
+	var nearDue []candidate
 	for _, w := range workers {
 		if w.Ended || w.IdleSince == nil {
 			continue
@@ -191,14 +216,16 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 		}
 		idleDur := now.Sub(*w.IdleSince)
 		isDue := false
+		isNear := false
 		nextAttempt := w.IdlePatrolCount + 1
 		switch w.IdlePatrolCount {
 		case 0:
 			isDue = idleDur >= firstDur
+			isNear = !isDue && coalesceDur > 0 && idleDur >= coalesceDur
 		case 1:
 			isDue = w.IdlePatrolAt != nil && now.Sub(*w.IdlePatrolAt) >= secondDur
 		}
-		if !isDue {
+		if !isDue && !isNear {
 			continue
 		}
 		prio := 2
@@ -207,11 +234,18 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 		} else if w.LastReport == "" && w.CreatedBy == "you" {
 			prio = 3
 		}
-		due = append(due, candidate{w: w, priority: prio, idleDur: idleDur, attempt: nextAttempt})
+		cand := candidate{w: w, priority: prio, idleDur: idleDur, attempt: nextAttempt}
+		if isDue {
+			due = append(due, cand)
+		} else {
+			nearDue = append(nearDue, cand)
+		}
 	}
 	if len(due) == 0 {
 		return
 	}
+	// Coalesce siblings that finished a few minutes later into the same single patrol batch.
+	due = append(due, nearDue...)
 
 	sort.SliceStable(due, func(i, j int) bool {
 		if due[i].priority != due[j].priority {
@@ -220,13 +254,14 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 		return due[i].idleDur > due[j].idleDur
 	})
 
-	// Update patrol counters for all due workers so none re-fire on the next tick.
+	// Update patrol counters & global cooldown timestamp so staggered workers never spam back-to-back.
 	for _, c := range due {
 		t := now
 		c.w.IdlePatrolCount = c.attempt
 		c.w.IdlePatrolAt = &t
 		_ = e.store.UpsertWorker(ctx, c.w)
 	}
+	_ = e.store.SetKV(ctx, kvLastIdlePatrolAt, now.UTC().Format(time.RFC3339))
 
 	shown := due
 	extra := 0
@@ -237,7 +272,11 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "[corgi idle-patrol] %d idle session(s) reached patrol threshold (zero-token gate passed).\n", len(due))
-	b.WriteString("Triage strictly: ONLY notify the human (at most ONE consolidated `reply --digest --opt ...` replacing any prior digest card) if there is an unresolved decision, open question, or unmerged worktree branch. If a session is cleanly finished with nothing pending, stay completely SILENT (do NOT stop it and do NOT ask whether to close it). NEVER auto-stop manual sessions (created_by=you).\n")
+	b.WriteString("Triage strictly:\n")
+	b.WriteString("- If nothing genuinely needs a human decision, or you ALREADY reported these exact waiting items recently with zero new developments, stay COMPLETELY SILENT.\n")
+	b.WriteString("- NEVER include already-healthy / no-action status items (e.g. '已部署健康'). NEVER auto-stop manual sessions (created_by=you).\n")
+	b.WriteString("- If 2+ independent unrelated items still need attention: send ONE clean bulleted Markdown checklist via plain `reply - <<'EOF'` (NO `--opt`, NO fake mutually-exclusive A/B buttons like '先验收已完成分支' vs '批准B'); put one concise bullet per item naming the exact worker/branch and what decision is needed.\n")
+	b.WriteString("- Use `reply --digest --category patrol --worker <name> --opt ...` ONLY when there is ONE single concrete decision (e.g. 1 unmerged branch or 1 specific approval) with clear, unambiguous button labels.\n")
 	for i, c := range shown {
 		w := c.w
 		summary := strings.TrimSpace(w.LastReport)
@@ -382,7 +421,11 @@ func (e *Engine) tryEmitMorningDigest(
 	var b strings.Builder
 	fmt.Fprintf(&b, "[corgi morning-digest] Daily morning review (%s). Pending/carryover: %d; stale >=%dd Corgi sessions: %d.\n",
 		now.Format("2006-01-02 15:04"), len(priorityItems), staleDays, len(staleWorkers))
-	b.WriteString("Send AT MOST ONE consolidated `reply --digest --opt ...` summarizing only genuinely unresolved items (Top 5 max; never spam multiple cards). If nothing genuinely needs human action, stay SILENT.\n")
+	b.WriteString("Formatting rules:\n")
+	b.WriteString("- Include ONLY genuinely unresolved items needing human action (Top 5 max; omit healthy/finished noise). If nothing truly needs action, stay SILENT.\n")
+	b.WriteString("- Always format multiple items as a clean Markdown bullet list (1 short line per item naming exact worker/branch).\n")
+	b.WriteString("- If there are 2+ independent unrelated items (and no single batch-archive action), send ONE plain bulleted Markdown summary via `reply - <<'EOF'` WITHOUT `--opt` (NEVER force unrelated items into fake mutually-exclusive A/B buttons).\n")
+	b.WriteString("- Use `reply --digest --category morning --opt ...` ONLY when there is a single clear decision or a batch-archive confirmation (pass `--category stale` for pure archival).\n")
 	if len(priorityItems) > 0 {
 		b.WriteString("\nCarryover & priority items:\n")
 		limit := len(priorityItems)
@@ -474,6 +517,23 @@ func formatIdleDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh", h)
 	}
 	return fmt.Sprintf("%dd", int(d.Hours())/24)
+}
+
+func (e *Engine) recentHumanMessage(ctx context.Context, thread string, now time.Time, window time.Duration) bool {
+	if window <= 0 {
+		return false
+	}
+	entries, _, err := e.store.ListEntries(ctx, thread, 12)
+	if err != nil {
+		return false
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		en := entries[i]
+		if en.Role == "user" {
+			return !en.At.IsZero() && now.Sub(en.At) >= 0 && now.Sub(en.At) < window
+		}
+	}
+	return false
 }
 
 func containsStr(list []string, v string) bool {

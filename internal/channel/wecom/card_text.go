@@ -21,18 +21,18 @@ func shapeCardCopy(a *model.Action, choiceCount int) (title, desc, body, overflo
 		} else if head, rest, ok := splitLeadHeading(rawSummary, cardMainTitleMaxRunes); ok {
 			title, body = head, rest
 		} else {
-			title, body = defaultActionHeading(a.Kind), rawSummary
+			title, body = defaultActionHeading(a.Kind, a.Category), rawSummary
 		}
 	case rawSummary == "" && len([]rune(rawTitle)) > cardMainTitleMaxRunes:
 		if head, rest, ok := splitLeadHeading(rawTitle, cardMainTitleMaxRunes); ok {
 			title, body = head, rest
 		} else {
-			title, body = defaultActionHeading(a.Kind), rawTitle
+			title, body = defaultActionHeading(a.Kind, a.Category), rawTitle
 		}
 	default:
 		title = clipRunes(rawTitle, cardMainTitleMaxRunes)
 		if title == "" {
-			title = defaultActionHeading(a.Kind)
+			title = defaultActionHeading(a.Kind, a.Category)
 		}
 		body = rawSummary
 	}
@@ -152,14 +152,23 @@ func buildQuoteArea(overflow, command string, longOptionLines []string) map[stri
 	}
 }
 
-func defaultActionHeading(kind string) string {
+func defaultActionHeading(kind, category string) string {
 	switch kind {
 	case model.ActionKindRouterCheck:
 		return "待确认事项"
 	case model.ActionKindWorkerDialog:
 		return "终端操作确认"
 	case model.ActionKindPatrolDigest:
-		return "巡检摘要确认"
+		switch strings.ToLower(strings.TrimSpace(category)) {
+		case "morning":
+			return "晨间待办简报"
+		case "stale":
+			return "陈旧会话归档"
+		case "patrol":
+			return "待办巡检提醒"
+		default:
+			return "巡检摘要确认"
+		}
 	default:
 		return "待拍板决策"
 	}

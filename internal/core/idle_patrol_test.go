@@ -209,3 +209,115 @@ func TestMorningDigestCarryoverKeepExceptionAndDigestReplacement(t *testing.T) {
 		t.Fatalf("expected snoozed action to wake at due time, got woken=%+v err=%v", woken, err)
 	}
 }
+
+func TestIdlePatrolGlobalCooldownCoalescingPendingGuardAndHumanActivity(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"agy"})
+	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	loc := time.FixedZone("CST", 8*3600)
+	base := time.Date(2026, 11, 26, 10, 26, 0, 0, loc)
+	_ = st.SetKV(ctx, kvLastMorningDigestDay, base.Format("2006-01-02"))
+
+	// Seed 3 staggered workers finishing at 10:26, 10:32, 10:33 (reproducing back-to-back patrol storm).
+	t1 := base
+	t2 := base.Add(6 * time.Minute)
+	t3 := base.Add(7 * time.Minute)
+	for _, item := range []struct {
+		name string
+		pane string
+		at   *time.Time
+	}{
+		{"chat-inline-preview-plan", "wD:p1", &t1},
+		{"personal-agent-inbox-research", "wF:p1", &t2},
+		{"agent-flow-plan", "wG:p1", &t3},
+	} {
+		_ = st.UpsertWorker(ctx, &model.Worker{
+			Name: item.name, Kind: "agy", Cwd: dir, Thread: model.MainThread, PaneID: item.pane,
+			CreatedBy: "corgi", CreatedAt: base.Add(-1 * time.Hour), Status: "idle", IdleSince: item.at,
+			LastReport: "待验收",
+		})
+	}
+	live := map[string]liveInfo{
+		model.RouterName:                {pane: "wV:p1", status: "idle", ready: true, kind: "codebuddy"},
+		"chat-inline-preview-plan":      {pane: "wD:p1", status: "idle", ready: true, kind: "agy"},
+		"personal-agent-inbox-research": {pane: "wF:p1", status: "idle", ready: true, kind: "agy"},
+		"agent-flow-plan":               {pane: "wG:p1", status: "idle", ready: true, kind: "agy"},
+	}
+
+	// 1. Recent human message at 10:32 defers patrol at 10:56 (24m < 30m).
+	_ = st.InsertEntry(ctx, &model.Entry{
+		ID: "e-user-1", Seq: 1, Role: "user", Thread: model.MainThread, Channel: "web",
+		Text: "继续", At: base.Add(6 * time.Minute),
+	})
+	eng.runIdlePatrol(ctx, live, base.Add(30*time.Minute)) // 10:56
+	if trs, _ := st.ListQueuedTriggers(ctx); len(trs) != 0 {
+		t.Fatalf("expected patrol deferred while human messaged <30m ago, got %d", len(trs))
+	}
+
+	// 2. At 11:03 (31m after human message): fires ONCE and coalesces all 3 workers into one batch!
+	at1103 := base.Add(37 * time.Minute)
+	eng.runIdlePatrol(ctx, live, at1103)
+	trs, _ := st.ListQueuedTriggers(ctx)
+	if len(trs) != 1 {
+		t.Fatalf("expected exactly 1 coalesced patrol trigger, got %d", len(trs))
+	}
+	for _, name := range []string{"chat-inline-preview-plan", "personal-agent-inbox-research", "agent-flow-plan"} {
+		if !strings.Contains(trs[0].Text, name) {
+			t.Fatalf("coalesced patrol missing %q:\n%s", name, trs[0].Text)
+		}
+	}
+	trs[0].Status = "delivered"
+	_ = st.UpdateTrigger(ctx, trs[0])
+
+	// 3. Even if a 4th worker finishes and crosses 30m 32 seconds later, 2h global cooldown blocks spam!
+	t4 := at1103.Add(-29 * time.Minute)
+	_ = st.UpsertWorker(ctx, &model.Worker{
+		Name: "media-eval-plan", Kind: "agy", Cwd: dir, Thread: model.MainThread, PaneID: "wH:p1",
+		CreatedBy: "corgi", CreatedAt: base.Add(-1 * time.Hour), Status: "idle", IdleSince: &t4,
+	})
+	live["media-eval-plan"] = liveInfo{pane: "wH:p1", status: "idle", ready: true, kind: "agy"}
+
+	eng.runIdlePatrol(ctx, live, at1103.Add(2*time.Minute)) // 11:05 (< 2h global cooldown)
+	if trs, _ := st.ListQueuedTriggers(ctx); len(trs) != 0 {
+		t.Fatalf("expected 0 triggers inside 2h global patrol cooldown, got %d", len(trs))
+	}
+
+	// 4. After 2h global cooldown (13:05), if an unresolved patrol_digest card is already pending today, still skip!
+	_, act, _, err := eng.ReplyWithMeta(ctx, ReplyRequest{
+		Thread: model.MainThread, Text: "单条待办", Options: []string{"批准", "暂缓"}, Digest: true,
+	})
+	if err != nil || act == nil || act.Category != "patrol" {
+		t.Fatalf("expected default digest category 'patrol', got act=%+v err=%v", act, err)
+	}
+	_, _ = eng.DismissAction(ctx, act.ID)
+	sameDayAct := &model.Action{
+		ID: "a-same-day", Kind: model.ActionKindPatrolDigest, Thread: model.MainThread,
+		Category: "patrol", Title: "单条待办", Status: model.ActionPending, CreatedAt: at1103,
+		Choices: []model.ActionChoice{{Key: "1", Label: "批准"}},
+	}
+	if err := st.InsertAction(ctx, sameDayAct); err != nil {
+		t.Fatal(err)
+	}
+	eng.runIdlePatrol(ctx, live, at1103.Add(2*time.Hour+5*time.Minute))
+	if trs, _ := st.ListQueuedTriggers(ctx); len(trs) != 0 {
+		t.Fatalf("expected 0 triggers while today's patrol_digest is still pending, got %d", len(trs))
+	}
+
+	// 5. Once dismissed, after global cooldown passes, media-eval-plan can finally be patrolled cleanly.
+	_, _ = eng.DismissAction(ctx, sameDayAct.ID)
+	eng.runIdlePatrol(ctx, live, at1103.Add(2*time.Hour+6*time.Minute))
+	trs, _ = st.ListQueuedTriggers(ctx)
+	if len(trs) != 1 || !strings.Contains(trs[0].Text, "media-eval-plan") {
+		t.Fatalf("expected media-eval-plan patrolled after cooldown & digest clear, got %+v", trs)
+	}
+}

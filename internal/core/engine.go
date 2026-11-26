@@ -535,7 +535,11 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 		}
 		cat := strings.TrimSpace(req.Category)
 		if cat == "" {
-			cat = "decision"
+			if req.Digest {
+				cat = "patrol"
+			} else {
+				cat = "decision"
+			}
 		}
 		action = &model.Action{
 			ID:           aid,

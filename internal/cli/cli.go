@@ -209,7 +209,7 @@ func cmdReply(dir string, args []string) error {
 	check := fs.Bool("check", false, "deprecated without --opt; attach --opt choices to create a decision card")
 	digest := fs.Bool("digest", false, "mark as consolidated patrol/morning digest (replaces prior digest card)")
 	worker := fs.String("worker", "", "optional related worker name")
-	category := fs.String("category", "", "optional action category (worktree | decision | stale)")
+	category := fs.String("category", "", "optional action category (morning | patrol | stale | worktree | decision)")
 	var opts stringList
 	fs.Var(&opts, "opt", "quick-choice option button (repeatable)")
 	if err := parseInterspersed(fs, args); err != nil {

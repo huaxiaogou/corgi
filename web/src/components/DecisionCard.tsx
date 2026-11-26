@@ -1,14 +1,17 @@
 import { useState, type FormEvent } from "react";
-import { Clock, PenLine } from "lucide-react";
+import { ArrowUpRight, Clock, PenLine } from "lucide-react";
 import { normalizeEscapedNewlines } from "../lib/text";
 import type { Action } from "../types/api";
+import { MarkdownText } from "./MarkdownText";
 
 interface Props {
   action: Action;
+  workerNames?: string[];
   onResolve: (actionId: string, choiceKey: string, custom?: boolean) => Promise<void>;
   onDismiss?: (actionId: string) => Promise<void>;
   onSnooze?: (actionId: string) => Promise<void>;
   onOpenWorker?: (workerName: string) => void;
+  onOpenFile?: (path: string) => void;
 }
 
 function collapseWhitespace(s: string): string {
@@ -24,7 +27,7 @@ function isClippedTitleOfSummary(title: string, summary: string): boolean {
   return prefix.length > 0 && cleanSummary.startsWith(prefix);
 }
 
-export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWorker }: Props) {
+export function DecisionCard({ action, workerNames, onResolve, onDismiss, onSnooze, onOpenWorker, onOpenFile }: Props) {
   const [busy, setBusy] = useState(false);
   const [customText, setCustomText] = useState("");
 
@@ -56,23 +59,40 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
   const choices = action.choices ?? [];
   const isRouterCheck = action.kind === "router_check";
   const isWorkerDialog = action.kind === "worker_dialog";
-  const showRecommended = choices.length > 1 && !isRouterCheck;
+  const isPatrolDigest = action.kind === "patrol_digest";
+  const showRecommended = choices.length > 1 && !isRouterCheck && !isPatrolDigest;
   const title = normalizeEscapedNewlines(action.title);
   const summary = normalizeEscapedNewlines(action.summary ?? "");
   const summaryCoversTitle = Boolean(summary) && isClippedTitleOfSummary(title, summary);
 
-  const badgeLabel =
-    action.kind === "patrol_digest"
-      ? action.target_worker
-        ? `巡检简报 · ${action.target_worker}`
-        : "空闲巡检 / 晨间简报"
-      : isRouterCheck
-        ? action.target_worker
-          ? `${action.target_worker} 待你确认`
-          : "待你确认"
+  const mentionedWorkers =
+    isPatrolDigest && onOpenWorker && workerNames?.length
+      ? Array.from(
+          new Set(
+            workerNames.filter((name) => {
+              if (!name || name === action.target_worker) return false;
+              return summary.includes(name) || title.includes(name);
+            })
+          )
+        ).slice(0, 6)
+      : [];
+
+  const digestCategory = (action.category ?? "").trim().toLowerCase();
+  const badgeLabel = isPatrolDigest
+    ? digestCategory === "morning"
+      ? "晨间待办简报"
+      : digestCategory === "stale"
+        ? "陈旧会话归档"
         : action.target_worker
-          ? `${action.target_worker} 需要你确认`
-          : "需要你拍板";
+          ? `待办提醒 · ${action.target_worker}`
+          : "待办巡检提醒"
+    : isRouterCheck
+      ? action.target_worker
+        ? `${action.target_worker} 待你确认`
+        : "待你确认"
+      : action.target_worker
+        ? `${action.target_worker} 需要你确认`
+        : "需要你拍板";
 
   return (
     <div className="card-floating rounded-2xl overflow-hidden">
@@ -94,12 +114,33 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
         </div>
 
         {summaryCoversTitle ? (
-          <p className="text-[14.5px] font-medium leading-relaxed text-primary whitespace-pre-line">{summary}</p>
+          <div className="text-[14px] leading-relaxed text-primary">
+            <MarkdownText text={summary} onOpenFile={onOpenFile} />
+          </div>
         ) : (
           <>
             <div className="text-[15px] font-semibold leading-snug text-primary">{title}</div>
-            {summary && <p className="text-[13px] leading-relaxed text-secondary whitespace-pre-line">{summary}</p>}
+            {summary && (
+              <div className="text-[13px] leading-relaxed text-secondary">
+                <MarkdownText text={summary} onOpenFile={onOpenFile} />
+              </div>
+            )}
           </>
+        )}
+        {mentionedWorkers.length > 0 && onOpenWorker && (
+          <div className="pt-1 flex flex-wrap items-center gap-1.5">
+            {mentionedWorkers.map((name) => (
+              <button
+                key={name}
+                type="button"
+                onClick={() => onOpenWorker(name)}
+                className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11.5px] font-mono-code border border-hairline surface-rail surface-hover text-secondary hover:text-primary cursor-pointer"
+              >
+                <span>{name}</span>
+                <ArrowUpRight className="w-3 h-3" />
+              </button>
+            ))}
+          </div>
         )}
         {action.command && (
           <pre className="px-3.5 py-2.5 rounded-xl text-[12.5px] font-mono-code overflow-x-auto surface-rail border border-hairline">
@@ -141,7 +182,11 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
                   void submitCustom();
                 }
               }}
-              placeholder="输入其他想法或补充条件…（Enter 提交，Shift+Enter 换行）"
+              placeholder={
+                isPatrolDigest
+                  ? "指定要处理的条目或例外…（如：先验收某项、只保留 X 其余归档）"
+                  : "输入其他想法或补充条件…（Enter 提交，Shift+Enter 换行）"
+              }
               className="flex-1 min-w-[180px] min-h-[34px] max-h-28 px-3 py-1.5 rounded-lg surface-bg border border-strong text-[13px] leading-snug text-primary outline-none resize-y disabled:opacity-50"
             />
             <button
@@ -149,7 +194,7 @@ export function DecisionCard({ action, onResolve, onDismiss, onSnooze, onOpenWor
               disabled={busy || !customText.trim()}
               className="w-full sm:w-auto px-3.5 py-1.5 min-h-[34px] rounded-lg btn-accent text-xs font-medium cursor-pointer shrink-0 disabled:opacity-35 disabled:cursor-not-allowed"
             >
-              提交想法
+              {isPatrolDigest ? "发送指令" : "提交想法"}
             </button>
           </form>
         )}

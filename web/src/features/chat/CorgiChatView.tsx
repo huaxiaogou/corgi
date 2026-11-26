@@ -22,7 +22,12 @@ function actionPriority(a: Action): number {
 function actionCategoryTag(a: Action): { key: string; label: string } {
   if (a.kind === "worker_dialog" || a.category === "blocked") return { key: "blocked", label: "终端阻塞" };
   if (a.category === "worktree") return { key: "worktree", label: "未合分支" };
-  if (a.kind === "patrol_digest") return { key: "digest", label: "巡检简报" };
+  if (a.kind === "patrol_digest") {
+    const cat = (a.category ?? "").toLowerCase();
+    if (cat === "morning") return { key: "digest", label: "晨间简报" };
+    if (cat === "stale") return { key: "digest", label: "会话归档" };
+    return { key: "digest", label: "待办提醒" };
+  }
   if (a.kind === "router_check") return { key: "check", label: "待确认" };
   return { key: "decision", label: "待拍板" };
 }
@@ -556,6 +561,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
             <div className="pl-0 sm:pl-10 space-y-2">
               <DecisionCard
                 action={topAction}
+                workerNames={activeWorkers.map((w) => w.name)}
                 onResolve={async (id, key, custom) => {
                   await api(`/api/super/actions/${encodeURIComponent(id)}/resolve`, {
                     choice: key,
@@ -573,6 +579,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                   onToast("已忽略待办");
                 }}
                 onOpenWorker={openWorkerByName}
+                onOpenFile={(p) => onOpenFile(p)}
               />
               {pendingActions.length > 1 && (
                 <div className="flex items-center justify-between px-4 py-2 rounded-xl border border-hairline surface-rail text-xs">
