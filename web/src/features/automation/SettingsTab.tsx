@@ -145,8 +145,8 @@ export function SettingsTab({
               type="number"
               min={40}
               max={1000}
-              value={settings.reply_chars || 120}
-              onChange={(e) => onChange({ ...settings, reply_chars: Number(e.target.value) || 120 })}
+              value={settings.reply_chars || 200}
+              onChange={(e) => onChange({ ...settings, reply_chars: Number(e.target.value) || 200 })}
               className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
             />
           </label>

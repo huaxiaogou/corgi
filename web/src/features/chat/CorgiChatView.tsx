@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, Pin, X } from "lucide-react";
+import { ArrowDown, Check, Pin, X } from "lucide-react";
 import { CorgiButtMark, CorgiMark, StatusDot } from "../../components/CorgiMark";
 import { DecisionCard } from "../../components/DecisionCard";
 import { DecisionReceiptCard } from "../../components/DecisionReceiptCard";
@@ -8,7 +8,14 @@ import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { QuoteBlock } from "../../components/QuoteBlock";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { api } from "../../lib/api";
-import type { Action, Entry, Machine, QueuedPrompt, Settings, SuperView } from "../../types/api";
+import {
+  isInlineBubbleAction,
+  isRoutineChatterEvent,
+  shouldHideRedundantQuote,
+  workerSpawnStatusBadge,
+  type QuoteVisibilityState,
+} from "../../lib/chatFilter";
+import type { Action, ChatMessage, EndedSession, Entry, Machine, QueuedPrompt, Settings, SuperView } from "../../types/api";
 import { ChatHeader } from "./ChatHeader";
 import { ComposerBar } from "./ComposerBar";
 
@@ -60,6 +67,8 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const [removedQueueIds, setRemovedQueueIds] = useState<string[]>([]);
   const [queueBusyId, setQueueBusyId] = useState("");
   const [stopping, setStopping] = useState(false);
+  const [busyActionId, setBusyActionId] = useState("");
+  const [historyPreview, setHistoryPreview] = useState<{ sess: EndedSession; msgs: ChatMessage[] } | null>(null);
   const tmpSeqRef = useRef(0);
   const highlightTimerRef = useRef<number | null>(null);
 
@@ -118,7 +127,19 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const pendingActions = (data?.actions ?? [])
     .filter((a) => a.status === "pending" && (!thread || a.thread === thread))
     .sort((a, b) => actionPriority(a) - actionPriority(b));
+  const visibleEntries = entries.filter((e) => !isRoutineChatterEvent(e, resolvedActions));
+  const visibleEntryIds = new Set(visibleEntries.map((e) => e.id));
+  const pendingByEntryId = new Map<string, Action>();
+  for (const act of pendingActions) {
+    if (isInlineBubbleAction(act) && act.entry_id && visibleEntryIds.has(act.entry_id)) {
+      pendingByEntryId.set(act.entry_id, act);
+    }
+  }
+  const floatingActions = pendingActions.filter(
+    (a) => !(isInlineBubbleAction(a) && a.entry_id && visibleEntryIds.has(a.entry_id))
+  );
   const topAction = pendingActions[0] ?? null;
+  const topFloatingAction = floatingActions[0] ?? null;
   const snoozedCount = thread === "chat:main" ? (data?.snoozed_actions ?? 0) : 0;
   const filteredInbox = pendingActions.filter((a) => {
     if (inboxFilter !== "all" && actionCategoryTag(a).key !== inboxFilter) return false;
@@ -164,7 +185,54 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
 
   const openWorkerByName = (name: string) => {
     const wk = data?.workers.find((w) => w.name === name);
-    if (wk?.pane_id) onSelectWorker(wk.pane_id);
+    if (wk?.pane_id && !wk.ended) {
+      onSelectWorker(wk.pane_id);
+      return;
+    }
+    void openHistoryMatch((s) => s.name === name);
+  };
+
+  const openHistoryMatch = async (pred: (s: EndedSession) => boolean) => {
+    try {
+      const list = await api<{ sessions: EndedSession[] }>("/api/history");
+      const sess = (list.sessions ?? []).find(pred);
+      if (!sess) {
+        onToast("该旧会话记录已超出保留数量");
+        return;
+      }
+      const qs = new URLSearchParams({ kind: sess.kind, session: sess.session, cwd: sess.cwd });
+      if (sess.machine) qs.set("machine", sess.machine);
+      const res = await api<{ messages: ChatMessage[] }>(`/api/transcript?${qs.toString()}`);
+      setHistoryPreview({ sess, msgs: res.messages ?? [] });
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "读取会话记录失败");
+    }
+  };
+
+  const resolveInlineAction = async (act: Action, choice: string, toastText: string) => {
+    if (busyActionId === act.id) return;
+    setBusyActionId(act.id);
+    try {
+      await api(`/api/super/actions/${encodeURIComponent(act.id)}/resolve`, { choice, by: "web" });
+      onToast(toastText);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "操作失败");
+    } finally {
+      setBusyActionId((cur) => (cur === act.id ? "" : cur));
+    }
+  };
+
+  const dismissInlineAction = async (act: Action) => {
+    if (busyActionId === act.id) return;
+    setBusyActionId(act.id);
+    try {
+      await api(`/api/super/actions/${encodeURIComponent(act.id)}/dismiss`, {});
+      onToast("已忽略待办");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "操作失败");
+    } finally {
+      setBusyActionId((cur) => (cur === act.id ? "" : cur));
+    }
   };
 
   const loadEarlier = async () => {
@@ -355,14 +423,25 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                   const primaryChoice = act.choices?.[0];
                   return (
                     <div key={act.id} className="px-3.5 py-2 flex items-center justify-between gap-3 surface-hover">
-                      <div className="min-w-0 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (act.entry_id) {
+                            setInboxOpen(false);
+                            jumpToEntry(act.entry_id);
+                          } else if (act.target_worker) {
+                            openWorkerByName(act.target_worker);
+                          }
+                        }}
+                        className="min-w-0 flex items-center gap-2 text-left cursor-pointer flex-1"
+                      >
                         <span className="px-1.5 py-0.5 rounded font-mono-code text-[10.5px] border border-hairline surface-rail text-secondary shrink-0">
                           {tag.label}
                         </span>
                         <span className="font-medium text-primary truncate">{act.title}</span>
-                      </div>
+                      </button>
                       <div className="flex items-center gap-1.5 shrink-0">
-                        {primaryChoice && (
+                        {primaryChoice ? (
                           <button
                             type="button"
                             onClick={() =>
@@ -375,7 +454,21 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                           >
                             {primaryChoice.label}
                           </button>
-                        )}
+                        ) : act.kind === "router_check" ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void api(`/api/super/actions/${encodeURIComponent(act.id)}/resolve`, {
+                                choice: "ack",
+                                by: "web",
+                              }).then(() => onToast("已标记已看"))
+                            }
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-strong surface-bg surface-hover text-primary text-[11px] cursor-pointer"
+                          >
+                            <Check className="w-3 h-3" />
+                            <span>已看</span>
+                          </button>
+                        ) : null}
                         {act.kind !== "worker_dialog" && (
                           <button
                             type="button"
@@ -458,109 +551,223 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
             </div>
           )}
 
-          {entries.map((entry, idx) => {
-            const hlClass = highlightedEntryId === entry.id ? "entry-highlight px-2 py-1.5 -mx-2 transition-colors" : "transition-colors";
-            if (entry.role === "event") {
-              const eventAction = entry.action_id ? resolvedActions[entry.action_id] : undefined;
-              if (eventAction && (eventAction.status === "resolved" || eventAction.status === "snoozed")) {
-                const statusNote =
-                  eventAction.kind === "worker_dialog"
-                    ? eventAction.chosen_key?.toLowerCase() === "esc"
-                      ? "已向终端发送取消键 (Esc)"
-                      : `已将确认发送至 ${eventAction.target_worker || "终端"}`
-                    : undefined;
+          {(() => {
+            const quoteState: QuoteVisibilityState = { lastUserId: "", seenSinceUser: false, lastEventRef: "" };
+            return visibleEntries.map((entry, idx) => {
+              const hlClass = highlightedEntryId === entry.id ? "entry-highlight px-2 py-1.5 -mx-2 transition-colors" : "transition-colors";
+              if (entry.role === "event") {
+                quoteState.lastEventRef = entry.ref ?? "";
+                const eventAction = entry.action_id ? resolvedActions[entry.action_id] : undefined;
+                if (eventAction && (eventAction.status === "resolved" || eventAction.status === "snoozed")) {
+                  const statusNote =
+                    eventAction.kind === "worker_dialog"
+                      ? eventAction.chosen_key?.toLowerCase() === "esc"
+                        ? "已向终端发送取消键 (Esc)"
+                        : `已将确认发送至 ${eventAction.target_worker || "终端"}`
+                      : undefined;
+                  return (
+                    <div key={entry.id} id={`entry-${entry.id}`} className={`pl-0 sm:pl-10 ${hlClass}`}>
+                      <DecisionReceiptCard
+                        action={eventAction}
+                        at={entry.at}
+                        originEntryId={eventAction.entry_id}
+                        statusNote={statusNote}
+                        onJumpToEntry={jumpToEntry}
+                        onOpenWorker={openWorkerByName}
+                      />
+                    </div>
+                  );
+                }
+                const histRef = entry.ref?.startsWith("h:") ? entry.ref.slice(2) : "";
+                if (histRef) {
+                  return (
+                    <div key={entry.id} id={`entry-${entry.id}`} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
+                      <StatusDot status={entry.tone === "error" ? "blocked" : "idle"} />
+                      <span className="font-mono-code text-[11px]">{new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                      <button
+                        type="button"
+                        onClick={() => void openHistoryMatch((s) => s.id === histRef)}
+                        className="inline-flex items-center gap-1.5 text-left hover:text-primary cursor-pointer group"
+                      >
+                        <span className="group-hover:underline">{entry.text}</span>
+                        <span className="px-1.5 py-0.5 rounded border border-hairline surface-rail text-[10.5px] text-secondary shrink-0">
+                          查看旧会话 →
+                        </span>
+                      </button>
+                    </div>
+                  );
+                }
+                if (entry.tone === "spawn" && entry.ref) {
+                  const wk = data?.workers.find((w) => w.name === entry.ref);
+                  const badge = workerSpawnStatusBadge(wk);
+                  return (
+                    <div key={entry.id} id={`entry-${entry.id}`} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
+                      <StatusDot status={badge.dot} />
+                      <span className="font-mono-code text-[11px]">{new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                      <button
+                        type="button"
+                        onClick={() => openWorkerByName(entry.ref!)}
+                        className="inline-flex flex-wrap items-center gap-1.5 text-left hover:text-primary cursor-pointer group"
+                      >
+                        <span className="group-hover:underline">{entry.text}</span>
+                        <span className="px-1.5 py-0.5 rounded-full border border-hairline surface-rail text-[10.5px] text-secondary shrink-0">
+                          {badge.label}
+                        </span>
+                      </button>
+                    </div>
+                  );
+                }
+                if (entry.ref === "corgi" && router?.pane_id) {
+                  return (
+                    <div key={entry.id} id={`entry-${entry.id}`} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
+                      <StatusDot status={entry.tone === "error" || entry.tone === "blocked" ? "blocked" : "idle"} />
+                      <span className="font-mono-code text-[11px]">{new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                      <button
+                        type="button"
+                        onClick={() => router.pane_id && onSelectWorker(router.pane_id)}
+                        className="text-left hover:text-primary hover:underline cursor-pointer"
+                      >
+                        {entry.text}
+                      </button>
+                    </div>
+                  );
+                }
                 return (
-                  <div key={entry.id} id={`entry-${entry.id}`} className={`pl-0 sm:pl-10 ${hlClass}`}>
-                    <DecisionReceiptCard
-                      action={eventAction}
-                      at={entry.at}
-                      originEntryId={eventAction.entry_id}
-                      statusNote={statusNote}
-                      onJumpToEntry={jumpToEntry}
-                      onOpenWorker={openWorkerByName}
-                    />
+                  <div key={entry.id} id={`entry-${entry.id}`} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
+                    <StatusDot status={entry.tone === "blocked" || entry.tone === "error" ? "blocked" : entry.tone === "done" ? "done" : "idle"} />
+                    <span className="font-mono-code text-[11px]">{new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                    <span>{entry.text}</span>
                   </div>
                 );
               }
-              return (
-                <div key={entry.id} id={`entry-${entry.id}`} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
-                  <StatusDot status={entry.tone === "blocked" ? "blocked" : entry.tone === "done" ? "done" : "idle"} />
-                  <span className="font-mono-code text-[11px]">{new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-                  <span>{entry.text}</span>
-                </div>
-              );
-            }
-            if (entry.role === "user") {
-              const directAct = entry.action_id ? resolvedActions[entry.action_id] : undefined;
-              const legacyActId = !directAct && entry.re?.entry ? entryActionById.get(entry.re.entry) : undefined;
-              const legacyAct = legacyActId ? resolvedActions[legacyActId] : undefined;
-              const receiptAction =
-                directAct?.status === "resolved"
-                  ? directAct
-                  : legacyAct?.status === "resolved" && legacyAct.chosen_label === entry.text
-                    ? legacyAct
-                    : undefined;
-              if (receiptAction) {
-                const hasFollowingReply = entries.slice(idx + 1, idx + 5).some((n) => n.role === "corgi");
-                const isLatestUserEntry = idx === entries.length - 1;
-                const statusNote = hasFollowingReply
-                  ? "Corgi 已响应"
-                  : isLatestUserEntry && routerWorking
-                    ? "Corgi 正在处理…"
-                    : "已同步至对话";
+              if (entry.role === "user") {
+                quoteState.lastUserId = entry.id;
+                quoteState.seenSinceUser = false;
+                quoteState.lastEventRef = "";
+                const directAct = entry.action_id ? resolvedActions[entry.action_id] : undefined;
+                const legacyActId = !directAct && entry.re?.entry ? entryActionById.get(entry.re.entry) : undefined;
+                const legacyAct = legacyActId ? resolvedActions[legacyActId] : undefined;
+                const receiptAction =
+                  directAct?.status === "resolved"
+                    ? directAct
+                    : legacyAct?.status === "resolved" && legacyAct.chosen_label === entry.text
+                      ? legacyAct
+                      : undefined;
+                if (receiptAction) {
+                  const hasFollowingReply = visibleEntries.slice(idx + 1, idx + 5).some((n) => n.role === "corgi");
+                  const isLatestUserEntry = idx === visibleEntries.length - 1;
+                  const statusNote = hasFollowingReply
+                    ? "Corgi 已响应"
+                    : isLatestUserEntry && routerWorking
+                      ? "Corgi 正在处理…"
+                      : "已同步至对话";
+                  return (
+                    <div key={entry.id} id={`entry-${entry.id}`} className={`pl-0 sm:pl-10 ${hlClass}`}>
+                      <DecisionReceiptCard
+                        action={receiptAction}
+                        at={entry.at}
+                        originEntryId={entry.re?.entry || receiptAction.entry_id}
+                        statusNote={statusNote}
+                        onJumpToEntry={jumpToEntry}
+                        onFollowUp={() => setReplyTo(entry.action_id ? entry : { ...entry, action_id: receiptAction.id })}
+                        onOpenWorker={openWorkerByName}
+                      />
+                    </div>
+                  );
+                }
                 return (
-                  <div key={entry.id} id={`entry-${entry.id}`} className={`pl-0 sm:pl-10 ${hlClass}`}>
-                    <DecisionReceiptCard
-                      action={receiptAction}
-                      at={entry.at}
-                      originEntryId={entry.re?.entry || receiptAction.entry_id}
-                      statusNote={statusNote}
-                      onJumpToEntry={jumpToEntry}
-                      onFollowUp={() => setReplyTo(entry.action_id ? entry : { ...entry, action_id: receiptAction.id })}
-                      onOpenWorker={openWorkerByName}
-                    />
+                  <div key={entry.id} id={`entry-${entry.id}`} className={`flex flex-col items-end gap-1 ${hlClass}`}>
+                    {entry.re && <QuoteBlock quote={entry.re} align="right" onJumpToEntry={jumpToEntry} />}
+                    <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-sm text-[14px] leading-relaxed pill-user whitespace-pre-wrap">{entry.text}</div>
+                    <span className="text-[11px] text-muted pr-1">
+                      {entry.channel === "wecom" ? "企业微信 · " : ""}
+                      {new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
                   </div>
                 );
               }
+              const hideQuote = shouldHideRedundantQuote(entry, quoteState);
+              quoteState.seenSinceUser = true;
+              quoteState.lastEventRef = "";
+              const inlineAction = pendingByEntryId.get(entry.id);
+              const inlineBusy = inlineAction ? busyActionId === inlineAction.id : false;
               return (
-                <div key={entry.id} id={`entry-${entry.id}`} className={`flex flex-col items-end gap-1 ${hlClass}`}>
-                  {entry.re && <QuoteBlock quote={entry.re} align="right" onJumpToEntry={jumpToEntry} />}
-                  <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-sm text-[14px] leading-relaxed pill-user whitespace-pre-wrap">{entry.text}</div>
-                  <span className="text-[11px] text-muted pr-1">
-                    {entry.channel === "wecom" ? "企业微信 · " : ""}
-                    {new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                  </span>
+                <div key={entry.id} id={`entry-${entry.id}`} className={`group flex items-start gap-3 ${hlClass}`}>
+                  <div className="w-7 h-7 rounded-lg border border-hairline flex items-center justify-center shrink-0 mt-0.5">
+                    <CorgiMark className="w-4 h-4" />
+                  </div>
+                  <div className="flex-1 min-w-0 space-y-1.5">
+                    {entry.re && !hideQuote && <QuoteBlock quote={entry.re} align="left" onJumpToEntry={jumpToEntry} />}
+                    <div className="text-[14.5px]">
+                      <MarkdownText text={entry.text} onOpenFile={onOpenFile} />
+                    </div>
+                    {inlineAction && (
+                      <div className="pt-1 flex flex-wrap items-center gap-1.5">
+                        {inlineAction.kind === "router_check" || !inlineAction.choices?.length ? (
+                          <button
+                            type="button"
+                            disabled={inlineBusy}
+                            onClick={() => void resolveInlineAction(inlineAction, "ack", "已标记已看")}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs border border-strong surface-bg surface-hover text-primary cursor-pointer disabled:opacity-50"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>已看</span>
+                          </button>
+                        ) : (
+                          inlineAction.choices.map((ch, cIdx) => (
+                            <button
+                              key={ch.key || cIdx}
+                              type="button"
+                              disabled={inlineBusy}
+                              onClick={() => void resolveInlineAction(inlineAction, ch.key || ch.label, "已拍板并同步")}
+                              className={`px-3 py-1 rounded-full text-xs cursor-pointer disabled:opacity-50 ${
+                                cIdx === 0
+                                  ? "btn-accent font-medium"
+                                  : "border border-strong surface-bg surface-hover text-primary"
+                              }`}
+                            >
+                              {ch.label}
+                            </button>
+                          ))
+                        )}
+                        <button
+                          type="button"
+                          disabled={inlineBusy}
+                          onClick={() => setReplyTo(entry)}
+                          className="px-2.5 py-1 rounded-full text-xs border border-hairline text-secondary surface-hover cursor-pointer disabled:opacity-50"
+                        >
+                          回复其他…
+                        </button>
+                        <button
+                          type="button"
+                          disabled={inlineBusy}
+                          onClick={() => void dismissInlineAction(inlineAction)}
+                          title="忽略待办"
+                          className="px-1.5 py-1 rounded-full text-xs text-muted hover:text-primary cursor-pointer disabled:opacity-50"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-3 text-[11px] text-muted opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button type="button" onClick={() => setReplyTo(entry)} className="hover:underline cursor-pointer">
+                        引用回复
+                      </button>
+                      <button type="button" onClick={() => void api("/api/super/pin", { id: entry.id, pinned: !entry.pinned })} className="inline-flex items-center gap-1 hover:underline cursor-pointer">
+                        <Pin className="w-3 h-3" />
+                        {entry.pinned ? "取消置顶" : "置顶"}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               );
-            }
-            return (
-              <div key={entry.id} id={`entry-${entry.id}`} className={`group flex items-start gap-3 ${hlClass}`}>
-                <div className="w-7 h-7 rounded-lg border border-hairline flex items-center justify-center shrink-0 mt-0.5">
-                  <CorgiMark className="w-4 h-4" />
-                </div>
-                <div className="flex-1 min-w-0 space-y-1.5">
-                  {entry.re && <QuoteBlock quote={entry.re} align="left" onJumpToEntry={jumpToEntry} />}
-                  <div className="text-[14.5px]">
-                    <MarkdownText text={entry.text} onOpenFile={onOpenFile} />
-                  </div>
-                  <div className="flex items-center gap-3 text-[11px] text-muted opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button type="button" onClick={() => setReplyTo(entry)} className="hover:underline cursor-pointer">
-                      引用回复
-                    </button>
-                    <button type="button" onClick={() => void api("/api/super/pin", { id: entry.id, pinned: !entry.pinned })} className="inline-flex items-center gap-1 hover:underline cursor-pointer">
-                      <Pin className="w-3 h-3" />
-                      {entry.pinned ? "取消置顶" : "置顶"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+            });
+          })()}
 
-          {topAction && (
+          {topFloatingAction && (
             <div className="pl-0 sm:pl-10 space-y-2">
               <DecisionCard
-                action={topAction}
+                action={topFloatingAction}
                 workerNames={activeWorkers.map((w) => w.name)}
                 onResolve={async (id, key, custom) => {
                   await api(`/api/super/actions/${encodeURIComponent(id)}/resolve`, {
@@ -581,10 +788,10 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                 onOpenWorker={openWorkerByName}
                 onOpenFile={(p) => onOpenFile(p)}
               />
-              {pendingActions.length > 1 && (
+              {floatingActions.length > 1 && (
                 <div className="flex items-center justify-between px-4 py-2 rounded-xl border border-hairline surface-rail text-xs">
                   <span className="text-secondary">
-                    还有 <strong>{pendingActions.length - 1}</strong> 项待确认已折叠在顶部收件箱
+                    还有 <strong>{floatingActions.length - 1}</strong> 项待确认已折叠在顶部收件箱
                   </span>
                   <button
                     type="button"
@@ -729,6 +936,65 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
           }}
         />
       </div>
+
+      {historyPreview && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(0,0,0,0.4)" }}
+          onClick={() => setHistoryPreview(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-[680px] max-h-[82vh] flex flex-col rounded-2xl card-floating overflow-hidden"
+          >
+            <div className="px-5 py-3.5 border-b border-hairline flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-semibold text-sm truncate">
+                  {historyPreview.sess.title || historyPreview.sess.name || historyPreview.sess.kind}
+                </div>
+                <div className="text-[11px] font-mono-code text-muted truncate">{historyPreview.sess.cwd}</div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const sess = historyPreview.sess;
+                    void api<{ pane_id: string }>(`/api/history/${encodeURIComponent(sess.id)}/resume`, {})
+                      .then((res) => {
+                        setHistoryPreview(null);
+                        onToast(`已续接 ${sess.title || sess.name || sess.kind}`);
+                        onSelectWorker(res.pane_id);
+                      })
+                      .catch((err) => onToast(err instanceof Error ? err.message : "续接失败"));
+                  }}
+                  className="px-3 py-1.5 rounded-lg text-xs btn-accent cursor-pointer"
+                >
+                  在此续接会话
+                </button>
+                <button type="button" onClick={() => setHistoryPreview(null)} className="text-muted cursor-pointer">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-3 text-xs">
+              {historyPreview.msgs.length === 0 && (
+                <div className="text-muted text-center py-8">暂无可展示的对话消息</div>
+              )}
+              {historyPreview.msgs.map((m, i) =>
+                m.kind === "user" ? (
+                  <div key={i} className="flex justify-end">
+                    <div className="max-w-[80%] px-3.5 py-2 rounded-2xl pill-user whitespace-pre-wrap">{m.text}</div>
+                  </div>
+                ) : m.kind === "assistant" ? (
+                  <div key={i} className="text-[13.5px]">
+                    <MarkdownText text={m.text ?? ""} onOpenFile={onOpenFile} />
+                  </div>
+                ) : null
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -115,7 +115,9 @@ func TestWriteRouterDocsIncludesDefaultWorkerMachine(t *testing.T) {
 		"effort xhigh",
 		"cwd ~",
 		"default computer (`kiperjing-mb0-2`)",
-		"NEVER** pass bare `--check` without `--opt`",
+		"Formatting & lists",
+		"lightweight `✓ 已看` reminder",
+		"stop WORKER",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Fatalf("CORGI.md missing %q", want)
@@ -312,29 +314,19 @@ func TestReplyWithMetaBareCheckGuardrail(t *testing.T) {
 		wantCheck    bool
 	}{
 		{
-			name: "bare check on open A/B question degrades to plain reply",
+			name: "lightweight --check without --opt creates router_check cleanly",
 			req: ReplyRequest{
 				Thread: model.MainThread,
 				Text:   "如果同事也安装 Corgi，Hub 是共享服务还是各自部署。你更想讨论哪种？",
 				Check:  true,
 			},
-			wantAction:   false,
-			wantWarnSubs: []string{"--check", "--opt"},
-			wantCheck:    false,
+			wantAction:  true,
+			wantKind:    model.ActionKindRouterCheck,
+			wantChoices: nil,
+			wantCheck:   true,
 		},
 		{
-			name: "bare check on plain status ack degrades to plain reply",
-			req: ReplyRequest{
-				Thread: model.MainThread,
-				Text:   "收到，已开始推进实现与验证。",
-				Check:  true,
-			},
-			wantAction:   false,
-			wantWarnSubs: []string{"--check", "--opt"},
-			wantCheck:    false,
-		},
-		{
-			name: "bare digest without options degrades without fabricating 已确认",
+			name: "bare digest without options or check degrades without fabricating choices",
 			req: ReplyRequest{
 				Thread: model.MainThread,
 				Text:   "早报：今天有两项待办。",
@@ -370,14 +362,14 @@ func TestReplyWithMetaBareCheckGuardrail(t *testing.T) {
 			wantCheck:   false,
 		},
 		{
-			name: "long reply with bare check preserves both warnings",
+			name: "long reply with bare digest preserves both warnings",
 			req: ReplyRequest{
 				Thread: model.MainThread,
 				Text:   strings.Repeat("这是一段较长的回复内容，用来触发字数提示。", 15),
-				Check:  true,
+				Digest: true,
 			},
 			wantAction:   false,
-			wantWarnSubs: []string{"--check", "--opt", "usual budget"},
+			wantWarnSubs: []string{"--digest", "--opt", "usual budget"},
 			wantCheck:    false,
 		},
 	}
@@ -531,11 +523,11 @@ func TestDecisionReceiptLinkingFollowUpAndSnapshot(t *testing.T) {
 		t.Fatalf("pending action must not appear in ResolvedActions, got %+v", snapBefore.ResolvedActions)
 	}
 
-	// 2. Interleaved unrelated message between question and click (cross-message resolution).
-	if _, _, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "插一句：先看下日志路径"}); err != nil {
+	// 2. Interleaved unrelated Corgi update + follow-up between question and click (cross-message resolution).
+	if _, _, _, err := eng.Reply(ctx, model.MainThread, "顺带同步：日志在 /tmp/demo.log。", "", nil, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := eng.Reply(ctx, model.MainThread, "日志在 /tmp/demo.log。", "", nil, false); err != nil {
+	if _, _, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "好的，日志路径收到"}); err != nil {
 		t.Fatal(err)
 	}
 

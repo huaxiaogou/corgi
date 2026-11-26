@@ -113,6 +113,7 @@ func (s *Server) registerMachineRoutes(mux *http.ServeMux, wrap func(http.Handle
 	mux.Handle("POST /api/git/inspect", wrap(s.handleGitInspect))
 	mux.Handle("POST /api/git/worktree/create", wrap(s.handleGitWorktreeCreate))
 	mux.Handle("POST /api/git/worktree/cleanup", wrap(s.handleGitWorktreeCleanup))
+	mux.Handle("POST /api/codex/interrupt", wrap(s.handleCodexInterrupt))
 	mux.Handle("POST /api/update", wrap(s.handleSelfUpdate))
 	mux.Handle("GET /api/dirs", wrap(s.handleListDirs))
 	mux.Handle("GET /api/file", wrap(s.handleReadFile))

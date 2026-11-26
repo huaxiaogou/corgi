@@ -21,13 +21,14 @@ const (
 )
 
 type dreamRun struct {
-	at        time.Time
-	started   bool
-	worked    bool
-	idleAt    time.Time
-	reason    string
-	blockedAt time.Time
-	told      bool
+	at          time.Time
+	started     bool
+	worked      bool
+	idleAt      time.Time
+	reason      string
+	blockedAt   time.Time
+	told        bool
+	archivedRef string
 }
 
 // Dreaming reports whether an isolated memory-consolidation Dream session is active.
@@ -180,6 +181,11 @@ func (e *Engine) launchDreamAsync(d *dreamRun, st model.Settings) {
 						Session: sid, EndedAt: time.Now(),
 						Title: "Corgi · 做梦前的会话（" + time.Now().Format("01-02 15:04") + "）",
 					}, 40)
+					e.mu.Lock()
+					if e.dream == d {
+						d.archivedRef = "h:" + eid
+					}
+					e.mu.Unlock()
 				}
 				break
 			}
@@ -344,13 +350,16 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 	e.routerLaunchAt = time.Time{}
 	e.mu.Unlock()
 
+	e.mu.Lock()
+	archivedRef := d.archivedRef
+	e.mu.Unlock()
 	switch {
 	case !ok:
-		e.addEvent(ctx, model.MainThread, "本次整理记忆未能完成，Corgi 先醒过来了", "", "error")
+		e.addEvent(ctx, model.MainThread, "本次整理记忆未能完成，Corgi 先醒过来了", archivedRef, "error")
 	case summary != "":
-		e.addEvent(ctx, model.MainThread, "Corgi 醒了。记忆整理："+summary, "", "info")
+		e.addEvent(ctx, model.MainThread, "Corgi 醒了。记忆整理："+summary, archivedRef, "info")
 	default:
-		e.addEvent(ctx, model.MainThread, "Corgi 醒了，记忆已整理完毕", "", "info")
+		e.addEvent(ctx, model.MainThread, "Corgi 醒了，记忆已整理完毕", archivedRef, "info")
 	}
 
 	if skills != "" {

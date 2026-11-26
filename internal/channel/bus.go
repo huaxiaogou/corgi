@@ -153,14 +153,41 @@ func (b *Bus) OnUserMessage(ctx context.Context, entry *model.Entry) {
 	}
 }
 
+func (b *Bus) notifyLevel() string {
+	if b.engine != nil && b.engine.Settings().NotifyLevel == "normal" {
+		return "normal"
+	}
+	return "quiet"
+}
+
+func (b *Bus) wecomDeliveryState(thread string, now time.Time) (suppress bool, wecomRecent bool) {
+	level := b.notifyLevel()
+	b.mu.Lock()
+	webActive := !b.webSeenAt.IsZero() && now.Sub(b.webSeenAt) < 75*time.Second
+	wecomRecent = !b.wecomActiveAt.IsZero() && now.Sub(b.wecomActiveAt) < 5*time.Minute
+	b.mu.Unlock()
+	suppress = level == "quiet" && thread == model.MainThread && webActive && !wecomRecent
+	return suppress, wecomRecent
+}
+
 func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Action) {
 	chatID := threadToWeComChat(entry.Thread)
+	now := time.Now()
+	suppress, wecomRecent := b.wecomDeliveryState(entry.Thread, now)
+	if suppress {
+		return
+	}
 
-	// Decision cards (--opt / --check) bypass Outbox batching and push immediately.
-	if action != nil && len(action.Choices) > 0 {
+	// Decision cards (--opt / --check) bypass Outbox batching and push immediately when not suppressed.
+	if action != nil && (len(action.Choices) > 0 || action.Kind == model.ActionKindRouterCheck) {
 		if b.wecom != nil && b.wecom.Online() {
 			if err := b.wecom.SendActionCard(ctx, chatID, action); err != nil {
 				b.logger.Warn("push action card to wecom failed", "action", action.ID, "err", err)
+			} else {
+				action.PushedToWeCom = true
+				if b.engine != nil {
+					_ = b.engine.MarkActionPushedToWeCom(ctx, action.ID)
+				}
 			}
 		}
 		return
@@ -170,21 +197,8 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 		return
 	}
 
-	// Quiet mode suppresses redundant main-thread pushes while user is actively viewing Web,
-	// unless they recently initiated conversation from WeCom.
-	notifyLevel := "quiet"
-	if b.engine != nil && b.engine.Settings().NotifyLevel == "normal" {
-		notifyLevel = "normal"
-	}
-	now := time.Now()
-	b.mu.Lock()
-	webActive := !b.webSeenAt.IsZero() && now.Sub(b.webSeenAt) < 60*time.Second
-	wecomRecent := !b.wecomActiveAt.IsZero() && now.Sub(b.wecomActiveAt) < 5*time.Minute
-	if notifyLevel == "quiet" && entry.Thread == model.MainThread && webActive && !wecomRecent {
-		b.mu.Unlock()
-		return
-	}
 	body := formatWeComReply(entry)
+	b.mu.Lock()
 	if wecomRecent {
 		// Active WeCom conversation: deliver immediately instead of holding 20s in Outbox.
 		send := b.sendFn
@@ -290,22 +304,30 @@ func (b *Bus) FlushDue(ctx context.Context, force bool) {
 }
 
 func (b *Bus) OnActionCreated(ctx context.Context, action *model.Action) {
-	if b.wecom == nil || !b.wecom.Online() {
+	if action == nil || b.wecom == nil || !b.wecom.Online() {
+		return
+	}
+	if suppress, _ := b.wecomDeliveryState(action.Thread, time.Now()); suppress {
 		return
 	}
 	chatID := threadToWeComChat(action.Thread)
 	if err := b.wecom.SendActionCard(ctx, chatID, action); err != nil {
 		b.logger.Warn("push worker action card to wecom failed", "action", action.ID, "err", err)
+		return
+	}
+	action.PushedToWeCom = true
+	if b.engine != nil {
+		_ = b.engine.MarkActionPushedToWeCom(ctx, action.ID)
 	}
 }
 
 // OnActionResolved synchronizes non-WeCom action resolutions (Web, CLI, Router, dismiss, snooze)
-// back to WeCom immediately via a compact status receipt, bypassing quiet-mode suppression and Outbox
-// batching to match SendActionCard delivery. WeCom Smart Bot WSS only permits in-place card mutation
-// (`aibot_respond_update_msg`) within 5s of an inbound button-click callback req_id; if the user later
-// clicks the stale card, HandleWeComCardClick still refreshes it in-place without double-executing.
+// back to WeCom via a compact status receipt ONLY when the original card was actually pushed to WeCom.
 func (b *Bus) OnActionResolved(ctx context.Context, action *model.Action) {
-	if action == nil || strings.EqualFold(strings.TrimSpace(action.ResolvedBy), "wecom") {
+	if action == nil || !action.PushedToWeCom || strings.EqualFold(strings.TrimSpace(action.ResolvedBy), "wecom") {
+		return
+	}
+	if action.Status == model.ActionExpired && strings.EqualFold(strings.TrimSpace(action.ResolvedBy), "expired") {
 		return
 	}
 	if !b.canSendMarkdown() {

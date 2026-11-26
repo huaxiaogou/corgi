@@ -479,3 +479,75 @@ func (s *Store) ExpireActionsByKind(ctx context.Context, thread, kind string) er
 	}
 	return nil
 }
+
+// MarkActionPushedToWeCom records that an Action card was delivered to WeCom so later
+// Web/CLI resolutions know whether to push a WeCom synchronization receipt.
+func (s *Store) MarkActionPushedToWeCom(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin mark action pushed: %w", err)
+	}
+	defer tx.Rollback()
+
+	var raw string
+	err = tx.QueryRowContext(ctx, `SELECT data FROM actions WHERE id = ?`, id).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("read action %s: %w", id, err)
+	}
+	var a model.Action
+	if err := json.Unmarshal([]byte(raw), &a); err != nil {
+		return fmt.Errorf("decode action %s: %w", id, err)
+	}
+	if a.PushedToWeCom {
+		return nil
+	}
+	a.PushedToWeCom = true
+	updated, err := mustJSON(&a)
+	if err != nil {
+		return fmt.Errorf("encode action %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE actions SET data = ? WHERE id = ?`, updated, id); err != nil {
+		return fmt.Errorf("mark action %s pushed: %w", id, err)
+	}
+	return tx.Commit()
+}
+
+// ExpireStalePendingActions expires pending non-dialog actions older than maxAge (e.g. 7 days).
+func (s *Store) ExpireStalePendingActions(ctx context.Context, maxAge time.Duration) (int, error) {
+	if maxAge <= 0 {
+		return 0, nil
+	}
+	pending, err := s.ListPendingActions(ctx)
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now()
+	cutoff := now.Add(-maxAge)
+	expired := 0
+	for _, a := range pending {
+		if a.Kind == model.ActionKindWorkerDialog {
+			continue
+		}
+		if a.CreatedAt.IsZero() || !a.CreatedAt.Before(cutoff) {
+			continue
+		}
+		a.Status = model.ActionExpired
+		a.ResolvedBy = "expired"
+		a.ResolvedAt = &now
+		updated, err := mustJSON(a)
+		if err != nil {
+			continue
+		}
+		res, err := s.db.ExecContext(ctx, `UPDATE actions SET status = ?, data = ?, resolved_at = ? WHERE id = ? AND status = ?`,
+			model.ActionExpired, updated, now.Unix(), a.ID, model.ActionPending)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				expired++
+			}
+		}
+	}
+	return expired, nil
+}

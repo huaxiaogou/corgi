@@ -128,3 +128,87 @@ test("DecisionCard renders patrol_digest with Markdown list, category badge, wor
   );
   assert.ok(htmlMorning.includes("晨间待办简报"), htmlMorning);
 });
+
+test("MarkdownText renders ordered lists (1. / 1) / 1）) as <ol> and keeps unordered lists as <ul>", async () => {
+  const { MarkdownText } = await loadModule("src/components/MarkdownText.tsx");
+
+  const html = renderToStaticMarkup(
+    React.createElement(MarkdownText, {
+      text: [
+        "进度清单：",
+        "1. HTML 预览已发布",
+        "2) 输入框待修复",
+        "3）收纳箱待批准",
+        "3.14 不是列表",
+        "- 无序项 A",
+        "- 无序项 B",
+        "",
+        "3. 从第三步继续",
+        "4. 收尾验收",
+      ].join("\n"),
+    })
+  );
+
+  assert.ok(html.includes("<ol"), html);
+  assert.ok(html.includes("list-decimal"), html);
+  assert.ok(html.includes("HTML 预览已发布"), html);
+  assert.ok(html.includes("输入框待修复"), html);
+  assert.ok(html.includes("收纳箱待批准"), html);
+  assert.ok(html.includes("<p") && html.includes("3.14 不是列表"), html);
+  assert.ok(html.includes("<ul") && html.includes("无序项 A"), html);
+  assert.ok(html.includes('start="3"'), html);
+});
+
+test("chatFilter folds routine worker chatter, hides redundant quotes, and routes inline bubble actions", async () => {
+  const {
+    isRoutineChatterEvent,
+    isInlineBubbleAction,
+    shouldHideRedundantQuote,
+    workerSpawnStatusBadge,
+  } = await loadModule("src/lib/chatFilter.ts");
+
+  assert.equal(
+    isRoutineChatterEvent({ id: "e1", seq: 1, role: "event", thread: "chat:main", text: "agy-1 完成了一轮", at: "", ref: "agy-1", tone: "done" }, {}),
+    true
+  );
+  assert.equal(
+    isRoutineChatterEvent({ id: "e2", seq: 2, role: "event", thread: "chat:main", text: "已停止 agy-1（会话已保留）", at: "", ref: "agy-1", tone: "info" }, {}),
+    true
+  );
+  assert.equal(
+    isRoutineChatterEvent({ id: "e3", seq: 3, role: "event", thread: "chat:main", text: "派给了 agy-1", at: "", ref: "agy-1", tone: "spawn" }, {}),
+    false
+  );
+  assert.equal(
+    isRoutineChatterEvent({ id: "e4", seq: 4, role: "event", thread: "chat:main", text: "Corgi 已切换至全新会话并完成记忆交接", at: "", ref: "h:h42", tone: "info" }, {}),
+    false
+  );
+  assert.equal(
+    isRoutineChatterEvent({ id: "e5", seq: 5, role: "event", thread: "chat:main", text: "agy-1 出错了：rate limit", at: "", ref: "agy-1", tone: "error" }, {}),
+    false
+  );
+
+  assert.equal(isInlineBubbleAction({ id: "a1", kind: "router_choice", thread: "chat:main", title: "q", status: "pending", created_at: "" }), true);
+  assert.equal(isInlineBubbleAction({ id: "a2", kind: "router_check", thread: "chat:main", title: "q", status: "pending", created_at: "" }), true);
+  assert.equal(isInlineBubbleAction({ id: "a3", kind: "worker_dialog", thread: "chat:main", title: "q", status: "pending", created_at: "" }), false);
+  assert.equal(isInlineBubbleAction({ id: "a4", kind: "patrol_digest", thread: "chat:main", title: "q", status: "pending", created_at: "" }), false);
+
+  assert.equal(
+    shouldHideRedundantQuote(
+      { id: "e10", seq: 10, role: "corgi", thread: "chat:main", text: "收到", at: "", re: { entry: "e9", who: "你", text: "查一下" } },
+      { lastUserId: "e9", seenSinceUser: false, lastEventRef: "" }
+    ),
+    true
+  );
+  assert.equal(
+    shouldHideRedundantQuote(
+      { id: "e11", seq: 11, role: "corgi", thread: "chat:main", text: "补充", at: "", re: { entry: "e9", who: "你", text: "查一下" } },
+      { lastUserId: "e9", seenSinceUser: true, lastEventRef: "" }
+    ),
+    false
+  );
+
+  assert.equal(workerSpawnStatusBadge({ name: "w1", kind: "agy", cwd: "~", task: "", thread: "chat:main", status: "working", created_at: "" }).label, "还在跑");
+  assert.equal(workerSpawnStatusBadge({ name: "w1", kind: "agy", cwd: "~", task: "", thread: "chat:main", status: "blocked", created_at: "" }).label, "等你确认");
+  assert.equal(workerSpawnStatusBadge({ name: "w1", kind: "agy", cwd: "~", task: "", thread: "chat:main", status: "done", ended: true, created_at: "" }).label, "已结束");
+});

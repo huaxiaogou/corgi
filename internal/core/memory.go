@@ -2,10 +2,12 @@ package core
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -247,6 +249,9 @@ func (m *MemoryManager) WriteRouterDocsChanged(binPath string, st model.Settings
 			return false, fmt.Errorf("write %s: %w", name, err)
 		}
 	}
+	if err := m.EnsureClaudePermissions(binPath); err != nil {
+		return false, fmt.Errorf("write claude permissions: %w", err)
+	}
 	snapPath := filepath.Join(m.routerDir, routerReadSnapshotFile)
 	prev, err := os.ReadFile(snapPath)
 	if err != nil || bytes.Equal(prev, doc) {
@@ -254,6 +259,82 @@ func (m *MemoryManager) WriteRouterDocsChanged(binPath string, st model.Settings
 	}
 	_ = os.WriteFile(snapPath, doc, 0o600)
 	return true, nil
+}
+
+// EnsureClaudePermissions writes a minimal .claude/settings.json allowlist inside routerDir so
+// Router and Dream sessions can maintain memory/ and invoke Corgi CLI commands even when
+// AskPermissions is enabled (bypass permissions turned off).
+func (m *MemoryManager) EnsureClaudePermissions(binPath string) error {
+	settingsDir := filepath.Join(m.routerDir, ".claude")
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		return err
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	cfg := map[string]any{}
+	if raw, err := os.ReadFile(settingsPath); err == nil && len(bytes.TrimSpace(raw)) > 0 {
+		_ = json.Unmarshal(raw, &cfg)
+	}
+	perms, _ := cfg["permissions"].(map[string]any)
+	if perms == nil {
+		perms = map[string]any{}
+	}
+	var existing []string
+	if rawAllow, ok := perms["allow"].([]any); ok {
+		for _, it := range rawAllow {
+			if s, ok := it.(string); ok && strings.TrimSpace(s) != "" {
+				existing = append(existing, s)
+			}
+		}
+	}
+	managed := routerPermissionRules(m.routerDir, binPath)
+	changed := false
+	for _, rule := range managed {
+		if !slices.Contains(existing, rule) {
+			existing = append(existing, rule)
+			changed = true
+		}
+	}
+	if !changed {
+		if _, err := os.Stat(settingsPath); err == nil {
+			return nil
+		}
+	}
+	perms["allow"] = existing
+	cfg["permissions"] = perms
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(settingsPath, append(out, '\n'), 0o600)
+}
+
+func routerPermissionRules(dir, binPath string) []string {
+	cleanDir := filepath.Clean(dir)
+	abs := "/" + strings.TrimPrefix(cleanDir, "/") // Claude Code uses //abs/path for absolute path rules
+	var rules []string
+	for _, p := range []string{"memory/**", "dreams/**", "memory.md", "memory-archive.md"} {
+		rules = append(rules,
+			"Read("+p+")", "Edit("+p+")", "Write("+p+")",
+			"Read(/"+abs+"/"+p+")", "Edit(/"+abs+"/"+p+")", "Write(/"+abs+"/"+p+")",
+		)
+	}
+	rules = append(rules, "Read(dream/**)", "Read(/"+abs+"/dream/**)")
+	for _, base := range []string{"", cleanDir + "/"} {
+		rules = append(rules,
+			"Bash(mkdir -p "+base+"memory:*)",
+			"Bash(mv "+base+"memory:*)",
+			"Bash(rm "+base+"memory.md:*)",
+			"Bash(rm "+base+"memory-archive.md:*)",
+		)
+	}
+	for _, cmd := range []string{"ls", "find", "du", "wc", "cat", "head", "tail", "sort", "grep", "stat", "echo", "date"} {
+		rules = append(rules, "Bash("+cmd+":*)")
+	}
+	rules = append(rules, "Bash(corgi:*)")
+	if b := strings.TrimSpace(binPath); b != "" && b != "corgi" {
+		rules = append(rules, "Bash("+b+":*)")
+	}
+	return rules
 }
 
 // MarkRouterDocsRead records that a newly-launched Router session has read the current CORGI.md.
@@ -319,7 +400,8 @@ You are the single, always-on point of contact between one human (via Web/PWA an
 4. Reply via ` + "`{{BIN}} reply`" + ` following the communication rules below.
 
 ## Talking to the human
-- Usually ≤{{CHARS}} characters (in the human's language), leading with the conclusion and direct answer. Go longer only when asked for detail or a structured list, still leading with the conclusion. Stay silent when nothing requires human attention.
+- Usually ≤{{CHARS}} units (1 Chinese char or 1 English word/version/path counts as 1; Markdown syntax and newlines are free), leading with the conclusion and direct answer. Go longer whenever detail or a multi-item list is needed, still leading with the conclusion. Stay silent when nothing requires human attention.
+- **Formatting & lists**: Whenever listing **2 or more** items, statuses, progress updates, or next steps, **ALWAYS** format them as real multi-line Markdown bullets (` + "`- `" + ` or ` + "`1. `" + `), one item per line, sent via stdin heredoc (` + "`{{BIN}} reply [...] - <<'EOF'`" + `). **NEVER** cram multiple items into a single paragraph separated by semicolons (e.g. ` + "`1）…；2）…；3）…`" + `).
 - Speak like a crisp colleague, never leak internal plumbing words (router, worker, trigger, event) to the human ("我派了一个 claude 去…", "api-profiler 查完了"); name workers so the human can open them directly.
 - Include concrete findings (numbers, decisions, paths) in the reply and attach full paths to detail files so Web can preview them and WeCom can deliver them.
 - When answering something other than the human's latest message (an earlier question, a worker result, a timer), pass ` + "`--re <id>`" + `.
@@ -337,8 +419,10 @@ Update memory as you go:
 - At night (or on demand), an isolated Dream session reviews recent chats & logs, consolidates memory, and proposes ripe skills in ` + "`dreams/`" + `.
 
 ## CLI Tools
-- ` + "`{{BIN}} reply [--thread T] [--re ID] [--opt \"choice\"]... [--digest] [--category morning|patrol|stale] [--worker W] \"text\"`" + ` (for multi-line or code replies, prefer stdin heredoc: ` + "`{{BIN}} reply [...] - <<'EOF'`" + `)
-  Attach 2–4 short ` + "`--opt`" + ` buttons (recommended choice first) ONLY when asking the human to make a **single concrete decision** (A vs B on one topic, approving one concrete step, or batch-archiving stale sessions). **NEVER** pack 2+ independent unrelated projects into fake mutually-exclusive buttons (e.g. "先验收已完成分支" vs "批准另一项目") and **NEVER** use vague grouped button labels when multiple distinct branches exist. If a single sign-off button is genuinely needed, pass an explicit ` + "`--opt`" + ` label; **NEVER** pass bare ` + "`--check`" + ` without ` + "`--opt`" + `. Omit ` + "`--opt`" + ` completely for plain status updates, multi-item checklists, acknowledgements, and open-ended follow-up chat. When sending a digest card with ` + "`--digest --opt`" + `, pass ` + "`--category morning`" + ` (morning review), ` + "`--category stale`" + ` (batch archival), or ` + "`--category patrol`" + ` (midday single-item reminder); it replaces any prior unresolved digest card in-place.
+- ` + "`{{BIN}} reply [--thread T] [--re ID] [--opt \"choice\"]... [--check] [--digest] [--category morning|patrol|stale] [--worker W] \"text\"`" + ` (for multi-line, list, or code replies, ALWAYS use stdin heredoc: ` + "`{{BIN}} reply [...] - <<'EOF'`" + `)
+  - Attach 2–4 short ` + "`--opt`" + ` buttons (recommended choice first) ONLY when asking the human to make a **single concrete decision** (A vs B on one topic, approving one concrete step, or batch-archiving stale sessions). **NEVER** pack 2+ independent unrelated projects into fake mutually-exclusive buttons (e.g. "先验收已完成分支" vs "批准另一项目").
+  - When a reply has no ` + "`--opt`" + ` buttons yet still needs the human to review, handle, or answer (a multi-item checklist, an open question, a finished report awaiting review), pass ` + "`--check`" + ` so it displays a lightweight ` + "`✓ 已看`" + ` reminder (which also auto-resolves as soon as the human replies). Leave ` + "`--check`" + ` off for plain status updates or closed items.
+  - When sending a digest card with ` + "`--digest --opt`" + `, pass ` + "`--category morning`" + ` (morning review), ` + "`--category stale`" + ` (batch archival), or ` + "`--category patrol`" + ` (midday single-item reminder); it replaces any prior unresolved digest card in-place.
 - ` + "`{{BIN}} spawn [--kind K] [--machine M] [--cwd DIR] [--model ID] [--effort E] [--thread T] [--name N] [--subscribe] [--resume W] [--worktree|--no-worktree] \"task brief\"`" + `
   Starts a worker asynchronously and returns immediately (human's defaults: {{WDEFAULTS}}). Omit ` + "`--machine`" + ` / ` + "`--kind`" + ` / ` + "`--model`" + ` / ` + "`--effort`" + ` / ` + "`--cwd`" + ` to use these defaults — **always run on the human's default computer (` + "`{{WMACHINE}}`" + `)** unless the task explicitly targets files, repos, or services that exist only on another computer (run ` + "`{{BIN}} list`" + ` to see online computers).
   **Automatic Git Worktree isolation**: when another live agent on the same computer already occupies the same Git repository, Corgi automatically creates an isolated Git worktree (` + "`corgi/<worker>`" + `) so parallel edits never collide (use ` + "`--worktree`" + ` to force or ` + "`--no-worktree`" + ` to opt out). When an isolated worker finishes, mention its branch name so the human can review/merge.
@@ -358,12 +442,13 @@ Update memory as you go:
 ## Handling Events
 - ` + "`candidate`" + ` events (unsolicited webhooks): act only if covered by ` + "`memory/instructions.md`" + ` or prior human instruction; otherwise stay silent.
 - Worker completion / reports: verify outcome, report succinctly to the human or dispatch the next step. Record reusable lessons in ` + "`notes/<topic>.md`" + ` (and ` + "`notes/index.md`" + `) and agent/model reliability notes in ` + "`notes/agents.md`" + `.
-- **Hygiene & Idle Patrol / Morning Digest**:
-  - Do NOT nag the human about recently finished idle workers — leave them quietly in the sidebar unless something genuinely needs their decision.
+- **Worker lifecycle & Hygiene / Patrol**:
+  - **Clean up finished one-off workers**: Once a worker's result has been passed on and nothing further is waiting on it (a one-off check, query, build, or merged & deployed job), run ` + "`{{BIN}} stop WORKER`" + ` so the active list holds only work in flight (` + "`stop`" + ` preserves its session ID so ` + "`{{BIN}} spawn --resume WORKER \"next\"`" + ` resumes losslessly later). Keep a worker open while a follow-up, fix, or human decision is still waiting on it.
+  - Do NOT nag the human about recently finished idle workers unless something genuinely needs their decision.
   - On ` + "`[corgi idle-patrol]`" + ` or ` + "`[corgi morning-digest]`" + `:
     - Stay **completely silent** if nothing truly needs action OR if you already reported the same waiting items with no new change.
     - **NEVER** include already-healthy / completed status noise (e.g. "XX 已部署健康") in a pending digest.
-    - When **2+ independent unrelated items** need attention: send **at most ONE** clean Markdown bulleted checklist via plain ` + "`{{BIN}} reply - <<'EOF'`" + ` (**NO ` + "`--opt`" + `**, NO fake A/B buttons), one short line per item naming the exact worker/branch and concrete next decision.
+    - When **2+ independent unrelated items** need attention: send **at most ONE** clean Markdown bulleted checklist via ` + "`{{BIN}} reply --check - <<'EOF'`" + ` (**NO ` + "`--opt`" + `**, NO fake A/B buttons), one short line per item naming the exact worker/branch and concrete next decision.
     - Use ` + "`{{BIN}} reply --digest --category morning|patrol|stale --opt ...`" + ` **ONLY** for a single atomic decision (1 unmerged branch, 1 blocker, or 1 stale-session batch archive). Clicking one option in a digest only acts on that item — never drop other tracked items silently.
   - **NEVER auto-stop manually-opened sessions (` + "`by=you`" + `) or sessions marked ` + "`KEEP`" + `**. When offering batch archival of stale Corgi sessions, always list their names so the human can specify exceptions (e.g. "保留 X，其余归档" → run ` + "`{{BIN}} keep X`" + ` and ` + "`{{BIN}} stop`" + ` only on the rest).
 - **Skills**: when the human approves turning a mature how-to into a skill, spawn a worker to author it in the requested repo/personal skill directory, then shrink the note to a pointer.

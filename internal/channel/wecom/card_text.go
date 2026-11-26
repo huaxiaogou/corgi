@@ -359,6 +359,10 @@ func FormatActionResolvedMarkdown(a *model.Action) string {
 			source = "（" + channel + "）"
 		}
 		switch {
+		case strings.EqualFold(strings.TrimSpace(a.ChosenKey), "ack"):
+			head = fmt.Sprintf("**已确认%s**：已看", source)
+		case strings.EqualFold(strings.TrimSpace(a.ChosenKey), "reply"):
+			head = fmt.Sprintf("**已回复%s**：%s", source, chosen)
 		case strings.EqualFold(strings.TrimSpace(a.ChosenKey), "esc"):
 			if worker != "" {
 				head = fmt.Sprintf("**已取消%s** · 已向 `%s` 发送取消 (Esc)", source, worker)

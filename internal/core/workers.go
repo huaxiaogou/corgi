@@ -598,8 +598,13 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 			wk.Session = sess
 		}
 	}
+	if agent.NormalizeKind(wk.Kind) == "codex" && wk.Session != "" {
+		if err := e.stopCodexTurn(ctx, wk.Machine, wk.Session); err != nil {
+			e.logger.Warn("interrupt codex daemon turn failed", "worker", wk.Name, "machine", wk.Machine, "err", err)
+		}
+	}
 	if wk.PaneID != "" && e.fleet != nil {
-		// Press Esc first so any running turn (especially Codex's shared daemon) aborts cleanly before close.
+		// Press Esc first so any running turn aborts cleanly before closing the workspace.
 		_ = e.fleet.SendKeys(ctx, wk.PaneID, "esc")
 		time.Sleep(600 * time.Millisecond)
 	}
@@ -685,6 +690,10 @@ func (e *Engine) resolveAction(ctx context.Context, actionID, resolvedBy, choice
 		}
 		chosenKey = "custom"
 		chosenLabel = trimmed
+	} else if act.Kind == model.ActionKindRouterCheck && len(act.Choices) == 0 &&
+		(strings.EqualFold(trimmed, "ack") || strings.EqualFold(trimmed, "seen") || trimmed == "已看") {
+		chosenKey = "ack"
+		chosenLabel = "已看"
 	} else {
 		chosenKey, chosenLabel, chosenCursor = matchActionChoice(act, trimmed)
 	}
@@ -705,7 +714,24 @@ func (e *Engine) resolveAction(ctx context.Context, actionID, resolvedBy, choice
 		e.lastAnswer[resolved.PaneID] = time.Now()
 		e.mu.Unlock()
 		e.addEventWithAction(ctx, resolved.Thread, fmt.Sprintf("已为 %s 选择：%s（via %s）", resolved.TargetWorker, chosenLabel, resolvedBy), resolved.TargetWorker, "info", resolved.ID)
-	case model.ActionKindRouterChoice, model.ActionKindRouterCheck, model.ActionKindPatrolDigest:
+	case model.ActionKindRouterCheck:
+		// Silent acknowledgement ("✓ 已看") clears the reminder without waking Router.
+		if custom || chosenKey != "ack" {
+			promptCtx := ""
+			if custom {
+				promptCtx = buildCustomDecisionPromptContext(resolved)
+			}
+			_, _, _ = e.Say(ctx, SayRequest{
+				Thread:        resolved.Thread,
+				Channel:       resolvedBy,
+				From:          resolvedBy,
+				Text:          chosenLabel,
+				ReEntryID:     resolved.EntryID,
+				ActionID:      resolved.ID,
+				PromptContext: promptCtx,
+			})
+		}
+	case model.ActionKindRouterChoice, model.ActionKindPatrolDigest:
 		promptCtx := ""
 		if custom {
 			promptCtx = buildCustomDecisionPromptContext(resolved)

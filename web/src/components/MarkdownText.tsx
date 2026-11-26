@@ -10,6 +10,9 @@ interface Props {
 const INLINE_RE =
   /(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]]+\]\((?:(?:https?|file):\/\/[^)\s]+|\/api\/file\?[^)\s]+)\)|\[image:[^\]]+\]|https?:\/\/[^\s<>()[\]"'`]+|\/api\/file\?[^\s<>()[\]"'`]+|(?:~\/|\/[\p{L}\p{N}._-]+\/)[\p{L}\p{N}./_-]+\.(?:tsx|ts|jsx|js|mjs|cjs|json|yaml|yml|html|htm|jpeg|jpg|png|webp|svg|css|scss|md|go|py|sh|sql|rs|rb|java|kt|cpp|hpp|cc|hh|toml|ini|txt|log|csv|c|h)(?![\p{L}\p{N}_]))/gu;
 
+const UNORDERED_ITEM_RE = /^\s*[-*•]\s+/;
+const ORDERED_ITEM_RE = /^\s*(\d+)(?:[.)]\s+|）\s*)(.+)$/;
+
 function renderLinkNode(
   key: number,
   label: string,
@@ -212,21 +215,48 @@ export function MarkdownText({ text, onOpenFile }: Props) {
       continue;
     }
 
-    // Bullet / numbered list
-    if (/^\s*([-*•]|\d+\.)\s+/.test(line)) {
+    // Unordered list (-, *, •)
+    if (UNORDERED_ITEM_RE.test(line)) {
       const items: string[] = [];
-      while (i < lines.length && /^\s*([-*•]|\d+\.)\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*([-*•]|\d+\.)\s+/, ""));
+      while (i < lines.length && UNORDERED_ITEM_RE.test(lines[i])) {
+        items.push(lines[i].replace(UNORDERED_ITEM_RE, ""));
         i++;
       }
       blocks.push(
-        <ul key={blocks.length} className="my-1.5 pl-4 space-y-1 list-disc">
+        <ul key={blocks.length} className="my-1.5 pl-5 space-y-1 list-disc">
           {items.map((it, idx) => (
             <li key={idx} className="leading-[1.65]">
               {renderInline(it, onOpenFile)}
             </li>
           ))}
         </ul>
+      );
+      continue;
+    }
+
+    // Ordered list (1. / 1) / 1）)
+    const firstOrdered = ORDERED_ITEM_RE.exec(line);
+    if (firstOrdered) {
+      const startNum = Number.parseInt(firstOrdered[1], 10);
+      const items: string[] = [];
+      while (i < lines.length) {
+        const m = ORDERED_ITEM_RE.exec(lines[i]);
+        if (!m) break;
+        items.push(m[2]);
+        i++;
+      }
+      blocks.push(
+        <ol
+          key={blocks.length}
+          start={Number.isFinite(startNum) && startNum !== 1 ? startNum : undefined}
+          className="my-1.5 pl-5 space-y-1 list-decimal"
+        >
+          {items.map((it, idx) => (
+            <li key={idx} className="leading-[1.65]">
+              {renderInline(it, onOpenFile)}
+            </li>
+          ))}
+        </ol>
       );
       continue;
     }

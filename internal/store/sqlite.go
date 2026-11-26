@@ -276,7 +276,7 @@ func (s *Store) LoadSettings(ctx context.Context, home string) (model.Settings, 
 		return st, fmt.Errorf("decode settings: %w", err)
 	}
 	if st.ReplyChars <= 0 {
-		st.ReplyChars = 120
+		st.ReplyChars = model.DefaultReplyChars
 	}
 	if st.StallMinutes <= 0 {
 		st.StallMinutes = 12

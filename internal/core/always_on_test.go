@@ -227,6 +227,17 @@ func TestDreamJournalScheduleAndSkillCards(t *testing.T) {
 	if !strings.Contains(acts[0].Summary, "发布回滚检查") || !strings.Contains(acts[1].Summary, "deploy-helper") {
 		t.Fatalf("unexpected skill action summaries: %q / %q", acts[0].Summary, acts[1].Summary)
 	}
+	// Wait for the async ensureRouter goroutine triggered by finishDream to settle before TempDir cleanup.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		eng.mu.Lock()
+		launching := eng.routerLaunching
+		eng.mu.Unlock()
+		if !launching {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestResilienceBareShellRouterRetryAndDismiss(t *testing.T) {
@@ -281,15 +292,34 @@ func TestResilienceBareShellRouterRetryAndDismiss(t *testing.T) {
 		t.Fatalf("expected worker marked ended/failed, got %+v", gotW)
 	}
 
-	// 2. Router transient provider error retry (max 2 attempts, 3rd stops retrying).
+	// 2. Router transient provider error retry (3 progressive backoff attempts, 4th stops retrying).
 	eng.mu.Lock()
-	eng.routerAskedAt = time.Now()
+	eng.routerRetryDelays = []time.Duration{5 * time.Millisecond, 5 * time.Millisecond, 5 * time.Millisecond}
+	eng.routerMinSilentAge = -1
 	eng.mu.Unlock()
-	eng.inspectRouterSilentTurn(ctx, "w0:p1", 0)
-	eng.inspectRouterSilentTurn(ctx, "w0:p1", 1)
-	eng.inspectRouterSilentTurn(ctx, "w0:p1", 2)
+	for attempt := 0; attempt < 3; attempt++ {
+		eng.mu.Lock()
+		eng.routerAskedAt = time.Now().Add(-10 * time.Second)
+		eng.mu.Unlock()
+		eng.inspectRouterSilentTurn(ctx, "w0:p1", attempt)
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			got := len(prompts)
+			mu.Unlock()
+			if got >= attempt+1 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	eng.mu.Lock()
+	eng.routerAskedAt = time.Now().Add(-10 * time.Second)
+	eng.mu.Unlock()
+	eng.inspectRouterSilentTurn(ctx, "w0:p1", 3)
+	time.Sleep(25 * time.Millisecond)
 	mu.Lock()
-	if len(prompts) != 2 || !strings.Contains(prompts[0], "retry 1/2") || !strings.Contains(prompts[1], "retry 2/2") {
+	if len(prompts) != 3 || !strings.Contains(prompts[0], "retry 1/3") || !strings.Contains(prompts[1], "retry 2/3") || !strings.Contains(prompts[2], "retry 3/3") {
 		t.Fatalf("unexpected retry prompts: %v", prompts)
 	}
 	mu.Unlock()

@@ -32,6 +32,9 @@ func BuildActionCard(a *model.Action) map[string]any {
 		a = &model.Action{ID: "action", Title: "待拍板决策"}
 	}
 	choices := a.Choices
+	if len(choices) == 0 && a.Kind == model.ActionKindRouterCheck {
+		choices = []model.ActionChoice{{Key: "ack", Label: "已看"}}
+	}
 	if len(choices) > cardMaxButtons {
 		choices = choices[:cardMaxButtons]
 	}
@@ -109,6 +112,7 @@ func BuildResolvedActionCard(a *model.Action, taskID string) map[string]any {
 	snoozed := a.Status == model.ActionSnoozed
 	isEsc := a.Status == model.ActionResolved && strings.EqualFold(strings.TrimSpace(a.ChosenKey), "esc")
 	isCustom := a.Status == model.ActionResolved && strings.EqualFold(strings.TrimSpace(a.ChosenKey), "custom")
+	isAck := a.Status == model.ActionResolved && strings.EqualFold(strings.TrimSpace(a.ChosenKey), "ack")
 
 	sourceDesc := "Corgi · 已拍板"
 	statusText := "已拍板"
@@ -132,6 +136,10 @@ func BuildResolvedActionCard(a *model.Action, taskID string) map[string]any {
 		sourceDesc = "Corgi · 已取消"
 		statusText = "已取消"
 		btnText = "已取消"
+	case isAck:
+		sourceDesc = "Corgi · 已确认"
+		statusText = "已看"
+		btnText = "已看"
 	}
 
 	title, _, body, _ := shapeCardCopy(a, len(a.Choices))
@@ -189,7 +197,7 @@ func BuildResolvedActionCard(a *model.Action, taskID string) map[string]any {
 	switch {
 	case snoozed && a.SnoozeUntil != nil:
 		replaceText = clipRunes("暂缓至 "+a.SnoozeUntil.Format("01-02 15:04"), cardReplaceTextMaxRunes)
-	case !expired && !snoozed && !isEsc && chosen != "":
+	case !expired && !snoozed && !isEsc && !isAck && chosen != "":
 		replaceText = clipRunes("已选："+chosen, cardReplaceTextMaxRunes)
 	}
 

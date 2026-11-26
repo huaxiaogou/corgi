@@ -483,15 +483,15 @@ func TestWebActionResolutionSyncsToWeComAndStaleCardRefresh(t *testing.T) {
 	}
 	srvConn := <-serverConnCh
 
-	// Keep Web actively seen in quiet mode — status sync must STILL reach WeCom immediately.
-	bus.RecordWebSeen()
-
-	// 1. Resolve from Web -> WeCom immediately gets Markdown sync receipt.
+	// 1. User is away from Web -> card pushes to WeCom (PushedToWeCom=true).
+	// Then user resolves from Web -> WeCom immediately gets Markdown sync receipt.
 	_, act1, _, err := eng.Reply(ctx, model.MainThread, "是否启动灰度发布？", "", []string{"立即灰度", "暂缓发布"}, false)
 	if err != nil || act1 == nil {
 		t.Fatalf("eng.Reply 1 failed: %v", err)
 	}
 	<-cardCh
+	// Even if user now opens Web to resolve it, pushed cards still send a sync receipt to WeCom.
+	bus.RecordWebSeen()
 	if _, err := eng.ResolveAction(ctx, act1.ID, "web", "2"); err != nil {
 		t.Fatalf("ResolveAction from web failed: %v", err)
 	}
@@ -539,7 +539,10 @@ func TestWebActionResolutionSyncsToWeComAndStaleCardRefresh(t *testing.T) {
 		t.Fatal("timed out waiting for stale card refresh")
 	}
 
-	// 3. Web custom answer + dismiss + snooze all sync immediately to WeCom.
+	// 3. Web custom answer + dismiss + snooze all sync immediately to WeCom when card was pushed.
+	bus.mu.Lock()
+	bus.webSeenAt = time.Time{} // simulate away from Web when cards are created
+	bus.mu.Unlock()
 	_, act2, _, err := eng.Reply(ctx, model.MainThread, "多用户接入方向？", "", []string{"个人用", "共享服务"}, false)
 	if err != nil || act2 == nil {
 		t.Fatalf("eng.Reply 2 failed: %v", err)
@@ -633,5 +636,138 @@ func TestWebActionResolutionSyncsToWeComAndStaleCardRefresh(t *testing.T) {
 	case dup := <-mdCh:
 		t.Fatalf("expected single sync message for group Web resolve, got duplicate: %+v", dup.Body)
 	case <-time.After(80 * time.Millisecond):
+	}
+}
+
+func TestWeComWebActiveSuppressionAndPreciseReceipts(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"claude"})
+	eng, err := core.NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type wsFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers map[string]any `json:"headers"`
+		Body    map[string]any `json:"body"`
+	}
+	cardCh := make(chan wsFrame, 8)
+	mdCh := make(chan wsFrame, 8)
+
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+		for {
+			_, data, err := conn.Read(r.Context())
+			if err != nil {
+				return
+			}
+			var f wsFrame
+			if json.Unmarshal(data, &f) != nil {
+				continue
+			}
+			reqID, _ := f.Headers["req_id"].(string)
+			if f.Cmd == "aibot_send_msg" {
+				if f.Body["msgtype"] == "template_card" {
+					cardCh <- f
+				} else if f.Body["msgtype"] == "markdown" {
+					mdCh <- f
+				}
+				ack, _ := json.Marshal(map[string]any{"headers": map[string]any{"req_id": reqID}, "errcode": 0, "errmsg": "ok"})
+				_ = conn.Write(r.Context(), websocket.MessageText, ack)
+			}
+		}
+	}))
+	defer wsSrv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wc := wecom.NewClient(wecom.Config{
+		GatewayURL: "ws" + strings.TrimPrefix(wsSrv.URL, "http"),
+		BotID:      "bot-1",
+		Secret:     "sec-1",
+		AllowUsers: []string{"owner_01"},
+		DefaultTo:  "owner_01",
+	}, wecom.Handlers{}, nil)
+	bus := NewBus(eng, wc, nil)
+	go wc.Run(ctx)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !wc.Online() && time.Now().Before(deadline) {
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !wc.Online() {
+		t.Fatal("wecom client did not come online")
+	}
+
+	// 1. User is actively viewing Web in quiet mode -> action cards (--opt, --check, worker_dialog) are suppressed on WeCom!
+	bus.RecordWebSeen()
+	_, optAct, _, err := eng.Reply(ctx, model.MainThread, "是否继续？", "", []string{"继续", "停止"}, false)
+	if err != nil || optAct == nil {
+		t.Fatalf("Reply(--opt): %v", err)
+	}
+	_, chkAct, _, err := eng.Reply(ctx, model.MainThread, "请抽空看一下报告", "", nil, true)
+	if err != nil || chkAct == nil {
+		t.Fatalf("Reply(--check): %v", err)
+	}
+	dlgAct := &model.Action{
+		ID: "a_dlg_quiet", Kind: model.ActionKindWorkerDialog, Thread: model.MainThread,
+		TargetWorker: "w1", Title: "Approve?", Choices: []model.ActionChoice{{Key: "1", Label: "Yes"}},
+		Status: model.ActionPending, CreatedAt: time.Now(),
+	}
+	_ = st.InsertAction(ctx, dlgAct)
+	bus.OnActionCreated(ctx, dlgAct)
+
+	select {
+	case unexpected := <-cardCh:
+		t.Fatalf("expected card suppressed while Web is active, got %+v", unexpected)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Resolving unpushed actions on Web must NOT send phantom receipts to WeCom!
+	if _, err := eng.ResolveAction(ctx, optAct.ID, "web", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.ResolveAction(ctx, chkAct.ID, "web", "ack"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case phantom := <-mdCh:
+		t.Fatalf("expected zero WeCom receipts for unpushed cards, got %+v", phantom)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// 2. User recently messaged via WeCom (wecomRecent) -> cards push immediately even while Web is open!
+	bus.mu.Lock()
+	bus.wecomActiveAt = time.Now()
+	bus.mu.Unlock()
+	_, chk2, _, err := eng.Reply(ctx, model.MainThread, "企微会话中的待看提醒", "", nil, true)
+	if err != nil || chk2 == nil {
+		t.Fatalf("Reply(--check wecomRecent): %v", err)
+	}
+	select {
+	case f := <-cardCh:
+		tc, _ := f.Body["template_card"].(map[string]any)
+		btns, _ := tc["button_list"].([]any)
+		if len(btns) != 1 || btns[0].(map[string]any)["text"] != "已看" {
+			t.Fatalf("expected single 已看 button for router_check card, got %+v", btns)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected check card pushed to WeCom when wecomRecent is active")
+	}
+	persisted, _ := st.GetAction(ctx, chk2.ID)
+	if !persisted.PushedToWeCom {
+		t.Fatalf("expected PushedToWeCom persisted=true, got %+v", persisted)
 	}
 }

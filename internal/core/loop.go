@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -17,6 +18,9 @@ import (
 
 // Run drives the periodic Super-Agent scheduling loop until ctx is canceled.
 func (e *Engine) Run(ctx context.Context) {
+	e.mu.Lock()
+	e.runCtx = ctx
+	e.mu.Unlock()
 	if changed, err := e.memory.WriteRouterDocsChanged(e.binPath, e.Settings()); err != nil {
 		e.logger.Warn("write router docs", "err", err)
 	} else if changed {
@@ -48,8 +52,19 @@ func (e *Engine) tick(parent context.Context) {
 	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
 	defer cancel()
 
-	// 1. Fire due timers.
+	// 1. Fire due timers and periodically expire >7d stale pending actions.
 	now := time.Now()
+	e.mu.Lock()
+	needExpire := now.Sub(e.lastPendingExpire) >= 10*time.Minute
+	if needExpire {
+		e.lastPendingExpire = now
+	}
+	e.mu.Unlock()
+	if needExpire {
+		if n, err := e.store.ExpireStalePendingActions(ctx, model.PendingActionMaxAge); err == nil && n > 0 {
+			e.notifyChanged()
+		}
+	}
 	if timers, err := e.store.ListTimers(ctx); err == nil {
 		for _, tm := range timers {
 			if tm.Enabled && !tm.NextRun.After(now) {
@@ -563,7 +578,7 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 		b.WriteString("  " + strings.ReplaceAll(body, "\n", "\n  ") + "\n")
 	}
 	if target == model.RouterName {
-		fmt.Fprintf(&b, "\nReply with `%s reply`, usually ≤%d characters.", e.binPath, chars)
+		fmt.Fprintf(&b, "\nReply with `%s reply` (usually ≤%d Chinese chars / English words; for 2+ items use `- ` Markdown bullets via stdin heredoc `<<'EOF'`, never pack into one semicolon-separated line).", e.binPath, chars)
 	}
 
 	promptTarget := target
@@ -678,10 +693,17 @@ func (e *Engine) ensureRouter(ctx context.Context) {
 		e.fleet.RememberName(paneID, model.RouterName)
 		e.fleet.RememberRun(paneID, st.RouterModel, st.RouterEffort)
 
+		runPair := [2]string{st.RouterModel, st.RouterEffort}
+		if b, err := json.Marshal(runPair); err == nil {
+			_ = e.store.SetKV(bg, "router_run", string(b))
+		}
+
 		e.mu.Lock()
 		e.routerFresh = true
 		e.routerLaunchAt = time.Now()
-		e.routerRun = &[2]string{st.RouterModel, st.RouterEffort}
+		e.routerRun = &runPair
+		e.routerStallAlerted = false
+		e.routerRetryPending = false
 		e.mu.Unlock()
 	}()
 }
@@ -695,10 +717,16 @@ func (e *Engine) RestartRouter(ctx context.Context) error {
 			}
 		}
 	}
+	_ = e.store.SetKV(ctx, "router_run", "")
 	e.mu.Lock()
 	e.routerFresh = true
 	e.routerAskedAt = time.Time{}
 	e.routerRepliedAt = time.Time{}
+	e.routerRetries = 0
+	e.routerRetryPending = false
+	e.routerNudged = false
+	e.routerStallAlerted = false
+	e.routerRun = nil
 	e.routerLastAlive = false
 	e.routerLastPane = ""
 	e.routerLastStatus = ""

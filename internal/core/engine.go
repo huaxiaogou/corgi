@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -101,7 +102,14 @@ type Engine struct {
 	routerRepliedAt         time.Time
 	routerPrevStatus        string
 	routerRetries           int
+	routerRetryPending      bool
+	routerRetryDelays       []time.Duration
+	routerMinSilentAge      time.Duration
+	routerLastErr           string
+	routerLastErrAt         time.Time
+	routerErrDedupWindow    time.Duration
 	routerNudged            bool
+	routerStallAlerted      bool
 	routerUsage             model.ContextUsage
 	routerRun               *[2]string
 	routerIdleGrace         time.Duration
@@ -119,6 +127,8 @@ type Engine struct {
 	lastTrust               map[string]time.Time
 	idleCheckAt             map[string]time.Time
 	lastPatrolScan          time.Time
+	lastPendingExpire       time.Time
+	runCtx                  context.Context
 	noAgent                 map[string]time.Time
 	healingBypass           map[string]string
 	bypassCheckedAt         map[string]time.Time
@@ -154,6 +164,13 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 	if logger == nil {
 		logger = slog.Default()
 	}
+	var savedRouterRun *[2]string
+	if rawRun, ok, err := st.GetKV(ctx, "router_run"); err == nil && ok && strings.TrimSpace(rawRun) != "" {
+		var rr [2]string
+		if json.Unmarshal([]byte(rawRun), &rr) == nil {
+			savedRouterRun = &rr
+		}
+	}
 	return &Engine{
 		store:            st,
 		fleet:            fl,
@@ -166,6 +183,7 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		binPath:          binPath,
 		settings:         settings,
 		policies:         policies,
+		routerRun:        savedRouterRun,
 		lastScreen:       map[string]screenMark{},
 		lastAnswer:       map[string]time.Time{},
 		lastTrust:        map[string]time.Time{},
@@ -230,7 +248,7 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 			ns.WorkerKind = e.settings.WorkerKind
 		}
 		if ns.ReplyChars <= 0 {
-			ns.ReplyChars = 120
+			ns.ReplyChars = model.DefaultReplyChars
 		}
 		if ns.StallMinutes <= 0 {
 			ns.StallMinutes = 12
@@ -407,6 +425,9 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 	if err := e.store.InsertEntry(ctx, entry); err != nil {
 		return nil, nil, err
 	}
+	if strings.TrimSpace(req.ActionID) == "" {
+		e.autoResolvePendingOnUserReply(ctx, thread, req.ReEntryID, channel, text)
+	}
 	if recent, _, err := e.store.ListEntries(ctx, "", 30); err == nil {
 		_ = e.memory.WriteMessages(recent)
 	}
@@ -417,6 +438,76 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 	sink.OnUserMessage(ctx, entry)
 	sink.OnStateChanged()
 	return entry, trig, nil
+}
+
+// MarkActionPushedToWeCom persists that a pending Action card was pushed to WeCom.
+func (e *Engine) MarkActionPushedToWeCom(ctx context.Context, actionID string) error {
+	return e.store.MarkActionPushedToWeCom(ctx, actionID)
+}
+
+// autoResolvePendingOnUserReply resolves pending non-dialog actions in thread when the human
+// naturally replies in chat (matching either an explicit quoted entry or the latest Corgi prompt).
+func (e *Engine) autoResolvePendingOnUserReply(ctx context.Context, thread, reEntryID, channel, text string) {
+	pending, err := e.store.ListPendingActions(ctx)
+	if err != nil || len(pending) == 0 {
+		return
+	}
+	var candidates []*model.Action
+	for _, a := range pending {
+		if a.Thread != thread || a.Kind == model.ActionKindWorkerDialog {
+			continue
+		}
+		candidates = append(candidates, a)
+	}
+	if len(candidates) == 0 {
+		return
+	}
+
+	entries, _, _ := e.store.ListEntries(ctx, thread, 60)
+	reID := strings.TrimSpace(reEntryID)
+	e.mu.Lock()
+	sink := e.sink
+	e.mu.Unlock()
+	label := oneLineClip(text, 120)
+
+	for _, a := range candidates {
+		matched := false
+		if reID != "" {
+			matched = a.EntryID != "" && a.EntryID == reID
+		} else {
+			matched = !hasLaterCorgiEntry(entries, a)
+		}
+		if !matched {
+			continue
+		}
+		if resolved, err := e.store.ResolveAction(ctx, a.ID, channel, "reply", label); err == nil {
+			sink.OnActionResolved(ctx, resolved)
+		}
+	}
+}
+
+func hasLaterCorgiEntry(entries []*model.Entry, a *model.Action) bool {
+	if a.EntryID != "" {
+		found := false
+		for _, en := range entries {
+			if en.ID == a.EntryID {
+				found = true
+				continue
+			}
+			if found && en.Role == "corgi" {
+				return true
+			}
+		}
+		if found {
+			return false
+		}
+	}
+	for _, en := range entries {
+		if en.Role == "corgi" && en.At.After(a.CreatedAt) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) buildDispatchHint(req SayRequest) string {
@@ -483,6 +574,7 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 	}
 	opts := cleanOptions(req.Options)
 	hasOpts := len(opts) > 0
+	wantCheck := !hasOpts && req.Check
 
 	var quote *model.Quote
 	if req.ReID != "" {
@@ -512,32 +604,43 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 		At:      now,
 		Re:      quote,
 		Options: opts,
-		Check:   req.Check && hasOpts,
+		Check:   req.Check,
 	}
 
 	var action *model.Action
-	if hasOpts {
+	if hasOpts || wantCheck {
 		aid, _, err := e.store.NextID(ctx, "a")
 		if err != nil {
 			return nil, nil, "", err
 		}
 		kind := model.ActionKindRouterChoice
-		choices := make([]model.ActionChoice, 0, len(opts))
-		for i, label := range opts {
-			choices = append(choices, model.ActionChoice{
-				Key:   strconv.Itoa(i + 1),
-				Label: label,
-			})
-		}
-		if req.Digest {
-			kind = model.ActionKindPatrolDigest
-			_ = e.store.ExpireActionsByKind(ctx, thread, model.ActionKindPatrolDigest)
+		var choices []model.ActionChoice
+		if hasOpts {
+			choices = make([]model.ActionChoice, 0, len(opts))
+			for i, label := range opts {
+				choices = append(choices, model.ActionChoice{
+					Key:   strconv.Itoa(i + 1),
+					Label: label,
+				})
+			}
+			if req.Digest {
+				kind = model.ActionKindPatrolDigest
+				_ = e.store.ExpireActionsByKind(ctx, thread, model.ActionKindPatrolDigest)
+			}
+		} else {
+			kind = model.ActionKindRouterCheck
+			if req.Digest {
+				_ = e.store.ExpireActionsByKind(ctx, thread, model.ActionKindPatrolDigest)
+			}
 		}
 		cat := strings.TrimSpace(req.Category)
 		if cat == "" {
-			if req.Digest {
+			switch {
+			case req.Digest:
 				cat = "patrol"
-			} else {
+			case wantCheck:
+				cat = "check"
+			default:
 				cat = "decision"
 			}
 		}
@@ -572,22 +675,20 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 	e.routerAskedAt = time.Time{}
 	e.routerRepliedAt = now
 	e.routerRetries = 0
+	e.routerRetryPending = false
 	e.routerNudged = false
+	e.routerStallAlerted = false
 	sink := e.sink
 	e.mu.Unlock()
 
 	var warns []string
-	if !hasOpts && (req.Check || req.Digest) {
-		flagName := "--check"
-		if req.Check && req.Digest {
-			flagName = "--check/--digest"
-		} else if req.Digest {
-			flagName = "--digest"
-		}
-		warns = append(warns, fmt.Sprintf("ignored %s without --opt (sent as plain reply; pass 2-4 --opt buttons for choices or an explicit --opt for confirmation)", flagName))
+	if !hasOpts && !wantCheck && req.Digest {
+		warns = append(warns, "ignored --digest without --opt or --check (sent as plain reply; pass 2-4 --opt buttons for a decision or --check for a lightweight review reminder)")
 	}
-	if limit > 0 && len([]rune(text)) > limit {
-		warns = append(warns, fmt.Sprintf("reply is %d chars (usual budget ≤%d; ok if detail or list was requested)", len([]rune(text)), limit))
+	if limit > 0 {
+		if n := ReadableReplyLen(text); n > limit {
+			warns = append(warns, fmt.Sprintf("reply is %d units (usual budget ≤%d; ok if detail or list was requested)", n, limit))
+		}
 	}
 	warn := strings.Join(warns, "; ")
 	sink.OnReply(ctx, entry, action)

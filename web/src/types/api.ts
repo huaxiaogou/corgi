@@ -45,6 +45,7 @@ export interface Action {
   resolved_by?: string;
   chosen_key?: string;
   chosen_label?: string;
+  pushed_to_wecom?: boolean;
   created_at: string;
   resolved_at?: string;
   snooze_until?: string;

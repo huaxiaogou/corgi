@@ -3,12 +3,14 @@ package model
 import "time"
 
 const (
-	MainThread       = "chat:main"
-	RouterName       = "corgi"
-	RouterLabel      = "corgi · router"
-	DreamName        = "corgi-dream"
-	DreamLabel       = "corgi · dream"
-	DefaultRotatePct = 90
+	MainThread          = "chat:main"
+	RouterName          = "corgi"
+	RouterLabel         = "corgi · router"
+	DreamName           = "corgi-dream"
+	DreamLabel          = "corgi · dream"
+	DefaultRotatePct    = 90
+	DefaultReplyChars   = 200
+	PendingActionMaxAge = 7 * 24 * time.Hour
 )
 
 // Quote references an earlier message, worker report, or timer that a reply answers.
@@ -153,6 +155,7 @@ type Action struct {
 	ChosenKey     string         `json:"chosen_key,omitempty"`
 	ChosenLabel   string         `json:"chosen_label,omitempty"`
 	WeComRespCode string         `json:"wecom_resp_code,omitempty"`
+	PushedToWeCom bool           `json:"pushed_to_wecom,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`
 	ResolvedAt    *time.Time     `json:"resolved_at,omitempty"`
 	SnoozeUntil   *time.Time     `json:"snooze_until,omitempty"`
@@ -249,7 +252,7 @@ func DefaultSettings(_ string) Settings {
 		RouterEffort:      "low",
 		WorkerKind:        "claude",
 		WorkerCwd:         "~",
-		ReplyChars:        120,
+		ReplyChars:        DefaultReplyChars,
 		StallMinutes:      12,
 		IdlePatrolMinutes: 30,
 		ActiveHours:       "09:00-22:30",

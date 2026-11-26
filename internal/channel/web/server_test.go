@@ -161,24 +161,38 @@ func TestWebhookAuthGitHubGenericAndDismissHTTP(t *testing.T) {
 		t.Fatalf("unexpected triggers response: code=%d body=%s", trRec.Code, trRec.Body.String())
 	}
 
-	// 4. Dismiss action endpoint is atomic (200 then 409), and bare --check without options degrades to plain reply + warning.
-	bareReq := httptest.NewRequest(http.MethodPost, "/api/super/reply", bytes.NewBufferString(`{"thread":"chat:main","text":"共享服务还是各自部署。你更想讨论哪种？","check":true}`))
-	bareReq.Header.Set("Authorization", "Bearer "+master)
-	bareReq.Header.Set("Content-Type", "application/json")
-	bareRec := httptest.NewRecorder()
-	h.ServeHTTP(bareRec, bareReq)
-	if bareRec.Code != http.StatusOK {
-		t.Fatalf("bare check reply want 200, got %d body=%s", bareRec.Code, bareRec.Body.String())
+	// 4. Lightweight --check creates a router_check action without warning, bare --digest degrades, and dismiss is atomic (200 then 409).
+	checkReq := httptest.NewRequest(http.MethodPost, "/api/super/reply", bytes.NewBufferString(`{"thread":"chat:main","text":"共享服务还是各自部署。你更想讨论哪种？","check":true}`))
+	checkReq.Header.Set("Authorization", "Bearer "+master)
+	checkReq.Header.Set("Content-Type", "application/json")
+	checkRec := httptest.NewRecorder()
+	h.ServeHTTP(checkRec, checkReq)
+	if checkRec.Code != http.StatusOK {
+		t.Fatalf("lightweight check reply want 200, got %d body=%s", checkRec.Code, checkRec.Body.String())
 	}
-	var bareOut map[string]any
-	if err := json.Unmarshal(bareRec.Body.Bytes(), &bareOut); err != nil {
-		t.Fatalf("decode bare check reply: %v", err)
+	var checkOut map[string]any
+	if err := json.Unmarshal(checkRec.Body.Bytes(), &checkOut); err != nil {
+		t.Fatalf("decode check reply: %v", err)
 	}
-	if _, hasAct := bareOut["action"]; hasAct {
-		t.Fatalf("bare check reply must not create an action card, got %+v", bareOut)
+	if checkActID, _ := checkOut["action"].(string); checkActID == "" {
+		t.Fatalf("lightweight check reply should create a router_check action, got %+v", checkOut)
 	}
-	if warnStr, _ := bareOut["warning"].(string); !strings.Contains(warnStr, "--opt") {
-		t.Fatalf("bare check reply expected --opt warning, got %+v", bareOut)
+	if warnStr, _ := checkOut["warning"].(string); warnStr != "" {
+		t.Fatalf("lightweight check reply should not emit warning, got %+v", checkOut)
+	}
+
+	bareDigestReq := httptest.NewRequest(http.MethodPost, "/api/super/reply", bytes.NewBufferString(`{"thread":"chat:main","text":"早报：今天有两项待办。","digest":true}`))
+	bareDigestReq.Header.Set("Authorization", "Bearer "+master)
+	bareDigestReq.Header.Set("Content-Type", "application/json")
+	bareDigestRec := httptest.NewRecorder()
+	h.ServeHTTP(bareDigestRec, bareDigestReq)
+	var bareDigestOut map[string]any
+	_ = json.Unmarshal(bareDigestRec.Body.Bytes(), &bareDigestOut)
+	if _, hasAct := bareDigestOut["action"]; hasAct {
+		t.Fatalf("bare digest reply must not create an action card, got %+v", bareDigestOut)
+	}
+	if warnStr, _ := bareDigestOut["warning"].(string); !strings.Contains(warnStr, "--opt") {
+		t.Fatalf("bare digest reply expected --opt warning, got %+v", bareDigestOut)
 	}
 
 	_, act, _, err := srv.Engine.Reply(context.Background(), model.MainThread, "请验收文档", "", []string{"验收通过", "需补充"}, false)
