@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/kiperjing/corgi/internal/core"
 	"github.com/kiperjing/corgi/internal/model"
@@ -18,6 +19,10 @@ import (
 
 func TestArtifactSnapshotPublicPreviewShellRenderAndSecurity(t *testing.T) {
 	srv, master := newTestServer(t)
+	// Mount non-nil StaticFS just like production Hub so GET / and /p/... route registration is always exercised.
+	srv.StaticFS = fstest.MapFS{
+		"index.html": {Data: []byte("<!doctype html><html><body>SPA-LOGIN</body></html>")},
+	}
 	srv.Engine.SetPublicURLs([]string{"https://taihu.example/corgi/"})
 	h := srv.Routes()
 	ctx := context.Background()
@@ -173,12 +178,20 @@ func TestArtifactSnapshotPublicPreviewShellRenderAndSecurity(t *testing.T) {
 		t.Fatalf("public download failed: code=%d cd=%q", dlRec.Code, dlRec.Header().Get("Content-Disposition"))
 	}
 
-	// 8. Invalid or revoked token returns 404 unavailable page (never SPA login).
-	badReq := httptest.NewRequest(http.MethodGet, "/p/art_bogus.badmac/", nil)
-	badRec := httptest.NewRecorder()
-	h.ServeHTTP(badRec, badReq)
-	if badRec.Code != http.StatusNotFound || !strings.Contains(badRec.Body.String(), "已失效") {
-		t.Fatalf("bad token want 404 unavailable page, got %d body=%s", badRec.Code, badRec.Body.String())
+	// 8. Invalid or revoked token returns 404 unavailable page (never SPA login), while GET / still serves SPA.
+	for _, badPath := range []string{"/p/art_bogus.badmac/", "/p/", "/p/art_bogus.badmac/extra/nested"} {
+		badReq := httptest.NewRequest(http.MethodGet, badPath, nil)
+		badRec := httptest.NewRecorder()
+		h.ServeHTTP(badRec, badReq)
+		if badRec.Code != http.StatusNotFound || !strings.Contains(badRec.Body.String(), "已失效") || strings.Contains(badRec.Body.String(), "SPA-LOGIN") {
+			t.Fatalf("bad path %s want 404 unavailable page (not SPA), got %d body=%s", badPath, badRec.Code, badRec.Body.String())
+		}
+	}
+	spaReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	spaRec := httptest.NewRecorder()
+	h.ServeHTTP(spaRec, spaReq)
+	if spaRec.Code != http.StatusOK || !strings.Contains(spaRec.Body.String(), "SPA-LOGIN") {
+		t.Fatalf("GET / want 200 SPA-LOGIN, got %d body=%s", spaRec.Code, spaRec.Body.String())
 	}
 
 	revReq := httptest.NewRequest(http.MethodPost, "/api/artifacts/"+htmlArt.ID+"/revoke", bytes.NewBufferString(`{}`))

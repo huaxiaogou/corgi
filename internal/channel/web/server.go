@@ -89,7 +89,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("HEAD /p/{token}/{$}", s.handlePublicArtifactShell)
 	mux.HandleFunc("GET /p/{token}", s.handlePublicArtifactRedirect)
 	mux.HandleFunc("HEAD /p/{token}", s.handlePublicArtifactRedirect)
-	mux.HandleFunc("/p/", s.handlePublicArtifactNotFound)
+	mux.HandleFunc("GET /p/", s.handlePublicArtifactNotFound)
 
 	api := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.auth(h)) }
 	api("GET /api/session", s.handleSession)
