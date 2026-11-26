@@ -132,7 +132,9 @@ func TestCmdReplyAndSpawnInterspersedFlags(t *testing.T) {
 
 	if err := Run(dir, "reply", []string{
 		"--re", "t163",
+		"--file", "/tmp/my exports/inbox prototype.html",
 		"当前 agy-85 在默认 Mac 上，已恢复空闲。",
+		"--file", "/tmp/report.bin",
 		"--opt", "继续用 agy-85",
 		"--opt", "先不处理",
 	}); err != nil {
@@ -150,6 +152,10 @@ func TestCmdReplyAndSpawnInterspersedFlags(t *testing.T) {
 	wantOpts := []any{"继续用 agy-85", "先不处理"}
 	if !reflect.DeepEqual(gotBody["options"], wantOpts) {
 		t.Fatalf("options = %#v, want %#v", gotBody["options"], wantOpts)
+	}
+	wantFiles := []any{"/tmp/my exports/inbox prototype.html", "/tmp/report.bin"}
+	if !reflect.DeepEqual(gotBody["files"], wantFiles) {
+		t.Fatalf("files = %#v, want %#v", gotBody["files"], wantFiles)
 	}
 
 	if err := Run(dir, "spawn", []string{

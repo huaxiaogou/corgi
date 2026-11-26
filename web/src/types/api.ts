@@ -18,6 +18,7 @@ export interface Entry {
   re?: Quote;
   action_id?: string;
   options?: string[];
+  files?: string[];
   check?: boolean;
   pinned?: boolean;
 }

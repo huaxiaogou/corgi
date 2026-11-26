@@ -741,3 +741,69 @@ func TestSuperReplyMultilineJSONRoundTrip(t *testing.T) {
 		t.Fatalf("action summary round-trip mismatch: got %+v, want %q", view.Actions, wantText)
 	}
 }
+
+func TestSuperReplyExplicitFilesValidationAndRoundTrip(t *testing.T) {
+	srv, master := newTestServer(t)
+	h := srv.Routes()
+
+	dir := t.TempDir()
+	spacedDir := filepath.Join(dir, "with spaces")
+	if err := os.MkdirAll(spacedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	spacedFile := filepath.Join(spacedDir, "inbox prototype.html")
+	if err := os.WriteFile(spacedFile, []byte("<html>ok</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	postReply := func(body map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/super/reply", bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+master)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Valid explicit absolute file with spaces succeeds and persists in SuperView.
+	okRec := postReply(map[string]any{
+		"thread": model.MainThread,
+		"text":   "原型附件已就绪",
+		"files":  []string{spacedFile},
+	})
+	if okRec.Code != http.StatusOK {
+		t.Fatalf("valid explicit file want 200, got %d body=%s", okRec.Code, okRec.Body.String())
+	}
+
+	// Relative path, directory, and raw traversal must be rejected with 400.
+	for _, bad := range []string{"relative.html", dir, spacedDir + "/../with spaces/inbox prototype.html"} {
+		rec := postReply(map[string]any{
+			"thread": model.MainThread,
+			"text":   "非法附件",
+			"files":  []string{bad},
+		})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("bad file %q want 400, got %d body=%s", bad, rec.Code, rec.Body.String())
+		}
+	}
+
+	snapReq := httptest.NewRequest(http.MethodGet, "/api/super?thread=chat:main", nil)
+	snapReq.Header.Set("Authorization", "Bearer "+master)
+	snapRec := httptest.NewRecorder()
+	h.ServeHTTP(snapRec, snapReq)
+	if snapRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/super want 200, got %d", snapRec.Code)
+	}
+	var view model.SuperView
+	if err := json.Unmarshal(snapRec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode SuperView: %v", err)
+	}
+	if len(view.Entries) != 1 || len(view.Entries[0].Files) != 1 || view.Entries[0].Files[0] != spacedFile {
+		t.Fatalf("expected 1 persisted entry with Files=[%q], got %+v", spacedFile, view.Entries)
+	}
+}

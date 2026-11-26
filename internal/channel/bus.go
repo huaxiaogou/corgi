@@ -4,9 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -16,8 +13,6 @@ import (
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/store"
 )
-
-var mdReportPathRe = regexp.MustCompile(`((?:~/|/[\w.-]+/)[\w./-]+\.md)\b`)
 
 type outboxItem struct {
 	text string
@@ -190,6 +185,9 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 				}
 			}
 		}
+		if len(entry.Files) > 0 {
+			b.sendReplyAttachments(ctx, chatID, entry, false)
+		}
 		return
 	}
 
@@ -211,8 +209,8 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 		b.mu.Unlock()
 	}
 
-	// Offline-readable report delivery: push referenced .md report files or very long replies as attachments.
-	b.maybeSendReportAttachment(ctx, chatID, entry.Text)
+	// Explicit attachment delivery (or offline-readable .md fallback for very long plain replies).
+	b.sendReplyAttachments(ctx, chatID, entry, true)
 }
 
 func formatWeComReply(entry *model.Entry) string {
@@ -232,34 +230,30 @@ func formatWeComReply(entry *model.Entry) string {
 	return txt
 }
 
-func (b *Bus) maybeSendReportAttachment(ctx context.Context, chatID, text string) {
-	if b.sendFileFn == nil || (b.wecom != nil && !b.wecom.Online()) {
+func (b *Bus) sendReplyAttachments(ctx context.Context, chatID string, entry *model.Entry, allowLongFallback bool) {
+	if entry == nil || b.sendFileFn == nil || (b.wecom != nil && !b.wecom.Online()) {
 		return
 	}
-	b.mu.Lock()
-	home := b.home
-	b.mu.Unlock()
 
-	// 1. If reply references a local .md report path (≤ 5 MB), send it as a file attachment.
-	if m := mdReportPathRe.FindStringSubmatch(text); len(m) >= 2 {
-		p := m[1]
-		if strings.HasPrefix(p, "~/") && home != "" {
-			p = filepath.Join(home, p[2:])
-		}
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 && fi.Size() <= 5<<20 {
-			if data, err := os.ReadFile(p); err == nil {
-				if err := b.sendFileFn(ctx, chatID, filepath.Base(p), data); err != nil {
-					b.logger.Warn("push markdown report file to wecom failed", "path", p, "err", err)
-				}
-				return
+	// 1. Send explicitly attached local files after full path/type/size validation (no regex scraping).
+	if len(entry.Files) > 0 {
+		for _, rawPath := range entry.Files {
+			name, data, cleanPath, err := core.ReadAttachmentFile(rawPath)
+			if err != nil {
+				b.logger.Warn("skip invalid reply attachment", "path", rawPath, "err", err)
+				continue
+			}
+			if err := b.sendFileFn(ctx, chatID, name, data); err != nil {
+				b.logger.Warn("push reply attachment to wecom failed", "path", cleanPath, "err", err)
 			}
 		}
+		return
 	}
 
-	// 2. If reply body itself is very long (>1800 runes), also attach as an offline-readable .md file.
-	if len([]rune(text)) > 1800 {
+	// 2. If plain reply body itself is very long (>1800 runes), attach as an offline-readable .md file.
+	if allowLongFallback && len([]rune(entry.Text)) > 1800 {
 		name := "corgi-report-" + time.Now().Format("150405") + ".md"
-		if err := b.sendFileFn(ctx, chatID, name, []byte(text)); err != nil {
+		if err := b.sendFileFn(ctx, chatID, name, []byte(entry.Text)); err != nil {
 			b.logger.Warn("push long reply attachment to wecom failed", "err", err)
 		}
 	}

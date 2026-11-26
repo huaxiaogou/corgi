@@ -121,6 +121,8 @@ func (s *Server) handleSuperReply(w http.ResponseWriter, r *http.Request) {
 		Thread   string   `json:"thread"`
 		Re       string   `json:"re"`
 		Options  []string `json:"options"`
+		File     string   `json:"file"`
+		Files    []string `json:"files"`
 		Check    bool     `json:"check"`
 		Digest   bool     `json:"digest"`
 		Worker   string   `json:"worker"`
@@ -129,11 +131,16 @@ func (s *Server) handleSuperReply(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+	files := body.Files
+	if strings.TrimSpace(body.File) != "" {
+		files = append([]string{body.File}, files...)
+	}
 	entry, act, warn, err := s.Engine.ReplyWithMeta(r.Context(), core.ReplyRequest{
 		Thread:   body.Thread,
 		Text:     body.Text,
 		ReID:     body.Re,
 		Options:  body.Options,
+		Files:    files,
 		Check:    body.Check,
 		Digest:   body.Digest,
 		Worker:   body.Worker,

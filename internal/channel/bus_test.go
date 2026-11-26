@@ -132,11 +132,12 @@ func TestWebGroupSyncReportAttachmentAndWorkerTag(t *testing.T) {
 	// 1. Web message posted in a wecom group thread mirrors back to WeCom group.
 	bus.OnUserMessage(ctx, &model.Entry{Channel: "web", Thread: "wecom:grp-88", Text: "请把单测也跑一遍"})
 
-	// 2. Group reply referencing a worker + local .md file gets [#worker] prefix and pushes .md attachment.
+	// 2. Group reply referencing a worker + explicit file attachment gets [#worker] prefix and pushes file.
 	bus.OnReply(ctx, &model.Entry{
 		Thread: "wecom:grp-88",
 		Ref:    "api-profiler",
-		Text:   "剖析完成，详单见 " + reportPath,
+		Text:   "剖析完成，详单见附件",
+		Files:  []string{reportPath},
 	}, nil)
 	bus.FlushDue(ctx, true)
 

@@ -212,6 +212,8 @@ func cmdReply(dir string, args []string) error {
 	category := fs.String("category", "", "optional action category (morning | patrol | stale | worktree | decision)")
 	var opts stringList
 	fs.Var(&opts, "opt", "quick-choice option button (repeatable)")
+	var files stringList
+	fs.Var(&files, "file", "explicit local absolute file path to attach (repeatable)")
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
@@ -220,7 +222,7 @@ func cmdReply(dir string, args []string) error {
 		return err
 	}
 	out, err := apiCall(dir, http.MethodPost, "/api/super/reply", map[string]any{
-		"thread": *thread, "re": *re, "text": text, "options": []string(opts), "check": *check,
+		"thread": *thread, "re": *re, "text": text, "options": []string(opts), "files": []string(files), "check": *check,
 		"digest": *digest, "worker": *worker, "category": *category,
 	})
 	if err == nil {

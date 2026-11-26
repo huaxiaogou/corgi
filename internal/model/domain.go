@@ -35,6 +35,7 @@ type Entry struct {
 	Re       *Quote    `json:"re,omitempty"`
 	ActionID string    `json:"action_id,omitempty"`
 	Options  []string  `json:"options,omitempty"`
+	Files    []string  `json:"files,omitempty"`
 	Check    bool      `json:"check,omitempty"`
 	Pinned   bool      `json:"pinned,omitempty"`
 }

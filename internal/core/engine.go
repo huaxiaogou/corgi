@@ -538,12 +538,14 @@ func (e *Engine) buildDispatchHint(req SayRequest) string {
 	return "[The human picked where this runs: spawn with " + strings.Join(hints, " ") + "]"
 }
 
-// ReplyRequest describes a Corgi outbound reply with optional quick-choice buttons, review check, or digest replacement.
+// ReplyRequest describes a Corgi outbound reply with optional quick-choice buttons,
+// review check, digest replacement, or explicit local file attachments.
 type ReplyRequest struct {
 	Thread   string
 	Text     string
 	ReID     string
 	Options  []string
+	Files    []string
 	Check    bool
 	Digest   bool
 	Worker   string
@@ -567,6 +569,10 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 	text := strings.TrimSpace(req.Text)
 	if text == "" {
 		return nil, nil, "", fmt.Errorf("empty reply")
+	}
+	files, err := ValidateAttachmentPaths(req.Files)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("validate reply attachments: %w", err)
 	}
 	thread := req.Thread
 	if thread == "" {
@@ -604,6 +610,7 @@ func (e *Engine) ReplyWithMeta(ctx context.Context, req ReplyRequest) (*model.En
 		At:      now,
 		Re:      quote,
 		Options: opts,
+		Files:   files,
 		Check:   req.Check,
 	}
 
