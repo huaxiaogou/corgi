@@ -194,7 +194,7 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		master, dev := s.identity(r)
 		allowed := master || (dev != nil && (dev.Kind == "browser" || strings.HasPrefix(r.URL.Path, "/api/super/")))
 		if !allowed {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+			writeReadFileError(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		if !s.NodeOnly {
@@ -414,9 +414,10 @@ func (s *Server) routed(h http.HandlerFunc) http.HandlerFunc {
 func (s *Server) forwardToNode(w http.ResponseWriter, r *http.Request, machine, targetPath string, body []byte) {
 	hc, err := s.Fleet.HTTPClient(machine)
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "电脑不在线：" + machine})
+		writeReadFileError(w, r, http.StatusServiceUnavailable, "电脑不在线："+machine)
 		return
 	}
+	htmlPreview := isHTMLPreviewRequest(r)
 	rp := &httputil.ReverseProxy{
 		Transport:     hc.Transport,
 		FlushInterval: -1,
@@ -435,8 +436,14 @@ func (s *Server) forwardToNode(w http.ResponseWriter, r *http.Request, machine, 
 				pr.Out.ContentLength = int64(len(body))
 			}
 		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "转发到 " + machine + " 失败：" + err.Error()})
+		ModifyResponse: func(resp *http.Response) error {
+			if htmlPreview {
+				applyForwardedHTMLPreviewHeaders(w, r, resp)
+			}
+			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			writeReadFileError(w, r, http.StatusBadGateway, "转发到 "+machine+" 失败："+err.Error())
 		},
 	}
 	rp.ServeHTTP(w, r)
@@ -548,7 +555,11 @@ func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("X-Frame-Options", "DENY")
+		if isHTMLPreviewRequest(r) {
+			w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		} else {
+			w.Header().Set("X-Frame-Options", "DENY")
+		}
 		next.ServeHTTP(w, r)
 	})
 }

@@ -13,7 +13,7 @@ interface Props {
   queuedPrompts?: QueuedPrompt[];
   queuePaused?: boolean;
   onClosed: () => void;
-  onOpenFile?: (path: string) => void;
+  onOpenFile?: (path: string, machine?: string) => void;
   onToast: (msg: string) => void;
 }
 
@@ -437,7 +437,7 @@ export function AgentPaneView({ pane, focusSeq = 0, queuedPrompts = [], queuePau
 
   return (
     <div
-      className="flex-1 flex flex-col min-h-0 overflow-hidden"
+      className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden"
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e: DragEvent) => {
         e.preventDefault();

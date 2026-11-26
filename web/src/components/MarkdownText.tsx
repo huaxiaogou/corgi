@@ -1,24 +1,63 @@
 import type { ReactNode } from "react";
+import { classifyPreviewLink, splitBareURLTrailing } from "../lib/previewLink";
 import { normalizeEscapedNewlines } from "../lib/text";
 
 interface Props {
   text: string;
-  onOpenFile?: (path: string) => void;
+  onOpenFile?: (path: string, machine?: string) => void;
 }
 
 const INLINE_RE =
-  /(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]]+\]\((?:https?|file):\/\/[^)\s]+\)|\[image:[^\]]+\]|(?:~\/|\/[\w.-]+\/)[\w./-]+\.(?:tsx|ts|jsx|js|mjs|cjs|json|yaml|yml|html|htm|jpeg|jpg|png|webp|svg|css|scss|md|go|py|sh|sql|rs|rb|java|kt|cpp|hpp|cc|hh|toml|ini|txt|log|csv|c|h)(?![A-Za-z0-9_]))/g;
+  /(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]]+\]\((?:(?:https?|file):\/\/[^)\s]+|\/api\/file\?[^)\s]+)\)|\[image:[^\]]+\]|https?:\/\/[^\s<>()[\]"'`]+|\/api\/file\?[^\s<>()[\]"'`]+|(?:~\/|\/[\p{L}\p{N}._-]+\/)[\p{L}\p{N}./_-]+\.(?:tsx|ts|jsx|js|mjs|cjs|json|yaml|yml|html|htm|jpeg|jpg|png|webp|svg|css|scss|md|go|py|sh|sql|rs|rb|java|kt|cpp|hpp|cc|hh|toml|ini|txt|log|csv|c|h)(?![\p{L}\p{N}_]))/gu;
 
-function fileHrefToPath(href: string): string {
-  const withoutScheme = href.replace(/^file:\/\/(?:localhost)?/i, "").replace(/#.*$/, "");
-  try {
-    return decodeURIComponent(withoutScheme);
-  } catch {
-    return withoutScheme;
+function renderLinkNode(
+  key: number,
+  label: string,
+  href: string,
+  onOpenFile?: (path: string, machine?: string) => void
+): ReactNode {
+  const target = classifyPreviewLink(href);
+  if (target.kind === "file") {
+    const title = target.machine ? `${target.machine} · ${target.path}` : target.path;
+    if (onOpenFile) {
+      return (
+        <button
+          key={key}
+          type="button"
+          onClick={() => onOpenFile(target.path, target.machine)}
+          title={title}
+          className="font-mono-code text-[12.5px] px-1.5 py-0.5 rounded surface-rail hover:underline cursor-pointer mx-0.5"
+        >
+          {label}
+        </button>
+      );
+    }
+    return (
+      <code key={key} title={title} className="font-mono-code text-[12.5px] px-1.5 py-0.5 rounded surface-rail border border-hairline">
+        {label}
+      </code>
+    );
   }
+  if (target.kind === "external") {
+    return (
+      <a
+        key={key}
+        href={target.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-baseline gap-0.5 underline underline-offset-2 text-primary hover:opacity-75"
+      >
+        <span>{label}</span>
+        <span aria-hidden="true" className="text-[11px] text-muted no-underline">
+          ↗
+        </span>
+      </a>
+    );
+  }
+  return <span key={key}>{label}</span>;
 }
 
-function renderInline(line: string, onOpenFile?: (path: string) => void): ReactNode[] {
+function renderInline(line: string, onOpenFile?: (path: string, machine?: string) => void): ReactNode[] {
   const parts = line.split(INLINE_RE);
   return parts.map((part, idx) => {
     if (!part) return null;
@@ -58,31 +97,17 @@ function renderInline(line: string, onOpenFile?: (path: string) => void): ReactN
       const sep = part.indexOf("](");
       const label = part.slice(1, sep);
       const href = part.slice(sep + 2, -1);
-      if (/^file:\/\//i.test(href)) {
-        const filePath = fileHrefToPath(href);
-        if (onOpenFile) {
-          return (
-            <button
-              key={idx}
-              type="button"
-              onClick={() => onOpenFile(filePath)}
-              title={filePath}
-              className="font-mono-code text-[12.5px] px-1.5 py-0.5 rounded surface-rail hover:underline cursor-pointer mx-0.5"
-            >
-              {label}
-            </button>
-          );
-        }
-        return (
-          <code key={idx} title={filePath} className="font-mono-code text-[12.5px] px-1.5 py-0.5 rounded surface-rail border border-hairline">
-            {label}
-          </code>
-        );
-      }
+      return renderLinkNode(idx, label, href, onOpenFile);
+    }
+    if (/^https?:\/\//i.test(part) || part.startsWith("/api/file?")) {
+      const { url, trailing } = splitBareURLTrailing(part);
+      const target = classifyPreviewLink(url);
+      const displayLabel = target.kind === "file" ? target.path : url;
       return (
-        <a key={idx} href={href} target="_blank" rel="noreferrer" className="underline underline-offset-2 text-primary">
-          {label}
-        </a>
+        <span key={idx}>
+          {renderLinkNode(idx, displayLabel, url, onOpenFile)}
+          {trailing}
+        </span>
       );
     }
     if ((part.startsWith("/") || part.startsWith("~/")) && onOpenFile) {

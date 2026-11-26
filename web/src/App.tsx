@@ -19,6 +19,9 @@ export function App() {
   const selectRoute = (next: AppRoute) => {
     setRoute(next);
     setNavSeq((n) => n + 1);
+    if (next.view === "auto") {
+      setFileTarget(null);
+    }
   };
   const [launchOpen, setLaunchOpen] = useState(false);
   const [fileTarget, setFileTarget] = useState<{ path: string; machine?: string } | null>(null);
@@ -153,7 +156,7 @@ export function App() {
               queuedPrompts={paneState?.queued_prompts?.[selectedPane.pane_id] ?? []}
               queuePaused={Boolean(paneState?.paused_queues?.[selectedPane.pane_id])}
               onClosed={() => selectRoute({ view: "corgi", thread: "chat:main" })}
-              onOpenFile={(p) => setFileTarget({ path: p, machine: selectedPane.machine })}
+              onOpenFile={(p, m) => setFileTarget({ path: p, machine: m ?? selectedPane.machine })}
               onToast={toast}
             />
           )}

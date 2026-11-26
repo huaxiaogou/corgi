@@ -27,7 +27,7 @@ interface Props {
   onAnswerApproval: (choice: Approval["choices"][number], index: number) => void;
   onCancelApproval: () => void;
   onSwitchToScreen: () => void;
-  onOpenFile?: (path: string) => void;
+  onOpenFile?: (path: string, machine?: string) => void;
 }
 
 export function AgentChatThread({

@@ -1,19 +1,77 @@
-import { useEffect, useState } from "react";
-import { Download, Maximize2, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowLeft, Download, ExternalLink, Maximize2, Minimize2, RotateCw, X } from "lucide-react";
 import { MarkdownText } from "../../components/MarkdownText";
 import { api } from "../../lib/api";
+import { clampSplitWidth, computeSplitBounds } from "../../lib/previewLayout";
+import { buildFileAPIURL, fileBaseName, getPreviewFileKind } from "../../lib/previewLink";
 import type { FileResponse } from "../../types/api";
+import { HtmlPreviewPane } from "./HtmlPreviewPane";
+import { SplitResizer } from "./SplitResizer";
 
 interface Props {
   target: { path: string; machine?: string } | null;
   onClose: () => void;
 }
 
+const WIDTH_STORAGE_KEY_HTML = "corgi.preview.width.html";
+const WIDTH_STORAGE_KEY_FILE = "corgi.preview.width.file";
+
+function readSavedWidth(key: string): number | null {
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    const n = raw ? Number(raw) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
 export function FileDrawer({ target, onClose }: Props) {
+  const asideRef = useRef<HTMLElement>(null);
   const [file, setFile] = useState<FileResponse | null>(null);
   const [err, setErr] = useState("");
   const [rawView, setRawView] = useState(false);
   const [lightbox, setLightbox] = useState(false);
+  const [reloadSeq, setReloadSeq] = useState(0);
+  const [resizing, setResizing] = useState(false);
+  const [isDesktop, setIsDesktop] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(min-width: 1024px)").matches : true
+  );
+  const [containerWidth, setContainerWidth] = useState(1120);
+  const [customWidths, setCustomWidths] = useState<{ html: number | null; file: number | null }>(() => ({
+    html: typeof window !== "undefined" ? readSavedWidth(WIDTH_STORAGE_KEY_HTML) : null,
+    file: typeof window !== "undefined" ? readSavedWidth(WIDTH_STORAGE_KEY_FILE) : null,
+  }));
+
+  const kind = target ? getPreviewFileKind(target.path) : "text";
+  const isImage = kind === "image";
+  const isHTML = kind === "html";
+  const isMarkdown = kind === "markdown";
+
+  useEffect(() => {
+    const mql = window.matchMedia("(min-width: 1024px)");
+    const sync = () => setIsDesktop(mql.matches);
+    sync();
+    mql.addEventListener("change", sync);
+    return () => mql.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    if (!target) return;
+    const parent = asideRef.current?.parentElement;
+    if (!parent) return;
+    const measure = () => {
+      if (parent.clientWidth > 0) setContainerWidth(parent.clientWidth);
+    };
+    measure();
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(measure);
+      ro.observe(parent);
+      return () => ro.disconnect();
+    }
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [target, isDesktop]);
 
   useEffect(() => {
     if (!target) return;
@@ -21,44 +79,147 @@ export function FileDrawer({ target, onClose }: Props) {
     setErr("");
     setRawView(false);
     setLightbox(false);
-    const ext = target.path.toLowerCase().split(".").pop() ?? "";
-    if (["png", "jpg", "jpeg", "gif", "webp", "html", "htm"].includes(ext)) {
-      return;
-    }
-    const qs = new URLSearchParams({ path: target.path });
-    if (target.machine) qs.set("machine", target.machine);
-    void api<FileResponse>(`/api/file?${qs.toString()}`)
-      .then(setFile)
-      .catch((e) => setErr(e instanceof Error ? e.message : "读取失败"));
-  }, [target]);
+    setReloadSeq(0);
+
+    if (kind === "image" || kind === "html") return;
+    let cancelled = false;
+    void api<FileResponse>(buildFileAPIURL(target))
+      .then((res) => {
+        if (!cancelled) setFile(res);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(e instanceof Error ? e.message : "读取失败");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [target, kind]);
+
+  useEffect(() => {
+    if (!target) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (lightbox) setLightbox(false);
+      else onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [target, lightbox, onClose]);
+
+  const bounds = computeSplitBounds(containerWidth, isHTML);
+  const savedForKind = isHTML ? customWidths.html : customWidths.file;
+  const activeWidth = clampSplitWidth(savedForKind ?? bounds.defaultWidth, bounds.min, bounds.max);
+  const isWide = isHTML && activeWidth >= bounds.wideWidth - 24;
+
+  const updateWidth = useCallback(
+    (next: number | null) => {
+      const storageKey = isHTML ? WIDTH_STORAGE_KEY_HTML : WIDTH_STORAGE_KEY_FILE;
+      const clamped = next === null ? null : clampSplitWidth(next, bounds.min, bounds.max);
+      setCustomWidths((prev) => (isHTML ? { ...prev, html: clamped } : { ...prev, file: clamped }));
+      try {
+        if (clamped === null) window.sessionStorage.removeItem(storageKey);
+        else window.sessionStorage.setItem(storageKey, String(clamped));
+      } catch {
+        // ignore storage restrictions
+      }
+    },
+    [isHTML, bounds.min, bounds.max]
+  );
 
   if (!target) return null;
 
-  const ext = target.path.toLowerCase().split(".").pop() ?? "";
-  const isImage = ["png", "jpg", "jpeg", "gif", "webp"].includes(ext);
-  const isHTML = ext === "html" || ext === "htm";
-  const isMarkdown = ext === "md";
-  const qs = new URLSearchParams({ path: target.path });
-  if (target.machine) qs.set("machine", target.machine);
-  const imgSrc = `/api/file?${qs.toString()}&as=image`;
+  const imgSrc = buildFileAPIURL(target, { as: "image" });
+  const htmlSrc = buildFileAPIURL(target, { as: "html" });
+  const downloadSrc = buildFileAPIURL(target, { download: "1" });
 
   return (
     <>
-      <aside className="w-full sm:w-[400px] shrink-0 flex flex-col surface-rail border-l border-hairline">
-        <div className="h-14 px-4 flex items-center justify-between border-b border-hairline shrink-0 gap-2">
-          <div className="min-w-0">
-            <div className="text-[13px] font-semibold truncate">{target.path.split("/").pop()}</div>
-            <div className="text-[11px] font-mono-code text-muted truncate">{target.path}</div>
+      <div
+        className="fixed inset-0 z-30 hidden md:block lg:hidden"
+        style={{ background: "rgba(0,0,0,0.28)" }}
+        onClick={onClose}
+      />
+
+      {isDesktop && (
+        <SplitResizer
+          width={activeWidth}
+          bounds={bounds}
+          onWidthChange={(w) => updateWidth(w)}
+          onReset={() => updateWidth(null)}
+          onDraggingChange={setResizing}
+        />
+      )}
+
+      <aside
+        ref={asideRef}
+        aria-label="文件与 HTML 预览"
+        style={isDesktop ? { width: `${activeWidth}px` } : undefined}
+        className="fixed inset-0 z-40 md:left-auto md:w-[min(86vw,640px)] md:shadow-2xl lg:static lg:inset-auto lg:z-auto lg:shadow-none shrink-0 flex flex-col surface-rail border-l border-hairline"
+      >
+        <div className="h-14 px-3.5 flex items-center justify-between border-b border-hairline shrink-0 gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <button
+              type="button"
+              onClick={onClose}
+              className="md:hidden inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-secondary border border-hairline surface-bg surface-hover cursor-pointer shrink-0"
+              title="返回对话"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>返回</span>
+            </button>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="text-[13px] font-semibold truncate">{fileBaseName(target.path)}</span>
+                {target.machine && (
+                  <span className="text-[10.5px] font-mono-code px-1.5 py-0.5 rounded border border-hairline surface-bg text-muted shrink-0">
+                    {target.machine}
+                  </span>
+                )}
+              </div>
+              <div className="text-[11px] font-mono-code text-muted truncate" title={target.path}>
+                {target.path}
+              </div>
+            </div>
           </div>
+
           <div className="flex items-center gap-1 shrink-0">
-            {isMarkdown && (
+            {(isMarkdown || isHTML) && (
               <button
                 type="button"
                 onClick={() => setRawView((v) => !v)}
                 className="px-2 py-1 rounded-md text-[11px] border border-hairline text-secondary surface-hover cursor-pointer"
               >
-                {rawView ? "渲染" : "原文"}
+                {rawView ? (isHTML ? "预览" : "渲染") : isHTML ? "源码" : "原文"}
               </button>
+            )}
+            {isHTML && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setReloadSeq((n) => n + 1)}
+                  className="w-7 h-7 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer"
+                  title="刷新预览"
+                >
+                  <RotateCw className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => updateWidth(isWide ? bounds.defaultWidth : bounds.wideWidth)}
+                  className="hidden lg:flex w-7 h-7 rounded-lg items-center justify-center text-secondary surface-hover cursor-pointer"
+                  title={isWide ? "恢复默认宽度" : "展开更宽预览"}
+                >
+                  {isWide ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                </button>
+                <a
+                  href={htmlSrc}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-7 h-7 rounded-lg flex items-center justify-center text-secondary surface-hover"
+                  title="在新标签页打开（沙箱保护）"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              </>
             )}
             {isImage && (
               <button
@@ -71,44 +232,53 @@ export function FileDrawer({ target, onClose }: Props) {
               </button>
             )}
             <a
-              href={`/api/file?${qs.toString()}&download=1`}
+              href={downloadSrc}
               className="w-7 h-7 rounded-lg flex items-center justify-center text-secondary surface-hover"
               title="下载原件"
             >
               <Download className="w-3.5 h-3.5" />
             </a>
-            <button type="button" onClick={onClose} className="w-7 h-7 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer">
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer"
+              title="关闭 (Esc)"
+            >
               <X className="w-4 h-4" />
             </button>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 text-xs">
-          {err && <div style={{ color: "var(--attn)" }}>{err}</div>}
-          {isImage && (
-            <button type="button" onClick={() => setLightbox(true)} className="block cursor-zoom-in">
-              <img src={imgSrc} alt={target.path} className="max-w-full rounded-lg border border-hairline" />
-            </button>
-          )}
-          {isHTML && (
-            <iframe
-              src={`/api/file?${qs.toString()}&as=html`}
-              sandbox="allow-scripts allow-forms"
-              title={target.path}
-              className="w-full h-[520px] rounded-lg border border-hairline surface-bg"
-            />
-          )}
-          {file && file.kind === "text" && (
-            isMarkdown && !rawView ? (
-              <div className="text-[13px] text-primary">
-                <MarkdownText text={file.content} />
-              </div>
-            ) : (
-              <pre className="font-mono-code leading-relaxed whitespace-pre-wrap text-secondary">{file.content}</pre>
-            )
-          )}
-          {file && file.kind === "binary" && <div className="text-muted">二进制文件，请点击右上角下载原件。</div>}
-        </div>
+        {isHTML ? (
+          <HtmlPreviewPane
+            path={target.path}
+            machine={target.machine}
+            rawView={rawView}
+            reloadSeq={reloadSeq}
+            resizing={resizing}
+          />
+        ) : (
+          <div className="flex-1 overflow-y-auto p-4 text-xs">
+            {err && <div style={{ color: "var(--attn)" }}>{err}</div>}
+            {isImage && (
+              <button type="button" onClick={() => setLightbox(true)} className="block cursor-zoom-in">
+                <img src={imgSrc} alt={target.path} className="max-w-full rounded-lg border border-hairline" />
+              </button>
+            )}
+            {file && file.kind === "text" && (
+              isMarkdown && !rawView ? (
+                <div className="text-[13px] text-primary">
+                  <MarkdownText text={file.content} />
+                </div>
+              ) : (
+                <pre className="font-mono-code leading-relaxed whitespace-pre-wrap text-secondary">{file.content}</pre>
+              )
+            )}
+            {file && file.kind === "binary" && (
+              <div className="text-muted">二进制文件，请点击右上角下载原件。</div>
+            )}
+          </div>
+        )}
       </aside>
 
       {lightbox && isImage && (

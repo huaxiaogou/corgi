@@ -221,7 +221,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const headerTitle = thread === "chat:main" ? "Corgi" : isWeComGroup ? `企微群 · ${thread.replace(/^wecom:/, "")}` : thread;
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+    <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
       <ChatHeader
         title={headerTitle}
         isWeComGroup={isWeComGroup}
@@ -541,7 +541,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                 <div className="flex-1 min-w-0 space-y-1.5">
                   {entry.re && <QuoteBlock quote={entry.re} align="left" onJumpToEntry={jumpToEntry} />}
                   <div className="text-[14.5px]">
-                    <MarkdownText text={entry.text} onOpenFile={(p) => onOpenFile(p)} />
+                    <MarkdownText text={entry.text} onOpenFile={onOpenFile} />
                   </div>
                   <div className="flex items-center gap-3 text-[11px] text-muted opacity-0 group-hover:opacity-100 transition-opacity">
                     <button type="button" onClick={() => setReplyTo(entry)} className="hover:underline cursor-pointer">

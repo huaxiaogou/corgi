@@ -25,8 +25,47 @@ const (
 	maxHTMLRead    = 5 << 20
 	maxImageRead   = 20 << 20
 	maxUploadBytes = 25 << 20
-	htmlSandboxCSP = "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads"
+	// Default HTML preview policy: static opaque-origin sandbox allowing passive HTTPS static assets
+	// (styles/images/fonts) while forbidding all scripts, active network, forms, same-origin, and top-nav.
+	htmlSandboxCSP = "sandbox; default-src 'none'; style-src 'unsafe-inline' data: https:; img-src data: blob: https:; font-src data: https:; media-src data: blob:; connect-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
+	// Opt-in inline-script HTML preview policy (user toggled): still opaque null origin,
+	// allows inline scripts and passive HTTPS styles/images/fonts only; strictly forbids external scripts,
+	// http:, eval, allow-same-origin, allow-top-navigation, connect-src, forms, popups, modals, and downloads.
+	htmlSandboxScriptsCSP = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' data: https:; img-src data: blob: https:; font-src data: https:; media-src data: blob:; connect-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
 )
+
+func isHTMLPreviewRequest(r *http.Request) bool {
+	return (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+		r.URL.Path == "/api/file" &&
+		r.URL.Query().Get("as") == "html" &&
+		r.URL.Query().Get("download") != "1"
+}
+
+func htmlPreviewCSP(r *http.Request) string {
+	if r.URL.Query().Get("scripts") == "1" {
+		return htmlSandboxScriptsCSP
+	}
+	return htmlSandboxCSP
+}
+
+func applyForwardedHTMLPreviewHeaders(w http.ResponseWriter, r *http.Request, resp *http.Response) {
+	resp.Header.Del("X-Frame-Options")
+	if resp.StatusCode == http.StatusOK {
+		resp.Header.Set("Content-Security-Policy", htmlPreviewCSP(r))
+		resp.Header.Set("Cache-Control", "no-store")
+		return
+	}
+	w.Header().Set("X-Frame-Options", "DENY")
+}
+
+func writeReadFileError(w http.ResponseWriter, r *http.Request, code int, msg string) {
+	w.Header().Set("X-Frame-Options", "DENY")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(code)
+		return
+	}
+	writeJSON(w, code, map[string]any{"error": msg})
+}
 
 var unsafeUploadRe = regexp.MustCompile(`[^\p{L}\p{N}._-]+`)
 
@@ -174,16 +213,16 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	p := s.expand(rawPath)
 	fi, err := os.Stat(p)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "找不到文件"})
+		writeReadFileError(w, r, http.StatusNotFound, "找不到文件")
 		return
 	}
 	if fi.IsDir() {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "这是一个目录"})
+		writeReadFileError(w, r, http.StatusBadRequest, "这是一个目录")
 		return
 	}
 	f, err := os.Open(p)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		writeReadFileError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 	defer f.Close()
@@ -192,19 +231,30 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", `attachment; filename*=UTF-8''`+url.PathEscape(filepath.Base(p)))
 		w.Header().Set("Content-Security-Policy", "sandbox")
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		_, _ = io.Copy(w, io.LimitReader(f, 100<<20))
 		return
 	}
 	if as == "html" {
 		ext := strings.ToLower(filepath.Ext(p))
 		if ext != ".html" && ext != ".htm" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "仅支持 .html/.htm 预览"})
+			writeReadFileError(w, r, http.StatusBadRequest, "仅支持 .html/.htm 预览")
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Security-Policy", htmlPreviewCSP(r))
+		w.Header().Set("Cache-Control", "no-store")
+		if fi.Size() > maxHTMLRead {
+			w.Header().Set("X-Corgi-Truncated", "1")
+		}
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 		b, _ := io.ReadAll(io.LimitReader(f, maxHTMLRead))
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Content-Security-Policy", htmlSandboxCSP)
-		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(b)
 		return
 	}
@@ -216,6 +266,10 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	if as == "image" {
 		w.Header().Set("Content-Type", http.DetectContentType(b))
 		w.Header().Set("Cache-Control", "private, max-age=3600")
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		_, _ = w.Write(b)
 		return
 	}
