@@ -284,74 +284,148 @@ func (c *Client) UpdateCardResolvedWithTask(ctx context.Context, reqID, taskID s
 	return nil
 }
 
-// WorkerPickOption describes one selectable worker shown in WeCom's switch-conversation card.
+// WorkerPickOption describes one selectable matter/worker shown in WeCom's switch-conversation card.
 type WorkerPickOption struct {
-	Name    string
-	Machine string
-	Kind    string
-	Status  string
-	Ended   bool
+	Name        string
+	Title       string
+	Machine     string
+	Kind        string
+	Status      string
+	HasWorkItem bool
+	Ended       bool
 }
 
-// BuildWorkerPickerCard builds a compact WeCom button_interaction card for switching into
-// a Worker direct chat or returning to Corgi main chat.
-func BuildWorkerPickerCard(taskID, currentWorker string, opts []WorkerPickOption) map[string]any {
+// BuildWorkerPickerCard builds a clean, paginated WeCom button_interaction card for switching
+// into a Worker direct chat or returning to Corgi main chat. Rows use compact numeric keys
+// ("1.".."N.") paired with full Chinese matter titles, and buttons use crisp "选 1".."选 N"
+// labels + in-place pagination ("上一页"/"下一页") so options never truncate or drop off.
+func BuildWorkerPickerCard(taskID, currentWorker, currentTitle string, opts []WorkerPickOption, page int) map[string]any {
 	tid := sanitizeTaskID(firstNonEmpty(taskID, fmt.Sprintf("nav:pick:%d", time.Now().UnixNano())))
 	currentWorker = strings.TrimSpace(currentWorker)
-	desc := "当前：Corgi 主对话"
-	if currentWorker != "" {
-		desc = clipRunes("当前直连：#"+currentWorker, cardMainDescMaxRunes)
+	currentTitle = strings.TrimSpace(currentTitle)
+
+	// Calculate page windows respecting WeCom's 6-button max and <=5 readable rows per card.
+	hasBackMain := currentWorker != ""
+	type pageSlice struct {
+		start int
+		end   int
+	}
+	var pages []pageSlice
+	if len(opts) == 0 {
+		pages = []pageSlice{{0, 0}}
+	} else {
+		// Fit all items on 1 page if they fit within available button slots (max 5 rows for clean mobile height).
+		singleMax := 5
+		if hasBackMain && singleMax > cardMaxButtons-1 {
+			singleMax = cardMaxButtons - 1
+		}
+		if len(opts) <= singleMax {
+			pages = []pageSlice{{0, len(opts)}}
+		} else {
+			pos := 0
+			for pos < len(opts) {
+				isFirst := pos == 0
+				// Reserve 1 slot for 回主对话 if focused, 1 for 上一页 if !isFirst, and 1 for 下一页 if more remain.
+				fixedNav := 0
+				if hasBackMain {
+					fixedNav++
+				}
+				if !isFirst {
+					fixedNav++
+				}
+				capWithoutNext := cardMaxButtons - fixedNav
+				if capWithoutNext > 5 {
+					capWithoutNext = 5
+				}
+				if pos+capWithoutNext >= len(opts) {
+					pages = append(pages, pageSlice{pos, len(opts)})
+					break
+				}
+				capWithNext := cardMaxButtons - fixedNav - 1
+				if capWithNext > 5 {
+					capWithNext = 5
+				}
+				if capWithNext < 1 {
+					capWithNext = 1
+				}
+				pages = append(pages, pageSlice{pos, pos + capWithNext})
+				pos += capWithNext
+			}
+		}
 	}
 
-	maxWorkers := cardMaxButtons
-	if currentWorker != "" {
-		maxWorkers = cardMaxButtons - 1
+	if page < 0 {
+		page = 0
 	}
-	if len(opts) > maxWorkers {
-		opts = opts[:maxWorkers]
+	if page >= len(pages) {
+		page = len(pages) - 1
+	}
+	win := pages[page]
+	pageOpts := opts[win.start:win.end]
+
+	curLabel := "Corgi 主对话"
+	if currentWorker != "" {
+		curLabel = firstNonEmpty(currentTitle, "#"+currentWorker)
+	}
+	var desc string
+	if len(pages) > 1 {
+		desc = fmt.Sprintf("当前：%s · %d/%d页", clipRunes(curLabel, 14), page+1, len(pages))
+	} else {
+		desc = fmt.Sprintf("当前：%s · 共%d项", clipRunes(curLabel, 16), len(opts))
 	}
 
 	buttons := make([]map[string]any, 0, cardMaxButtons)
-	horiz := make([]map[string]any, 0, len(opts))
+	horiz := make([]map[string]any, 0, len(pageOpts))
 
-	if currentWorker != "" {
+	if hasBackMain {
 		buttons = append(buttons, map[string]any{
 			"text":  "回主对话",
 			"style": 1,
 			"key":   "nav:main",
 		})
 	}
-	for i, opt := range opts {
+	for i, opt := range pageOpts {
+		num := win.start + i + 1
 		style := 2
-		if currentWorker == "" && i == 0 {
+		if !hasBackMain && i == 0 && page == 0 {
 			style = 1
 		}
 		buttons = append(buttons, map[string]any{
-			"text":  clipRunes(opt.Name, cardButtonTextMaxRunes),
+			"text":  fmt.Sprintf("选 %d", num),
 			"style": style,
 			"key":   "nav:focus:" + opt.Name,
 		})
-		state := "运行中"
-		if opt.Ended {
-			state = "可恢复"
-		} else if opt.Status == "working" {
-			state = "思考中"
-		} else if opt.Status == "blocked" {
-			state = "待确认"
+		label := strings.TrimSpace(opt.Title)
+		if label == "" {
+			label = opt.Name
 		}
-		metaParts := []string{}
-		if m := strings.TrimSpace(opt.Machine); m != "" {
-			metaParts = append(metaParts, m)
-		} else {
-			metaParts = append(metaParts, "Hub")
+		suffix := ""
+		switch {
+		case opt.Ended:
+			suffix = " · 可恢复"
+		case opt.Status == "working":
+			suffix = " · 思考中"
+		case opt.Status == "blocked":
+			suffix = " · 待确认"
 		}
-		if k := strings.TrimSpace(opt.Kind); k != "" {
-			metaParts = append(metaParts, k)
-		}
-		metaParts = append(metaParts, state)
+		val := clipRunes(label, cardHorizValueMaxRunes-len([]rune(suffix))) + suffix
 		horiz = append(horiz, map[string]any{
-			"keyname": clipRunes("#"+opt.Name, 14),
-			"value":   clipRunes(strings.Join(metaParts, " · "), cardHorizValueMaxRunes),
+			"keyname": fmt.Sprintf("%d.", num),
+			"value":   val,
+		})
+	}
+	if page > 0 {
+		buttons = append(buttons, map[string]any{
+			"text":  "← 上一页",
+			"style": 2,
+			"key":   fmt.Sprintf("nav:page:%d", page-1),
+		})
+	}
+	if page+1 < len(pages) {
+		buttons = append(buttons, map[string]any{
+			"text":  "下一页 →",
+			"style": 2,
+			"key":   fmt.Sprintf("nav:page:%d", page+1),
 		})
 	}
 
@@ -359,12 +433,11 @@ func BuildWorkerPickerCard(taskID, currentWorker string, opts []WorkerPickOption
 		"card_type": "button_interaction",
 		"source":    map[string]any{"desc": "Corgi · 切换对话"},
 		"main_title": map[string]any{
-			"title": "选择要直聊的 Worker",
-			"desc":  desc,
+			"title": "选择要直聊的事项 / 会话",
+			"desc":  clipRunes(desc, cardMainDescMaxRunes),
 		},
-		"sub_title_text": "点选进入直聊（已结束的会话会自动恢复原上下文），随时发「回主对话」返回 Corgi。",
-		"task_id":        tid,
-		"button_list":    buttons,
+		"task_id":     tid,
+		"button_list": buttons,
 	}
 	if len(horiz) > 0 {
 		card["horizontal_content_list"] = horiz
@@ -401,8 +474,8 @@ func BuildNavResultCard(taskID, title, statusText, detail string) map[string]any
 	return card
 }
 
-// SendWorkerPickerCard sends an interactive Worker selection card to chatID.
-func (c *Client) SendWorkerPickerCard(ctx context.Context, chatID, currentWorker string, opts []WorkerPickOption) error {
+// SendWorkerPickerCard sends an interactive paginated Worker/matter selection card to chatID.
+func (c *Client) SendWorkerPickerCard(ctx context.Context, chatID, currentWorker, currentTitle string, opts []WorkerPickOption, page int) error {
 	chatID = c.resolveTarget(chatID)
 	if chatID == "" {
 		return nil
@@ -413,10 +486,28 @@ func (c *Client) SendWorkerPickerCard(ctx context.Context, chatID, currentWorker
 	_, err := c.callRPC(sctx, "aibot_send_msg", map[string]any{
 		"chatid":        chatID,
 		"msgtype":       "template_card",
-		"template_card": BuildWorkerPickerCard(taskID, currentWorker, opts),
+		"template_card": BuildWorkerPickerCard(taskID, currentWorker, currentTitle, opts, page),
 	})
 	if err != nil {
 		return fmt.Errorf("send wecom worker picker card: %w", err)
+	}
+	return nil
+}
+
+// UpdateWorkerPickerCard replaces an existing Worker picker card in-place for pagination.
+func (c *Client) UpdateWorkerPickerCard(ctx context.Context, reqID, taskID, currentWorker, currentTitle string, opts []WorkerPickOption, page int) error {
+	reqID = strings.TrimSpace(reqID)
+	if reqID == "" {
+		return nil
+	}
+	uctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := c.callRPCWithReqID(uctx, reqID, "aibot_respond_update_msg", map[string]any{
+		"response_type": "update_template_card",
+		"template_card": BuildWorkerPickerCard(taskID, currentWorker, currentTitle, opts, page),
+	})
+	if err != nil {
+		return fmt.Errorf("update wecom worker picker card %s: %w", taskID, err)
 	}
 	return nil
 }

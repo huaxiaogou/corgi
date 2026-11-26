@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,6 +15,7 @@ import (
 
 type wecomFocus struct {
 	Worker     string `json:"worker"`
+	Title      string `json:"title,omitempty"`
 	Machine    string `json:"machine,omitempty"`
 	Kind       string `json:"kind,omitempty"`
 	Session    string `json:"session,omitempty"`
@@ -107,6 +109,47 @@ func (b *Bus) sendInstantWeComText(ctx context.Context, chatID, reqID, markdown 
 	}
 }
 
+func (b *Bus) selectableWeComOptions(ctx context.Context) ([]core.WorkerPickItem, []wecom.WorkerPickOption) {
+	items := b.engine.ListSelectableWorkers(ctx, 30)
+	opts := make([]wecom.WorkerPickOption, 0, len(items))
+	for _, it := range items {
+		opts = append(opts, wecom.WorkerPickOption{
+			Name:        it.Name,
+			Title:       it.Title,
+			Machine:     it.Machine,
+			Kind:        it.Kind,
+			Status:      it.Status,
+			HasWorkItem: it.HasWorkItem,
+			Ended:       it.Ended,
+		})
+	}
+	return items, opts
+}
+
+func (b *Bus) resolveSwitchQuery(ctx context.Context, query string) (workerName, displayTitle string) {
+	q := strings.TrimSpace(strings.TrimPrefix(query, "#"))
+	if q == "" {
+		return "", ""
+	}
+	items := b.engine.ListSelectableWorkers(ctx, 30)
+	// Support 1-based index (`/w 1`), exact worker name, or Chinese title keyword (`/w 太湖`).
+	if idx, err := strconv.Atoi(q); err == nil && idx >= 1 && idx <= len(items) {
+		return items[idx-1].Name, items[idx-1].Title
+	}
+	low := strings.ToLower(q)
+	for _, it := range items {
+		if strings.EqualFold(it.Name, q) {
+			return it.Name, it.Title
+		}
+	}
+	for _, it := range items {
+		if strings.Contains(strings.ToLower(it.Title), low) || strings.Contains(strings.ToLower(it.Name), low) {
+			return it.Name, it.Title
+		}
+	}
+	return q, ""
+}
+
 func (b *Bus) handleWeComControlOrDirect(ctx context.Context, msg wecom.IncomingMessage, thread, text string) bool {
 	focusKey := wecomFocusKey(msg.ChatType, msg.ChatID, msg.FromUser)
 	replyChatID := msg.ChatID
@@ -121,46 +164,37 @@ func (b *Bus) handleWeComControlOrDirect(ctx context.Context, msg wecom.Incoming
 		return true
 	}
 
-	// 2. Pop up clickable Worker picker card.
+	// 2. Pop up clickable, paginated Worker/matter picker card.
 	if isWorkerPickerCommand(text) {
-		cur := ""
+		curWorker, curTitle := "", ""
 		if f := b.loadWeComFocus(ctx, focusKey); f != nil {
-			cur = f.Worker
+			curWorker, curTitle = f.Worker, f.Title
 		}
-		items := b.engine.ListSelectableWorkers(ctx, 6)
-		if len(items) == 0 && cur == "" {
-			b.sendInstantWeComText(ctx, replyChatID, msg.ReqID, "目前还没有可切换的 Worker，直接在主对话派活即可。")
+		items, opts := b.selectableWeComOptions(ctx)
+		if len(items) == 0 && curWorker == "" {
+			b.sendInstantWeComText(ctx, replyChatID, msg.ReqID, "目前还没有可切换的事项或 Worker，直接在主对话派活即可。")
 			return true
 		}
-		opts := make([]wecom.WorkerPickOption, 0, len(items))
-		for _, it := range items {
-			opts = append(opts, wecom.WorkerPickOption{
-				Name:    it.Name,
-				Machine: it.Machine,
-				Kind:    it.Kind,
-				Status:  it.Status,
-				Ended:   it.Ended,
-			})
-		}
 		if b.wecom != nil && b.wecom.Online() {
-			if err := b.wecom.SendWorkerPickerCard(ctx, replyChatID, cur, opts); err != nil {
+			if err := b.wecom.SendWorkerPickerCard(ctx, replyChatID, curWorker, curTitle, opts, 0); err != nil {
 				b.logger.Warn("send wecom worker picker card failed", "err", err)
-				b.sendInstantWeComText(ctx, replyChatID, msg.ReqID, "发送切换卡片失败，可直接发 `/w <worker名>` 切换。")
+				b.sendInstantWeComText(ctx, replyChatID, msg.ReqID, "发送切换卡片失败，可直接发 `/w 1` 或 `/w <关键词>` 切换。")
 			}
 			return true
 		}
 		// Fallback text list when client is mocked without template_card support.
 		var lines []string
-		for _, it := range items {
-			lines = append(lines, fmt.Sprintf("- `#%s`（%s · %s）", it.Name, it.Machine, it.Kind))
+		for i, it := range items {
+			lines = append(lines, fmt.Sprintf("%d. **%s**（`#%s` · %s）", i+1, it.Title, it.Name, it.Machine))
 		}
-		b.sendInstantWeComText(ctx, replyChatID, msg.ReqID, "可选 Worker：\n"+strings.Join(lines, "\n")+"\n\n发送 `/w <名称>` 切入直聊。")
+		b.sendInstantWeComText(ctx, replyChatID, msg.ReqID, "可选事项 / 会话：\n"+strings.Join(lines, "\n")+"\n\n发送 `/w <编号或关键词>` 切入直聊。")
 		return true
 	}
 
-	// 3. Explicit `/w <name>` or `/to <name>` switch.
-	if targetName, ok := parseDirectSwitchTarget(text); ok {
-		b.switchWeComFocusTo(ctx, focusKey, replyChatID, msg.ReqID, targetName, nil)
+	// 3. Explicit `/w <编号|名称|关键词>` or `/to <...>` switch.
+	if query, ok := parseDirectSwitchTarget(text); ok {
+		workerName, title := b.resolveSwitchQuery(ctx, query)
+		b.switchWeComFocusTo(ctx, focusKey, replyChatID, msg.ReqID, workerName, title, nil)
 		return true
 	}
 
@@ -178,10 +212,18 @@ func (b *Bus) handleWeComControlOrDirect(ctx context.Context, msg wecom.Incoming
 	return false
 }
 
-func (b *Bus) switchWeComFocusTo(ctx context.Context, focusKey, chatID, reqID, workerName string, cardEv *wecom.CardClickEvent) {
+func (b *Bus) switchWeComFocusTo(ctx context.Context, focusKey, chatID, reqID, workerName, displayTitle string, cardEv *wecom.CardClickEvent) {
+	if displayTitle == "" {
+		for _, it := range b.engine.ListSelectableWorkers(ctx, 30) {
+			if it.Name == workerName {
+				displayTitle = it.Title
+				break
+			}
+		}
+	}
 	w, resumed, err := b.engine.ResumeWorkerSession(ctx, core.ResumeWorkerRequest{Name: workerName})
 	if err != nil {
-		errMsg := fmt.Sprintf("无法切到 `#%s`：%s（仍保持原对话对象）", workerName, err.Error())
+		errMsg := fmt.Sprintf("无法切到「%s」：%s（仍保持原对话对象）", firstNonEmptyStr(displayTitle, "#"+workerName), err.Error())
 		if cardEv != nil && b.wecom != nil {
 			_ = b.wecom.UpdateNavCard(ctx, cardEv.ReqID, cardEv.TaskID, "切换失败", "切换失败", errMsg)
 		} else {
@@ -189,9 +231,11 @@ func (b *Bus) switchWeComFocusTo(ctx context.Context, focusKey, chatID, reqID, w
 		}
 		return
 	}
+	label := firstNonEmptyStr(displayTitle, w.Title, w.Name)
 	machineLabel := b.engine.MachineDisplayName(w.Machine)
 	b.saveWeComFocus(ctx, focusKey, &wecomFocus{
 		Worker:     w.Name,
+		Title:      label,
 		Machine:    w.Machine,
 		Kind:       w.Kind,
 		Session:    w.Session,
@@ -201,9 +245,9 @@ func (b *Bus) switchWeComFocusTo(ctx context.Context, focusKey, chatID, reqID, w
 	if resumed {
 		actionVerb = "已恢复并切到"
 	}
-	msg := fmt.Sprintf("%s **#%s**（%s · %s）。直接发消息即可，发「回主对话」返回 Corgi。", actionVerb, w.Name, machineLabel, w.Kind)
+	msg := fmt.Sprintf("%s **%s**（`#%s` · %s · %s）。直接发消息即可，发「回主对话」返回 Corgi。", actionVerb, label, w.Name, machineLabel, w.Kind)
 	if cardEv != nil && b.wecom != nil {
-		_ = b.wecom.UpdateNavCard(ctx, cardEv.ReqID, cardEv.TaskID, "已切到 #"+w.Name, "已切到 #"+w.Name, msg)
+		_ = b.wecom.UpdateNavCard(ctx, cardEv.ReqID, cardEv.TaskID, "已切到："+label, "已切换", msg)
 		return
 	}
 	b.sendInstantWeComText(ctx, chatID, reqID, msg)
@@ -225,8 +269,22 @@ func (b *Bus) handleNavCardClick(ctx context.Context, ev wecom.CardClickEvent) b
 		}
 		return true
 	}
+	if pageStr, ok := strings.CutPrefix(ev.ChoiceKey, "page:"); ok {
+		page, _ := strconv.Atoi(strings.TrimSpace(pageStr))
+		curWorker, curTitle := "", ""
+		if f := b.loadWeComFocus(ctx, focusKey); f != nil {
+			curWorker, curTitle = f.Worker, f.Title
+		}
+		_, opts := b.selectableWeComOptions(ctx)
+		if b.wecom != nil {
+			if err := b.wecom.UpdateWorkerPickerCard(ctx, ev.ReqID, ev.TaskID, curWorker, curTitle, opts, page); err != nil {
+				b.logger.Warn("update wecom worker picker page failed", "page", page, "err", err)
+			}
+		}
+		return true
+	}
 	if target, ok := strings.CutPrefix(ev.ChoiceKey, "focus:"); ok && strings.TrimSpace(target) != "" {
-		b.switchWeComFocusTo(ctx, focusKey, replyChatID, "", strings.TrimSpace(target), &ev)
+		b.switchWeComFocusTo(ctx, focusKey, replyChatID, "", strings.TrimSpace(target), "", &ev)
 		return true
 	}
 	return true
@@ -235,10 +293,13 @@ func (b *Bus) handleNavCardClick(ctx context.Context, ev wecom.CardClickEvent) b
 func (b *Bus) dispatchWeComDirectWorker(ctx context.Context, msg wecom.IncomingMessage, thread, chatID string, target wecomFocus, text string, inFocusMode bool) {
 	// Open passive stream immediately for instant WeCom "思考中..." feedback, then start watching
 	// once SendDirectWorkerMessage has resolved/resumed the exact live Worker pane.
-	stream, watchCtx := b.openWorkerStream(ctx, thread, chatID, msg.ReqID, target.Worker)
+	stream, watchCtx := b.openWorkerStream(ctx, thread, chatID, msg.ReqID, firstNonEmptyStr(target.Title, target.Worker))
 
 	onDone := func(cbCtx context.Context, res core.DirectTurnResult) {
 		header := fmt.Sprintf("[#%s · %s]", res.WorkerName, res.MachineLabel)
+		if strings.TrimSpace(target.Title) != "" && target.Title != res.WorkerName {
+			header = fmt.Sprintf("[#%s] %s（%s）", res.WorkerName, target.Title, res.MachineLabel)
+		}
 		var body string
 		if res.QuotaError != "" {
 			body = fmt.Sprintf("%s\n\n⚠ Worker 遇到模型/配额错误：%s", header, res.QuotaError)
@@ -287,9 +348,9 @@ func (b *Bus) dispatchWeComDirectWorker(ctx context.Context, msg wecom.IncomingM
 		OnDone:     onDone,
 	})
 	if err != nil {
-		errText := fmt.Sprintf("发送给 `#%s` 失败：%s", target.Worker, err.Error())
+		errText := fmt.Sprintf("发送给「%s」失败：%s", firstNonEmptyStr(target.Title, "#"+target.Worker), err.Error())
 		if inFocusMode {
-			errText += "\n可发送「回主对话」返回 Corgi，或发 `/w` 切换其他 Worker。"
+			errText += "\n可发送「回主对话」返回 Corgi，或发 `/w` 切换其他事项。"
 		}
 		if stream != nil {
 			if ok, _ := stream.seal(ctx, "", errText); ok {
@@ -309,10 +370,20 @@ func (b *Bus) dispatchWeComDirectWorker(ctx context.Context, msg wecom.IncomingM
 		focusKey := wecomFocusKey(msg.ChatType, msg.ChatID, msg.FromUser)
 		b.saveWeComFocus(ctx, focusKey, &wecomFocus{
 			Worker:     w.Name,
+			Title:      firstNonEmptyStr(target.Title, w.Title, w.Name),
 			Machine:    w.Machine,
 			Kind:       w.Kind,
 			Session:    w.Session,
 			WorkItemID: w.WorkItemID,
 		})
 	}
+}
+
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
 }

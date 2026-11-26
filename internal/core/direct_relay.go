@@ -40,13 +40,15 @@ type DirectWorkerRequest struct {
 
 // WorkerPickItem is a concise summary of a live or resumable Worker for channel pickers.
 type WorkerPickItem struct {
-	Name       string
-	Machine    string
-	Kind       string
-	Status     string
-	Session    string
-	WorkItemID string
-	Ended      bool
+	Name        string
+	Title       string
+	Machine     string
+	Kind        string
+	Status      string
+	Session     string
+	WorkItemID  string
+	HasWorkItem bool
+	Ended       bool
 }
 
 type pendingDirectTurn struct {
@@ -138,64 +140,244 @@ func (e *Engine) RouterContinuousIdle() time.Duration {
 	return time.Since(e.routerTrueIdleSince)
 }
 
-// ListSelectableWorkers returns live workers first, followed by recent ended sessions that can
-// be resumed, deduplicated by name and capped to limit.
+// ListSelectableWorkers returns live and resumable Workers prioritized by open Work Items
+// (小本本事项 first with their human-readable Chinese titles), then other live Workers, then
+// recent ended sessions, deduplicated by name and capped to limit.
 func (e *Engine) ListSelectableWorkers(ctx context.Context, limit int) []WorkerPickItem {
 	if limit <= 0 {
-		limit = 6
+		limit = 30
 	}
 	if e.store == nil {
 		return nil
 	}
+
+	// Build workerName -> open WorkItem index so real tracked matters surface first with Chinese titles.
+	openWorkByWorker := map[string]*model.WorkItem{}
+	openWorkByID := map[string]*model.WorkItem{}
+	if wis, err := e.store.ListWorkItems(ctx, false); err == nil {
+		sort.Slice(wis, func(i, j int) bool { return wis[i].UpdatedAt.After(wis[j].UpdatedAt) })
+		for _, wi := range wis {
+			if wi == nil || wi.ClosedAt != nil {
+				continue
+			}
+			openWorkByID[wi.ID] = wi
+			for _, wn := range wi.Workers {
+				wn = strings.TrimSpace(wn)
+				if wn != "" && openWorkByWorker[wn] == nil {
+					openWorkByWorker[wn] = wi
+				}
+			}
+		}
+	}
+
+	type scoredItem struct {
+		item      WorkerPickItem
+		tier      int // 0: open WorkItem live, 1: open WorkItem ended, 2: other named live, 3: auto-named live, 4: ended
+		sortAt    time.Time
+		workItemT time.Time
+	}
+
 	seen := map[string]bool{
 		model.RouterName: true,
 		model.DreamName:  true,
 	}
-	var liveItems []WorkerPickItem
+	var all []scoredItem
+
 	if workers, err := e.store.ListWorkers(ctx); err == nil {
-		sort.Slice(workers, func(i, j int) bool { return workers[i].CreatedAt.After(workers[j].CreatedAt) })
 		for _, w := range workers {
-			if w.Ended || w.PaneID == "" || seen[w.Name] {
+			if w == nil || w.Ended || w.PaneID == "" || seen[w.Name] {
 				continue
 			}
 			seen[w.Name] = true
-			liveItems = append(liveItems, WorkerPickItem{
-				Name:       w.Name,
-				Machine:    e.MachineDisplayName(workerMachineID(w)),
-				Kind:       w.Kind,
-				Status:     w.Status,
-				Session:    w.Session,
-				WorkItemID: w.WorkItemID,
-				Ended:      false,
+			wi := openWorkByWorker[w.Name]
+			if wi == nil && w.WorkItemID != "" {
+				wi = openWorkByID[w.WorkItemID]
+			}
+			title := deriveWorkerDisplayTitle(w.Name, w.Title, w.Task, wi)
+			wid := w.WorkItemID
+			if wi != nil {
+				wid = wi.ID
+			}
+			tier := 2
+			var wiTime time.Time
+			if wi != nil {
+				tier = 0
+				wiTime = wi.UpdatedAt
+			} else if isGenericAutoWorkerName(w.Name) {
+				tier = 3
+			}
+			all = append(all, scoredItem{
+				item: WorkerPickItem{
+					Name:        w.Name,
+					Title:       title,
+					Machine:     e.MachineDisplayName(workerMachineID(w)),
+					Kind:        w.Kind,
+					Status:      w.Status,
+					Session:     w.Session,
+					WorkItemID:  wid,
+					HasWorkItem: wi != nil,
+					Ended:       false,
+				},
+				tier:      tier,
+				sortAt:    w.CreatedAt,
+				workItemT: wiTime,
 			})
 		}
 	}
-	out := append([]WorkerPickItem(nil), liveItems...)
-	if len(out) >= limit {
-		return out[:limit]
-	}
-	if ended, err := e.store.ListEndedSessions(ctx, 30); err == nil {
+
+	if ended, err := e.store.ListEndedSessions(ctx, 40); err == nil {
 		for _, es := range ended {
 			name := strings.TrimSpace(es.Name)
 			if name == "" || es.Session == "" || seen[name] {
 				continue
 			}
 			seen[name] = true
-			out = append(out, WorkerPickItem{
-				Name:       name,
-				Machine:    e.MachineDisplayName(es.Machine),
-				Kind:       es.Kind,
-				Status:     "ended",
-				Session:    es.Session,
-				WorkItemID: es.WorkItemID,
-				Ended:      true,
+			wi := openWorkByWorker[name]
+			if wi == nil && es.WorkItemID != "" {
+				wi = openWorkByID[es.WorkItemID]
+			}
+			title := deriveWorkerDisplayTitle(name, es.Title, "", wi)
+			wid := es.WorkItemID
+			if wi != nil {
+				wid = wi.ID
+			}
+			tier := 4
+			var wiTime time.Time
+			if wi != nil {
+				tier = 1
+				wiTime = wi.UpdatedAt
+			}
+			all = append(all, scoredItem{
+				item: WorkerPickItem{
+					Name:        name,
+					Title:       title,
+					Machine:     e.MachineDisplayName(es.Machine),
+					Kind:        es.Kind,
+					Status:      "ended",
+					Session:     es.Session,
+					WorkItemID:  wid,
+					HasWorkItem: wi != nil,
+					Ended:       true,
+				},
+				tier:      tier,
+				sortAt:    es.EndedAt,
+				workItemT: wiTime,
 			})
-			if len(out) >= limit {
-				break
+		}
+	}
+
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].tier != all[j].tier {
+			return all[i].tier < all[j].tier
+		}
+		if !all[i].workItemT.IsZero() && !all[j].workItemT.IsZero() && !all[i].workItemT.Equal(all[j].workItemT) {
+			return all[i].workItemT.After(all[j].workItemT)
+		}
+		return all[i].sortAt.After(all[j].sortAt)
+	})
+
+	if len(all) > limit {
+		all = all[:limit]
+	}
+	out := make([]WorkerPickItem, 0, len(all))
+	for _, s := range all {
+		out = append(out, s.item)
+	}
+	return out
+}
+
+func isGenericAutoWorkerName(name string) bool {
+	low := strings.ToLower(strings.TrimSpace(name))
+	for _, p := range []string{"codebuddy-", "agy-", "claude-", "codex-"} {
+		if rest, ok := strings.CutPrefix(low, p); ok && len(rest) > 0 {
+			allDigits := true
+			for _, r := range rest {
+				if r < '0' || r > '9' {
+					allDigits = false
+					break
+				}
+			}
+			if allDigits {
+				return true
 			}
 		}
 	}
-	return out
+	return false
+}
+
+func deriveWorkerDisplayTitle(name, explicitTitle, task string, wi *model.WorkItem) string {
+	if wi != nil && strings.TrimSpace(wi.Title) != "" {
+		return strings.TrimSpace(wi.Title)
+	}
+	if t := strings.TrimSpace(explicitTitle); t != "" && !strings.EqualFold(t, name) {
+		return oneLineClip(t, 40)
+	}
+	if extracted := summarizeWorkerTaskTitle(task); extracted != "" {
+		return extracted
+	}
+	return name
+}
+
+func summarizeWorkerTaskTitle(task string) string {
+	s := strings.Join(strings.Fields(strings.TrimSpace(task)), " ")
+	if s == "" {
+		return ""
+	}
+	// Clean "项目会话 · /Users/foo/github/corgi" -> "项目会话 · corgi".
+	if rest, ok := strings.CutPrefix(s, "项目会话 · "); ok {
+		rest = strings.TrimRight(strings.TrimSpace(rest), "/")
+		if idx := strings.LastIndex(rest, "/"); idx >= 0 && idx+1 < len(rest) {
+			return "项目会话 · " + rest[idx+1:]
+		}
+		return "项目会话 · " + rest
+	}
+	// Extract exact quoted user request when prompt starts with "完成用户请求“...”".
+	if rest, ok := strings.CutPrefix(s, "完成用户请求"); ok {
+		rest = strings.TrimSpace(rest)
+		for _, pair := range [][2]string{{"“", "”"}, {"『", "』"}, {"「", "」"}} {
+			if after, ok := strings.CutPrefix(rest, pair[0]); ok {
+				if end := strings.Index(after, pair[1]); end > 0 {
+					if q := strings.TrimSpace(after[:end]); q != "" {
+						return oneLineClip(q, 26)
+					}
+				}
+			}
+		}
+	}
+	if idx := strings.Index(s, "目标："); idx >= 0 && idx < 90 {
+		s = strings.TrimSpace(s[idx+len("目标："):])
+	}
+	// Strip common instruction boilerplate prefixes before keeping the first sentence.
+	for _, p := range []string{
+		"任务：只读分析",
+		"任务：",
+		"排查并修复截图所示",
+		"请帮我",
+		"请把",
+		"请",
+		"为用户所说的",
+	} {
+		if trimmed, ok := strings.CutPrefix(s, p); ok {
+			s = strings.TrimSpace(trimmed)
+		}
+	}
+	for _, sep := range []string{"。", "；", "\n", "（", "("} {
+		if idx := strings.Index(s, sep); idx > 0 {
+			s = strings.TrimSpace(s[:idx])
+		}
+	}
+	// Shorten inline absolute paths like /Users/foo/bar/file.html -> file.html.
+	words := strings.Fields(s)
+	for i, w := range words {
+		if strings.HasPrefix(w, "/") && strings.Count(w, "/") >= 2 {
+			clean := strings.TrimRight(w, ".,;:，。；：")
+			if idx := strings.LastIndex(clean, "/"); idx >= 0 && idx+1 < len(clean) {
+				words[i] = clean[idx+1:]
+			}
+		}
+	}
+	s = strings.NewReplacer("『", "", "』", "", "「", "", "」", "").Replace(strings.Join(words, " "))
+	return oneLineClip(strings.TrimSpace(s), 26)
 }
 
 // RouterTranscriptInfo locates the Hub Router's live JSONL transcript path and adapter.

@@ -87,25 +87,58 @@ func TestStreamSessionSingleFinishPreservesLastThink(t *testing.T) {
 }
 
 func TestWorkerPickerCardAndNavEventParsing(t *testing.T) {
-	card := BuildWorkerPickerCard("nav:pick:1", "alpha", []WorkerPickOption{
-		{Name: "alpha", Machine: "MacBook", Kind: "agy", Status: "idle"},
-		{Name: "beta", Machine: "Hub", Kind: "codebuddy", Ended: true},
-	})
-	btns, _ := card["button_list"].([]map[string]any)
-	if len(btns) != 3 {
-		t.Fatalf("expected 3 buttons (回主对话 + 2 workers), got %d", len(btns))
+	opts := []WorkerPickOption{
+		{Name: "agent-flow-plan", Title: "物言 Agent 内部数据流可视化方案", Machine: "MacBook", Kind: "agy", Status: "idle", HasWorkItem: true},
+		{Name: "media-eval-plan", Title: "物言 Agent 生图/生视频效果评测方案", Machine: "MacBook", Kind: "agy", Status: "idle", HasWorkItem: true},
+		{Name: "session-launch-fix", Title: "修复新建会话/任务启动失败", Machine: "MacBook", Kind: "agy", Status: "idle", HasWorkItem: true},
+		{Name: "taihu-plan", Title: "Corgi 移动端接入太湖方案分析", Machine: "Hub", Kind: "codebuddy", Status: "idle", HasWorkItem: true},
+		{Name: "chat-inline-preview-plan", Title: "聊天链接右侧内嵌预览设计", Machine: "MacBook", Kind: "agy", Status: "idle"},
+		{Name: "repo-state-check", Title: "只读仓库核验", Machine: "MacBook", Kind: "agy", Status: "idle"},
+		{Name: "codebuddy-2517", Title: "拉取浅色收纳箱原型", Machine: "Hub", Kind: "codebuddy", Ended: true},
 	}
-	if btns[0]["key"] != "nav:main" || btns[1]["key"] != "nav:focus:alpha" || btns[2]["key"] != "nav:focus:beta" {
-		t.Fatalf("unexpected picker button keys: %+v", btns)
+
+	// Page 0 without focus: 5 items + "下一页 →" (6 buttons total), crisp numeric rows + "选 1..5".
+	p0 := BuildWorkerPickerCard("nav:pick:1", "", "", opts, 0)
+	btns0, _ := p0["button_list"].([]map[string]any)
+	horiz0, _ := p0["horizontal_content_list"].([]map[string]any)
+	if len(btns0) != 6 || len(horiz0) != 5 {
+		t.Fatalf("expected 6 buttons & 5 rows on page 0, got btns=%d horiz=%d", len(btns0), len(horiz0))
+	}
+	if horiz0[0]["keyname"] != "1." || horiz0[0]["value"] != "物言 Agent 内部数据流可视化方案" {
+		t.Fatalf("unexpected row 0: %+v", horiz0[0])
+	}
+	if btns0[0]["text"] != "选 1" || btns0[0]["key"] != "nav:focus:agent-flow-plan" {
+		t.Fatalf("unexpected button 0: %+v", btns0[0])
+	}
+	if btns0[5]["text"] != "下一页 →" || btns0[5]["key"] != "nav:page:1" {
+		t.Fatalf("expected next-page button at index 5, got: %+v", btns0[5])
+	}
+
+	// Page 1 without focus: remaining 2 items (6., 7.) + "← 上一页".
+	p1 := BuildWorkerPickerCard("nav:pick:1", "", "", opts, 1)
+	btns1, _ := p1["button_list"].([]map[string]any)
+	horiz1, _ := p1["horizontal_content_list"].([]map[string]any)
+	if len(horiz1) != 2 || horiz1[0]["keyname"] != "6." || horiz1[1]["keyname"] != "7." {
+		t.Fatalf("unexpected page 1 rows: %+v", horiz1)
+	}
+	if len(btns1) != 3 || btns1[0]["text"] != "选 6" || btns1[2]["key"] != "nav:page:0" {
+		t.Fatalf("unexpected page 1 buttons: %+v", btns1)
+	}
+
+	// Focused mode includes "回主对话" first.
+	pf := BuildWorkerPickerCard("nav:pick:1", "agent-flow-plan", "物言 Agent 内部数据流可视化方案", opts[:2], 0)
+	btnsF, _ := pf["button_list"].([]map[string]any)
+	if len(btnsF) != 3 || btnsF[0]["key"] != "nav:main" || btnsF[1]["key"] != "nav:focus:agent-flow-plan" {
+		t.Fatalf("unexpected focused picker buttons: %+v", btnsF)
 	}
 
 	ev, ok := ParseCardEventCallback("req-nav-1", []byte(`{
 		"chattype":"single",
 		"from":{"userid":"T123"},
-		"event":{"eventtype":"template_card_event","task_id":"nav:pick:1","event_key":"nav:focus:beta"}
+		"event":{"eventtype":"template_card_event","task_id":"nav:pick:1","event_key":"nav:page:1"}
 	}`))
-	if !ok || ev.ActionID != "nav" || ev.ChoiceKey != "focus:beta" {
-		t.Fatalf("unexpected nav card parse: ok=%v ev=%+v", ok, ev)
+	if !ok || ev.ActionID != "nav" || ev.ChoiceKey != "page:1" {
+		t.Fatalf("unexpected nav page parse: ok=%v ev=%+v", ok, ev)
 	}
 }
 
