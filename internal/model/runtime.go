@@ -160,7 +160,7 @@ func (u ContextUsage) Pct() int {
 
 // Message is a structured turn parsed from an agent's JSONL transcript.
 type Message struct {
-	Kind    string   `json:"kind"` // user | assistant | tool | ask
+	Kind    string   `json:"kind"` // user | assistant | thinking | tool | ask
 	Text    string   `json:"text,omitempty"`
 	Name    string   `json:"name,omitempty"`
 	Options []string `json:"options,omitempty"`

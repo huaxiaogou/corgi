@@ -29,14 +29,16 @@ type Bus struct {
 	flushDelay time.Duration
 	uploadDir        string
 	home             string
-	sendFn           func(ctx context.Context, chatID, markdown string) error
-	sendMarkdownACK  func(ctx context.Context, chatID, markdown string) error
-	sendFileFn       func(ctx context.Context, chatID, filename string, data []byte) error
+	sendFn          func(ctx context.Context, chatID, markdown string) error
+	sendMarkdownACK func(ctx context.Context, chatID, markdown string) error
+	sendFileFn      func(ctx context.Context, chatID, filename string, data []byte) error
+	sendStreamFn    wecom.StreamSendFunc
 
 	mu            sync.Mutex
 	flushMu       sync.Mutex
 	subs          map[chan struct{}]struct{}
 	outbox        map[string][]outboxItem
+	routerStreams map[string]*activeWeComStream
 	webSeenAt     time.Time
 	wecomActiveAt time.Time
 }
@@ -47,17 +49,19 @@ func NewBus(eng *core.Engine, wc *wecom.Client, logger *slog.Logger) *Bus {
 		logger = slog.Default()
 	}
 	b := &Bus{
-		engine:     eng,
-		wecom:      wc,
-		logger:     logger,
-		flushDelay: 20 * time.Second,
-		subs:       map[chan struct{}]struct{}{},
-		outbox:     map[string][]outboxItem{},
+		engine:        eng,
+		wecom:         wc,
+		logger:        logger,
+		flushDelay:    20 * time.Second,
+		subs:          map[chan struct{}]struct{}{},
+		outbox:        map[string][]outboxItem{},
+		routerStreams: map[string]*activeWeComStream{},
 	}
 	if wc != nil {
 		b.sendFn = wc.SendMarkdown
 		b.sendMarkdownACK = wc.SendMarkdownACK
 		b.sendFileFn = wc.SendFile
+		b.sendStreamFn = wc.SendStreamReply
 	}
 	eng.SetSink(b)
 	return b
@@ -248,6 +252,12 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 
 	// Decision cards (--opt / --check) bypass Outbox batching and push immediately when not suppressed.
 	if action != nil && (len(action.Choices) > 0 || action.Kind == model.ActionKindRouterCheck) {
+		if st := b.takeRouterStream(entry.Thread); st != nil {
+			if st.chatID != "" && chatID == "" {
+				chatID = st.chatID
+			}
+			_, _ = st.seal(ctx, "", "请在下方卡片选择 👇")
+		}
 		if b.wecom != nil && b.wecom.Online() {
 			if err := b.wecom.SendActionCard(ctx, chatID, action); err != nil {
 				b.logger.Warn("push action card to wecom failed", "action", action.ID, "err", err)
@@ -274,18 +284,41 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 		return core.ReplyDelivery{}
 	}
 
-	// Ordinary reply with explicit files: bypass 20s Outbox, immediately send 1 Markdown message
-	// containing the reply body + all preview links (via ACK-capable RPC), then send original source files.
+	// Ordinary reply with explicit files: seal active passive stream (body + links) when open,
+	// else immediately send 1 Markdown message via ACK-capable RPC, then send original source files.
 	if hasExplicitFiles {
 		var del core.ReplyDelivery
 		body := formatWeComReply(entry)
+		combined := body
 		if linksBlock != "" {
-			if body != "" {
-				body = body + "\n\n" + linksBlock
+			if combined != "" {
+				combined = combined + "\n\n" + linksBlock
 			} else {
-				body = linksBlock
+				combined = linksBlock
 			}
-			del.LinkStatus, del.LinkError = b.sendACKMarkdown(ctx, chatID, body)
+		}
+		streamSealed := false
+		if st := b.takeRouterStream(entry.Thread); st != nil {
+			if st.chatID != "" && chatID == "" {
+				chatID = st.chatID
+			}
+			if ok, err := st.seal(ctx, "", combined); err != nil {
+				b.logger.Warn("seal wecom router stream with files failed", "thread", entry.Thread, "err", err)
+			} else if ok {
+				streamSealed = true
+			}
+		}
+		if streamSealed {
+			if len(attachments) > 0 {
+				if linksBlock != "" {
+					del.LinkStatus = "delivered"
+				} else {
+					del.LinkStatus = "skipped"
+					del.LinkError = "preview link skipped: configure public_url or --url"
+				}
+			}
+		} else if linksBlock != "" {
+			del.LinkStatus, del.LinkError = b.sendACKMarkdown(ctx, chatID, combined)
 		} else {
 			if len(attachments) > 0 {
 				del.LinkStatus = "skipped"
@@ -299,8 +332,19 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 		return del
 	}
 
-	if b.canSendMarkdown() {
-		body := formatWeComReply(entry)
+	body := formatWeComReply(entry)
+	streamSealed := false
+	if st := b.takeRouterStream(entry.Thread); st != nil {
+		if st.chatID != "" && chatID == "" {
+			chatID = st.chatID
+		}
+		if ok, err := st.seal(ctx, "", body); err != nil {
+			b.logger.Warn("seal wecom router stream failed", "thread", entry.Thread, "err", err)
+		} else if ok {
+			streamSealed = true
+		}
+	}
+	if !streamSealed && b.canSendMarkdown() {
 		b.mu.Lock()
 		if wecomRecent {
 			// Active WeCom conversation: deliver immediately instead of holding 20s in Outbox.
@@ -323,14 +367,18 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 
 func formatWeComReply(entry *model.Entry) string {
 	txt := strings.TrimSpace(entry.Text)
-	if !strings.HasPrefix(entry.Thread, "wecom:") || strings.HasPrefix(txt, "[#") {
+	if strings.HasPrefix(txt, "[#") {
 		return txt
 	}
 	tag := ""
-	if entry.Re != nil && entry.Re.Worker != "" {
-		tag = entry.Re.Worker
-	} else if entry.Ref != "" && !strings.Contains(entry.Ref, ":") {
-		tag = entry.Ref
+	if entry.WorkerRef != nil && strings.TrimSpace(entry.WorkerRef.Name) != "" {
+		tag = strings.TrimSpace(entry.WorkerRef.Name)
+	} else if strings.HasPrefix(entry.Thread, "wecom:") {
+		if entry.Re != nil && entry.Re.Worker != "" {
+			tag = entry.Re.Worker
+		} else if entry.Ref != "" && !strings.Contains(entry.Ref, ":") {
+			tag = entry.Ref
+		}
 	}
 	if tag != "" {
 		return "[#" + tag + "] " + txt
@@ -582,6 +630,16 @@ func (b *Bus) HandleWeComMessage(ctx context.Context, msg wecom.IncomingMessage)
 	if msg.ChatType == "group" && msg.ChatID != "" {
 		thread = "wecom:" + msg.ChatID
 	}
+
+	if b.handleWeComControlOrDirect(ctx, msg, thread, text) {
+		return
+	}
+
+	replyChatID := msg.ChatID
+	if replyChatID == "" {
+		replyChatID = msg.FromUser
+	}
+	st := b.startRouterStream(ctx, thread, replyChatID, msg.ReqID)
 	_, _, err := b.engine.Say(ctx, core.SayRequest{
 		Thread:    thread,
 		Channel:   "wecom",
@@ -592,15 +650,24 @@ func (b *Bus) HandleWeComMessage(ctx context.Context, msg wecom.IncomingMessage)
 	})
 	if err != nil {
 		b.logger.Warn("ingest wecom message failed", "msgid", msg.MsgID, "err", err)
+		if st != nil {
+			b.clearRouterStreamIfMatch(st)
+			_, _ = st.seal(ctx, "", "接收消息失败："+err.Error())
+		}
 	}
 }
 
 // HandleWeComCardClick resolves the target Action atomically and updates the WeCom card in-place.
+// Navigation cards (Worker picker / return to main) are intercepted before Action resolution.
 // If the Action was already resolved or expired elsewhere, it still refreshes the stale WeCom card.
 func (b *Bus) HandleWeComCardClick(ctx context.Context, ev wecom.CardClickEvent) {
 	b.mu.Lock()
 	b.wecomActiveAt = time.Now()
 	b.mu.Unlock()
+
+	if b.handleNavCardClick(ctx, ev) {
+		return
+	}
 
 	act, err := b.engine.ResolveAction(ctx, ev.ActionID, "wecom", ev.ChoiceKey)
 	if err != nil {

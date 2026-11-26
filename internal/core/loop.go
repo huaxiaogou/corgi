@@ -366,7 +366,7 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, scan
 			}
 		case prev == "working" && (li.status == "done" || li.status == "idle"):
 			_ = e.store.ExpireWorkerActions(ctx, w.Name)
-			if now.Sub(w.ReportAt) > 90*time.Second {
+			if e.hasDirectTurn(w.Name) || now.Sub(w.ReportAt) > 90*time.Second {
 				e.handleWorkerTurnDone(ctx, w)
 			}
 		}
@@ -458,18 +458,56 @@ func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
 	if w.LastReport != "" {
 		checkAgainst += "\n" + w.LastReport
 	}
-	if qErr := agent.ExtractQuotaError(screen, checkAgainst); qErr != "" {
+	qErr := agent.ExtractQuotaError(screen, checkAgainst)
+	dt := e.popDirectTurn(w.Name)
+	if qErr != "" {
+		if dt != nil && dt.callback != nil {
+			res := DirectTurnResult{
+				WorkerName:   w.Name,
+				Machine:      workerMachineID(w),
+				MachineLabel: e.MachineDisplayName(workerMachineID(w)),
+				Kind:         w.Kind,
+				FullText:     fullText,
+				QuotaError:   qErr,
+			}
+			go dt.callback(context.WithoutCancel(ctx), res)
+		}
 		_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name,
 			fmt.Sprintf("worker %s stopped on an agent/provider error (not finished): %s\nLast message before it:\n%s\nHand the job to another kind of agent or computer and inform the human in one line.", w.Name, qErr, summary),
 			"", model.RouterName, w.Name)
 		e.addEvent(ctx, w.Thread, w.Name+" 出错了："+qErr, w.Name, "error")
 		return
 	}
+	artID := ""
 	artNote := ""
 	if fromTranscript {
-		if artID := e.captureWorkerReportSnapshot(ctx, w, fullText, 800); artID != "" {
-			artNote = fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --worker %s on `corgi reply` to attach it on the delivery card]", artID, w.Name)
+		if id := e.captureWorkerReportSnapshot(ctx, w, fullText, 800); id != "" {
+			artID = id
+			artNote = fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --worker %s on `corgi reply` to attach it on the delivery card]", id, w.Name)
 		}
+	}
+	if dt != nil {
+		if dt.callback != nil {
+			res := DirectTurnResult{
+				WorkerName:       w.Name,
+				Machine:          workerMachineID(w),
+				MachineLabel:     e.MachineDisplayName(workerMachineID(w)),
+				Kind:             w.Kind,
+				FullText:         fullText,
+				ReportArtifactID: artID,
+				PreviewURL:       e.BuildArtifactShareURL(ctx, artID),
+			}
+			go dt.callback(context.WithoutCancel(ctx), res)
+		}
+		note := fmt.Sprintf("worker %s (%s) completed a direct WeCom Q&A. User asked: %s | Reply summary: %s",
+			w.Name, e.MachineDisplayName(workerMachineID(w)), oneLineClip(dt.prompt, 160), oneLineClip(summary, 320))
+		if artID != "" {
+			note += fmt.Sprintf(" [report_artifact=%s]", artID)
+		}
+		e.appendDirectBgNote(note)
+		e.addEvent(ctx, w.Thread, w.Name+" 完成了一轮直聊", w.Name, "done")
+		e.notifyChanged()
+		return
 	}
 	_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name,
 		fmt.Sprintf("worker %s finished a turn. Last message:\n%s%s", w.Name, summary, artNote), "", model.RouterName, w.Name)
@@ -633,6 +671,12 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 		if injectWork {
 			if openWork, wErr := e.store.ListWorkItems(ctx, false); wErr == nil && len(openWork) > 0 {
 				b.WriteString(formatOpenWorkItemsSummary(openWork, e.binPath))
+			}
+		}
+		if bgNotes := e.drainDirectBgNotes(); len(bgNotes) > 0 {
+			b.WriteString("\n[background: completed direct worker chats (already delivered straight to user; remember for context, do NOT re-push)]\n")
+			for _, n := range bgNotes {
+				b.WriteString("- " + n + "\n")
 			}
 		}
 		fmt.Fprintf(&b, "\nReply with `%s reply` (usually ≤%d Chinese chars / English words; for 2+ items use `- ` Markdown bullets via stdin heredoc `<<'EOF'`, never pack into one semicolon-separated line).", e.binPath, chars)

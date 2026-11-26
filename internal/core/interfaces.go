@@ -49,6 +49,7 @@ type ChannelSink interface {
 	OnReply(ctx context.Context, entry *model.Entry, action *model.Action, attachments []AttachmentFile) ReplyDelivery
 	OnActionCreated(ctx context.Context, action *model.Action)
 	OnActionResolved(ctx context.Context, action *model.Action)
+	OnRouterTurnEnd(ctx context.Context)
 	WeComOnline() bool
 }
 
@@ -62,4 +63,5 @@ func (NopSink) OnReply(context.Context, *model.Entry, *model.Action, []Attachmen
 }
 func (NopSink) OnActionCreated(context.Context, *model.Action)  {}
 func (NopSink) OnActionResolved(context.Context, *model.Action) {}
+func (NopSink) OnRouterTurnEnd(context.Context)                 {}
 func (NopSink) WeComOnline() bool                               { return false }

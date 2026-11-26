@@ -283,3 +283,158 @@ func (c *Client) UpdateCardResolvedWithTask(ctx context.Context, reqID, taskID s
 	}
 	return nil
 }
+
+// WorkerPickOption describes one selectable worker shown in WeCom's switch-conversation card.
+type WorkerPickOption struct {
+	Name    string
+	Machine string
+	Kind    string
+	Status  string
+	Ended   bool
+}
+
+// BuildWorkerPickerCard builds a compact WeCom button_interaction card for switching into
+// a Worker direct chat or returning to Corgi main chat.
+func BuildWorkerPickerCard(taskID, currentWorker string, opts []WorkerPickOption) map[string]any {
+	tid := sanitizeTaskID(firstNonEmpty(taskID, fmt.Sprintf("nav:pick:%d", time.Now().UnixNano())))
+	currentWorker = strings.TrimSpace(currentWorker)
+	desc := "当前：Corgi 主对话"
+	if currentWorker != "" {
+		desc = clipRunes("当前直连：#"+currentWorker, cardMainDescMaxRunes)
+	}
+
+	maxWorkers := cardMaxButtons
+	if currentWorker != "" {
+		maxWorkers = cardMaxButtons - 1
+	}
+	if len(opts) > maxWorkers {
+		opts = opts[:maxWorkers]
+	}
+
+	buttons := make([]map[string]any, 0, cardMaxButtons)
+	horiz := make([]map[string]any, 0, len(opts))
+
+	if currentWorker != "" {
+		buttons = append(buttons, map[string]any{
+			"text":  "回主对话",
+			"style": 1,
+			"key":   "nav:main",
+		})
+	}
+	for i, opt := range opts {
+		style := 2
+		if currentWorker == "" && i == 0 {
+			style = 1
+		}
+		buttons = append(buttons, map[string]any{
+			"text":  clipRunes(opt.Name, cardButtonTextMaxRunes),
+			"style": style,
+			"key":   "nav:focus:" + opt.Name,
+		})
+		state := "运行中"
+		if opt.Ended {
+			state = "可恢复"
+		} else if opt.Status == "working" {
+			state = "思考中"
+		} else if opt.Status == "blocked" {
+			state = "待确认"
+		}
+		metaParts := []string{}
+		if m := strings.TrimSpace(opt.Machine); m != "" {
+			metaParts = append(metaParts, m)
+		} else {
+			metaParts = append(metaParts, "Hub")
+		}
+		if k := strings.TrimSpace(opt.Kind); k != "" {
+			metaParts = append(metaParts, k)
+		}
+		metaParts = append(metaParts, state)
+		horiz = append(horiz, map[string]any{
+			"keyname": clipRunes("#"+opt.Name, 14),
+			"value":   clipRunes(strings.Join(metaParts, " · "), cardHorizValueMaxRunes),
+		})
+	}
+
+	card := map[string]any{
+		"card_type": "button_interaction",
+		"source":    map[string]any{"desc": "Corgi · 切换对话"},
+		"main_title": map[string]any{
+			"title": "选择要直聊的 Worker",
+			"desc":  desc,
+		},
+		"sub_title_text": "点选进入直聊（已结束的会话会自动恢复原上下文），随时发「回主对话」返回 Corgi。",
+		"task_id":        tid,
+		"button_list":    buttons,
+	}
+	if len(horiz) > 0 {
+		card["horizontal_content_list"] = horiz
+	}
+	return card
+}
+
+// BuildNavResultCard collapses an interacted navigation picker card in-place.
+func BuildNavResultCard(taskID, title, statusText, detail string) map[string]any {
+	tid := sanitizeTaskID(firstNonEmpty(taskID, "nav:done"))
+	card := map[string]any{
+		"card_type": "button_interaction",
+		"source": map[string]any{
+			"desc":       "Corgi · 切换对话",
+			"desc_color": 1,
+		},
+		"main_title": map[string]any{
+			"title": clipRunes(firstNonEmpty(title, "对话对象已切换"), cardMainTitleMaxRunes),
+			"desc":  clipRunes(statusText, cardMainDescMaxRunes),
+		},
+		"task_id":      tid,
+		"replace_text": clipRunes(statusText, cardReplaceTextMaxRunes),
+		"button_list": []map[string]any{
+			{
+				"text":  clipRunes(firstNonEmpty(statusText, "已切换"), cardButtonTextMaxRunes),
+				"style": 2,
+				"key":   tid + ":done",
+			},
+		},
+	}
+	if strings.TrimSpace(detail) != "" {
+		card["sub_title_text"] = clipRunes(detail, cardSubTitleMaxRunes)
+	}
+	return card
+}
+
+// SendWorkerPickerCard sends an interactive Worker selection card to chatID.
+func (c *Client) SendWorkerPickerCard(ctx context.Context, chatID, currentWorker string, opts []WorkerPickOption) error {
+	chatID = c.resolveTarget(chatID)
+	if chatID == "" {
+		return nil
+	}
+	taskID := fmt.Sprintf("nav:pick:%d", time.Now().UnixNano())
+	sctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := c.callRPC(sctx, "aibot_send_msg", map[string]any{
+		"chatid":        chatID,
+		"msgtype":       "template_card",
+		"template_card": BuildWorkerPickerCard(taskID, currentWorker, opts),
+	})
+	if err != nil {
+		return fmt.Errorf("send wecom worker picker card: %w", err)
+	}
+	return nil
+}
+
+// UpdateNavCard updates a navigation template card in-place after click.
+func (c *Client) UpdateNavCard(ctx context.Context, reqID, taskID, title, statusText, detail string) error {
+	reqID = strings.TrimSpace(reqID)
+	if reqID == "" {
+		return nil
+	}
+	uctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := c.callRPCWithReqID(uctx, reqID, "aibot_respond_update_msg", map[string]any{
+		"response_type": "update_template_card",
+		"template_card": BuildNavResultCard(taskID, title, statusText, detail),
+	})
+	if err != nil {
+		return fmt.Errorf("update wecom nav card %s: %w", taskID, err)
+	}
+	return nil
+}

@@ -417,7 +417,7 @@ export interface MsgPatch {
 }
 
 export interface ChatMessage {
-  kind: "user" | "assistant" | "tool" | "ask";
+  kind: "user" | "assistant" | "thinking" | "tool" | "ask";
   text?: string;
   name?: string;
   options?: string[];

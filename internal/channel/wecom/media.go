@@ -301,8 +301,10 @@ func (c *Client) SendFile(ctx context.Context, chatID, filename string, data []b
 
 // SendStreamReply sends a streaming reply chunk using aibot_respond_msg.
 func (c *Client) SendStreamReply(ctx context.Context, reqID, streamID, content string, finish bool) error {
+	reqID = strings.TrimSpace(reqID)
+	streamID = strings.TrimSpace(streamID)
 	if reqID == "" || streamID == "" {
-		return nil
+		return errors.New("wecom stream reply requires non-empty req_id and stream_id")
 	}
 	frame := map[string]any{
 		"cmd":     "aibot_respond_msg",

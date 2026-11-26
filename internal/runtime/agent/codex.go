@@ -314,6 +314,10 @@ func (c *CodexAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Mess
 			Name    string `json:"name"`
 			Args    string `json:"arguments"`
 			Output  string `json:"output"`
+			Summary []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"summary"`
 			Content []struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
@@ -337,6 +341,24 @@ func (c *CodexAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Mess
 				return nil, false
 			}
 			return []*model.Message{{Kind: p.Role, Text: strings.Join(parts, "\n")}}, true
+		case "reasoning":
+			var parts []string
+			for _, item := range p.Summary {
+				if t := strings.TrimSpace(item.Text); t != "" {
+					parts = append(parts, t)
+				}
+			}
+			if len(parts) == 0 {
+				for _, item := range p.Content {
+					if t := strings.TrimSpace(item.Text); t != "" {
+						parts = append(parts, t)
+					}
+				}
+			}
+			if len(parts) == 0 {
+				return nil, false
+			}
+			return []*model.Message{{Kind: "thinking", Text: strings.Join(parts, "\n")}}, true
 		case "function_call":
 			return []*model.Message{{Kind: "tool", Name: p.Name, Input: clipText(p.Args, 300)}}, true
 		case "function_call_output":
@@ -346,9 +368,23 @@ func (c *CodexAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Mess
 		var p struct {
 			Type    string `json:"type"`
 			Message string `json:"message"`
+			Text    string `json:"text"`
 		}
-		if json.Unmarshal(rec.Payload, &p) == nil && p.Type == "user_message" && strings.TrimSpace(p.Message) != "" {
-			return []*model.Message{{Kind: "user", Text: strings.TrimSpace(p.Message)}}, true
+		if json.Unmarshal(rec.Payload, &p) == nil {
+			switch p.Type {
+			case "user_message":
+				if strings.TrimSpace(p.Message) != "" {
+					return []*model.Message{{Kind: "user", Text: strings.TrimSpace(p.Message)}}, true
+				}
+			case "agent_reasoning":
+				t := strings.TrimSpace(p.Text)
+				if t == "" {
+					t = strings.TrimSpace(p.Message)
+				}
+				if t != "" {
+					return []*model.Message{{Kind: "thinking", Text: t}}, true
+				}
+			}
 		}
 	}
 	return nil, false

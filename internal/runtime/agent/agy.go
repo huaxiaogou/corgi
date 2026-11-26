@@ -351,6 +351,7 @@ func (a *AgyAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Messag
 		Type      string `json:"type"`
 		Text      string `json:"text"`
 		Content   string `json:"content"`
+		Thinking  string `json:"thinking"`
 		Tool      string `json:"tool"`
 		Name      string `json:"name"`
 		Args      string `json:"args"`
@@ -378,6 +379,9 @@ func (a *AgyAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Messag
 		return nil, false
 	case "PLANNER_RESPONSE":
 		var out []*model.Message
+		if th := strings.TrimSpace(rec.Thinking); th != "" {
+			out = append(out, &model.Message{Kind: "thinking", Text: th})
+		}
 		if t := strings.TrimSpace(rec.Content); t != "" {
 			out = append(out, &model.Message{Kind: "assistant", Text: t})
 		}

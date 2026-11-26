@@ -93,6 +93,18 @@ export function AgentChatThread({
             </div>
           );
         }
+        if (m.kind === "thinking") {
+          return (
+            <details key={idx} className="text-xs text-muted">
+              <summary className="cursor-pointer hover:text-secondary select-none">
+                思考过程
+              </summary>
+              <div className="mt-1.5 px-3 py-2 rounded-lg surface-rail border border-hairline text-[12px] text-secondary whitespace-pre-wrap leading-relaxed">
+                {m.text}
+              </div>
+            </details>
+          );
+        }
         if (m.kind === "tool") {
           return (
             <details key={idx} className="text-xs font-mono-code text-muted">

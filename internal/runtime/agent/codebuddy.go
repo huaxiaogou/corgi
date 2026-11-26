@@ -264,13 +264,14 @@ func codebuddyFileMatchesCwd(path, wantCwd string) bool {
 
 func (c *CodeBuddyAdapter) ParseTranscriptLine(line []byte, imgDir string) ([]*model.Message, bool) {
 	var rec struct {
-		Type      string          `json:"type"`
-		Role      string          `json:"role"`
-		Content   json.RawMessage `json:"content"`
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
-		Output    json.RawMessage `json:"output"`
-		Status    string          `json:"status"`
+		Type       string          `json:"type"`
+		Role       string          `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		RawContent json.RawMessage `json:"rawContent"`
+		Name       string          `json:"name"`
+		Arguments  json.RawMessage `json:"arguments"`
+		Output     json.RawMessage `json:"output"`
+		Status     string          `json:"status"`
 	}
 	if json.Unmarshal(line, &rec) != nil {
 		return nil, false
@@ -285,6 +286,15 @@ func (c *CodeBuddyAdapter) ParseTranscriptLine(line []byte, imgDir string) ([]*m
 			return nil, false
 		}
 		return []*model.Message{{Kind: rec.Role, Text: txt}}, true
+	case "reasoning":
+		txt := extractCodeBuddyReasoning(rec.Content)
+		if txt == "" {
+			txt = extractCodeBuddyReasoning(rec.RawContent)
+		}
+		if txt == "" {
+			return nil, false
+		}
+		return []*model.Message{{Kind: "thinking", Text: txt}}, true
 	case "function_call":
 		if rec.Name == "" {
 			return nil, false
@@ -338,6 +348,35 @@ func extractCodeBuddyContent(raw json.RawMessage, imgDir string) string {
 			if b.Data != "" {
 				parts = append(parts, ExtractImage(b.MediaType, b.Data, imgDir))
 			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func extractCodeBuddyReasoning(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		return strings.TrimSpace(plain)
+	}
+	var blocks []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Thinking string `json:"thinking"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, b := range blocks {
+		t := strings.TrimSpace(b.Text)
+		if t == "" {
+			t = strings.TrimSpace(b.Thinking)
+		}
+		if t != "" {
+			parts = append(parts, t)
 		}
 	}
 	return strings.Join(parts, "\n")

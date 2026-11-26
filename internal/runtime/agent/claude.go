@@ -225,13 +225,14 @@ func (c *ClaudeAdapter) ParseTranscriptLine(line []byte, imgDir string) ([]*mode
 	}
 
 	var blocks []struct {
-		Type    string          `json:"type"`
-		Text    string          `json:"text"`
-		Name    string          `json:"name"`
-		Input   json.RawMessage `json:"input"`
-		Content json.RawMessage `json:"content"`
-		IsError bool            `json:"is_error"`
-		Source  struct {
+		Type     string          `json:"type"`
+		Text     string          `json:"text"`
+		Thinking string          `json:"thinking"`
+		Name     string          `json:"name"`
+		Input    json.RawMessage `json:"input"`
+		Content  json.RawMessage `json:"content"`
+		IsError  bool            `json:"is_error"`
+		Source   struct {
 			Type      string `json:"type"`
 			MediaType string `json:"media_type"`
 			Data      string `json:"data"`
@@ -241,9 +242,18 @@ func (c *ClaudeAdapter) ParseTranscriptLine(line []byte, imgDir string) ([]*mode
 		return nil, false
 	}
 	var out []*model.Message
+	var thinkParts []string
 	var textParts []string
 	for _, b := range blocks {
 		switch b.Type {
+		case "thinking":
+			t := strings.TrimSpace(b.Thinking)
+			if t == "" {
+				t = strings.TrimSpace(b.Text)
+			}
+			if t != "" {
+				thinkParts = append(thinkParts, t)
+			}
 		case "text":
 			if t := strings.TrimSpace(b.Text); t != "" {
 				textParts = append(textParts, t)
@@ -279,8 +289,15 @@ func (c *ClaudeAdapter) ParseTranscriptLine(line []byte, imgDir string) ([]*mode
 			}
 		}
 	}
+	var head []*model.Message
+	if len(thinkParts) > 0 {
+		head = append(head, &model.Message{Kind: "thinking", Text: strings.Join(thinkParts, "\n")})
+	}
 	if len(textParts) > 0 {
-		out = append([]*model.Message{{Kind: rec.Type, Text: strings.Join(textParts, "\n")}}, out...)
+		head = append(head, &model.Message{Kind: rec.Type, Text: strings.Join(textParts, "\n")})
+	}
+	if len(head) > 0 {
+		out = append(head, out...)
 	}
 	return out, len(out) > 0
 }
