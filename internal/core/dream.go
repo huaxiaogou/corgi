@@ -27,6 +27,7 @@ type activeDreamMarker struct {
 	ID          string    `json:"id"`
 	At          time.Time `json:"at"`
 	Reason      string    `json:"reason"`
+	Mode        string    `json:"mode,omitempty"` // "api" | "pty" (empty = legacy pty)
 	ArchivedRef string    `json:"archived_ref,omitempty"`
 	WorkspaceID string    `json:"workspace_id,omitempty"`
 	PaneID      string    `json:"pane_id,omitempty"`
@@ -43,9 +44,13 @@ type dreamRun struct {
 	id          string
 	at          time.Time
 	observedAt  time.Time
+	mode        string
 	started     bool
 	worked      bool
 	recovered   bool
+	apiDone     bool
+	apiOK       bool
+	apiErr      string
 	idleAt      time.Time
 	reason      string
 	blockedAt   time.Time
@@ -83,6 +88,7 @@ func (e *Engine) loadActiveDreamMarker(ctx context.Context) {
 		id:          m.ID,
 		at:          m.At,
 		observedAt:  time.Now(),
+		mode:        m.Mode,
 		started:     m.PromptSent,
 		recovered:   true,
 		reason:      m.Reason,
@@ -92,7 +98,7 @@ func (e *Engine) loadActiveDreamMarker(ctx context.Context) {
 	}
 	e.mu.Unlock()
 	if e.logger != nil {
-		e.logger.Info("loaded active dream marker for restart recovery", "id", m.ID, "at", m.At.Format(time.RFC3339), "prompt_sent", m.PromptSent)
+		e.logger.Info("loaded active dream marker for restart recovery", "id", m.ID, "mode", m.Mode, "at", m.At.Format(time.RFC3339), "prompt_sent", m.PromptSent)
 	}
 }
 
@@ -105,6 +111,7 @@ func (e *Engine) saveActiveDreamMarker(ctx context.Context, d *dreamRun) error {
 		ID:          d.id,
 		At:          d.at,
 		Reason:      d.reason,
+		Mode:        d.mode,
 		ArchivedRef: d.archivedRef,
 		WorkspaceID: d.workspaceID,
 		PaneID:      d.paneID,
@@ -217,11 +224,15 @@ func (e *Engine) hasActivitySince(ctx context.Context, since time.Time) (bool, e
 
 // checkDream drives an active dream session or initiates the scheduled nightly dream.
 func (e *Engine) checkDream(ctx context.Context, live map[string]liveInfo, hasQueued bool) {
+	e.checkDreamWithLocal(ctx, live, hasQueued, true)
+}
+
+func (e *Engine) checkDreamWithLocal(ctx context.Context, live map[string]liveInfo, hasQueued bool, localScanned bool) {
 	e.mu.Lock()
 	d := e.dream
 	e.mu.Unlock()
 	if d != nil {
-		e.driveDream(ctx, d, live)
+		e.driveDream(ctx, d, live, localScanned)
 		return
 	}
 	now := time.Now()
@@ -231,10 +242,11 @@ func (e *Engine) checkDream(ctx context.Context, live map[string]liveInfo, hasQu
 	}
 	li, alive := live[model.RouterName]
 	e.mu.Lock()
-	busy := e.handover != nil || e.hubUpdating || e.routerDispatching || e.routerLaunching || e.settings.Paused || hasQueued || !e.routerAskedAt.IsZero() ||
-		(alive && li.status != "idle" && li.status != "done")
+	apiMode := e.settings.EffectiveRouterMode() == "api"
+	busy := e.handover != nil || e.hubUpdating || e.routerDispatching || e.routerLaunching || e.apiTurn != nil || e.settings.Paused || hasQueued || !e.routerAskedAt.IsZero() ||
+		(!apiMode && alive && li.status != "idle" && li.status != "done")
 	e.mu.Unlock()
-	if busy {
+	if busy || (!apiMode && !localScanned) {
 		return
 	}
 	active, err := e.hasActivitySince(ctx, e.LastDream(ctx))
@@ -250,20 +262,29 @@ func (e *Engine) checkDream(ctx context.Context, live map[string]liveInfo, hasQu
 	_ = e.StartDream(ctx, "nightly")
 }
 
-// StartDream archives the current Router session and spawns an isolated Dream session
-// to review recent history, consolidate memory/, and propose mature skills.
+// StartDream starts an isolated Dream session (in-process API Dream in api mode, or local PTY
+// Dream in pty mode) to review recent history, consolidate memory/, and propose mature skills.
 func (e *Engine) StartDream(ctx context.Context, reason string) error {
+	e.apiSwitchMu.Lock()
+	defer e.apiSwitchMu.Unlock()
+
 	now := time.Now()
 	e.mu.Lock()
-	if e.dream != nil || e.handover != nil || e.hubUpdating {
+	if e.dream != nil || e.handover != nil || e.hubUpdating || e.apiTurn != nil {
 		e.mu.Unlock()
-		return fmt.Errorf("Corgi 正在整理记忆、交接会话或升级中")
+		return fmt.Errorf("Corgi 正在整理记忆、处理对话、交接会话或升级中")
 	}
 	st := e.settings
+	mode := st.EffectiveRouterMode()
+	if mode != "api" && e.fleet == nil {
+		e.mu.Unlock()
+		return fmt.Errorf("本机终端服务未连接，无法启动 PTY 做梦")
+	}
 	d := &dreamRun{
 		id:         now.Format("20060102-150405.000000000"),
 		at:         now,
 		observedAt: now,
+		mode:       mode,
 		reason:     reason,
 	}
 	e.dream = d
@@ -283,7 +304,11 @@ func (e *Engine) StartDream(ctx context.Context, reason string) error {
 	e.addEvent(ctx, model.MainThread, "Corgi 睡一会儿，复盘近期对话与日志、整理记忆（做梦）", "", "info")
 	e.notifyChanged()
 
-	go e.launchDreamAsync(d, st)
+	if mode == "api" {
+		go e.runAPIDream(d, st)
+	} else {
+		go e.launchDreamAsync(d, st)
+	}
 	return nil
 }
 
@@ -448,11 +473,14 @@ func (e *Engine) findDreamLive(d *dreamRun, live map[string]liveInfo) (liveInfo,
 	return liveInfo{}, false
 }
 
-func (e *Engine) driveDream(ctx context.Context, d *dreamRun, live map[string]liveInfo) {
+func (e *Engine) driveDream(ctx context.Context, d *dreamRun, live map[string]liveInfo, localScanned bool) {
 	e.mu.Lock()
+	mode := d.mode
 	started := d.started
 	recovered := d.recovered
 	observedAt := d.observedAt
+	apiDone := d.apiDone
+	apiOK := d.apiOK
 	e.mu.Unlock()
 	if observedAt.IsZero() {
 		observedAt = d.at
@@ -462,6 +490,28 @@ func (e *Engine) driveDream(ctx context.Context, d *dreamRun, live map[string]li
 	journalFresh := false
 	if fi, err := os.Stat(journal); err == nil && !fi.ModTime().Before(d.at) && fi.Size() > 0 {
 		journalFresh = true
+	}
+
+	if mode == "api" {
+		if recovered {
+			e.finishDream(ctx, d, journalFresh)
+			return
+		}
+		if apiDone {
+			e.finishDream(ctx, d, apiOK)
+			return
+		}
+		if time.Since(d.at) > 5*time.Minute {
+			e.finishDream(ctx, d, journalFresh)
+		}
+		return
+	}
+
+	if !localScanned || e.fleet == nil {
+		if recovered && e.fleet == nil {
+			e.finishDream(ctx, d, journalFresh)
+		}
+		return
 	}
 
 	li, alive := e.findDreamLive(d, live)
@@ -645,7 +695,9 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 		}
 	}
 
-	e.closeDreamWorkspaces(ctx, d)
+	if d.mode != "api" {
+		e.closeDreamWorkspaces(ctx, d)
+	}
 	summary, skills, fixes := "", "", ""
 	if ok {
 		journal := filepath.Join(e.memory.DreamsDir(), journalName(d.at)+".md")
@@ -660,9 +712,12 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 	}
 	e.routerLaunchAt = time.Time{}
 	archivedRef := d.archivedRef
+	apiErr := d.apiErr
 	e.mu.Unlock()
 
 	switch {
+	case !ok && apiErr != "":
+		e.addEvent(ctx, model.MainThread, "本次整理记忆未能完成（"+apiErr+"），Corgi 先醒过来了", archivedRef, "error")
 	case !ok:
 		e.addEvent(ctx, model.MainThread, "本次整理记忆未能完成，Corgi 先醒过来了", archivedRef, "error")
 	case summary != "":
@@ -759,6 +814,9 @@ func (e *Engine) writeDreamInput(ctx context.Context) error {
 	const budget = 240 << 10
 	var parts []string
 	for _, h := range routerSess {
+		if e.agents == nil {
+			break
+		}
 		ad, err := e.agents.Get(h.Kind)
 		if err != nil {
 			continue

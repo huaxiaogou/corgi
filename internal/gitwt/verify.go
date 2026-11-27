@@ -21,11 +21,13 @@ const (
 
 // VerifyRequest configures a stateless workspace check + optional read-only cross-model review.
 type VerifyRequest struct {
-	Dir      string `json:"dir"`
-	Cmd      string `json:"cmd,omitempty"`
-	Review   bool   `json:"review,omitempty"`
-	Reviewer string `json:"reviewer,omitempty"` // codex | claude (default: auto)
-	Brief    string `json:"brief,omitempty"`
+	Dir         string `json:"dir"`
+	Cmd         string `json:"cmd,omitempty"`
+	Review      bool   `json:"review,omitempty"`
+	Reviewer    string `json:"reviewer,omitempty"` // codex | claude (default: auto)
+	Brief       string `json:"brief,omitempty"`
+	BaseCommit  string `json:"base_commit,omitempty"`
+	SkipIfClean bool   `json:"skip_if_clean,omitempty"`
 }
 
 // VerifyCheck records one executed build/test/lint command.
@@ -44,6 +46,8 @@ type VerifyResult struct {
 	IsGit         bool          `json:"is_git"`
 	Branch        string        `json:"branch,omitempty"`
 	Dirty         bool          `json:"dirty"`
+	Clean         bool          `json:"clean,omitempty"`
+	BaseChecked   bool          `json:"base_checked,omitempty"`
 	StatusShort   string        `json:"status_short,omitempty"`
 	DiffStat      string        `json:"diff_stat,omitempty"`
 	ChecksPassed  bool          `json:"checks_passed"`
@@ -93,7 +97,33 @@ func Verify(ctx context.Context, home string, req VerifyRequest) (VerifyResult, 
 		res.DiffStat = collectDiffStat(ctx, workRoot)
 	}
 
-	cmds := planVerifyCommands(workRoot, dir, req.Cmd, changedFiles(ctx, workRoot, res.IsGit))
+	var changed []string
+	if baseCommit := strings.TrimSpace(req.BaseCommit); baseCommit != "" {
+		if res.IsGit {
+			if files, ok := changedFilesSinceBase(ctx, workRoot, baseCommit); ok {
+				res.BaseChecked = true
+				changed = files
+				if req.SkipIfClean && len(files) == 0 {
+					res.Clean = true
+					res.OK = true
+					res.Note = "相对基准提交无代码变更，跳过构建与测试"
+					return res, nil
+				}
+			}
+		}
+		if !res.BaseChecked {
+			if req.SkipIfClean {
+				res.OK = true
+				res.Note = "基准提交不可读，跳过自动验证"
+				return res, nil
+			}
+			changed = changedFiles(ctx, workRoot, res.IsGit)
+		}
+	} else {
+		changed = changedFiles(ctx, workRoot, res.IsGit)
+	}
+
+	cmds := planVerifyCommands(workRoot, dir, req.Cmd, changed)
 	if len(cmds) == 0 {
 		res.Note = "未自动检测到构建/测试脚本，可通过 --cmd 指定检查命令"
 	}
@@ -196,6 +226,35 @@ func runVerifyCheck(ctx context.Context, dir, name, command string) VerifyCheck 
 		DurationMS: time.Since(start).Milliseconds(),
 		Output:     clipTailRunes(out, maxCheckOutputRunes),
 	}
+}
+
+func changedFilesSinceBase(ctx context.Context, repoRoot, baseCommit string) ([]string, bool) {
+	if _, err := runGit(ctx, repoRoot, "rev-parse", "--verify", baseCommit+"^{commit}"); err != nil {
+		return nil, false
+	}
+	diffOut, err := runGit(ctx, repoRoot, "diff", "--name-only", baseCommit)
+	if err != nil {
+		return nil, false
+	}
+	untrackedOut, err := runGit(ctx, repoRoot, "ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		return nil, false
+	}
+	seen := map[string]bool{}
+	var out []string
+	addLines := func(raw string) {
+		for _, line := range strings.Split(raw, "\n") {
+			f := strings.TrimSpace(line)
+			if f == "" || seen[f] {
+				continue
+			}
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+	addLines(diffOut)
+	addLines(untrackedOut)
+	return out, true
 }
 
 func changedFiles(ctx context.Context, repoRoot string, isGit bool) []string {

@@ -133,15 +133,24 @@ func (e *Engine) formatWorkerWorkItemContext(ctx context.Context, wk *model.Work
 		return ""
 	}
 	state := e.store.GetWorkItemTitleState(ctx, wi.ID)
+	apiMode := e.isAPIRouterMode()
 	bin := orStr(strings.TrimSpace(e.binPath), "corgi")
 	var tag string
 	switch state {
 	case store.WorkItemTitleDraft:
-		tag = fmt.Sprintf(" (draft — 请顺手用 `%s task set %s --title \"...\" --next \"...\"` 凝练8-18字标题并写明下一步)", bin, wi.ID)
+		if apiMode {
+			tag = fmt.Sprintf(" (draft — 请顺手调用 manage_work(action=\"update_work\", target=%q, title=\"...\", next_step=\"...\") 凝练8-18字标题并写明下一步)", wi.ID)
+		} else {
+			tag = fmt.Sprintf(" (draft — 请顺手用 `%s task set %s --title \"...\" --next \"...\"` 凝练8-18字标题并写明下一步)", bin, wi.ID)
+		}
 	case store.WorkItemTitleLocked:
 		tag = " (user-locked title)"
 	default:
-		tag = fmt.Sprintf(" (阶段演进时可顺手 `%s task set %s --title/--next`)", bin, wi.ID)
+		if apiMode {
+			tag = fmt.Sprintf(" (阶段演进时可顺手调用 manage_work(action=\"update_work\" 或 \"close_work\", target=%q))", wi.ID)
+		} else {
+			tag = fmt.Sprintf(" (阶段演进时可顺手 `%s task set %s --title/--next`)", bin, wi.ID)
+		}
 	}
 	next := oneLineClip(wi.NextStep, 80)
 	if next == "" {

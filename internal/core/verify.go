@@ -17,11 +17,13 @@ import (
 // VerifyWorkerRequest runs stateless build/test checks (and optional read-only review)
 // in a worker's workspace on its host machine.
 type VerifyWorkerRequest struct {
-	Worker   string `json:"worker"`
-	Cmd      string `json:"cmd,omitempty"`
-	Review   bool   `json:"review,omitempty"`
-	Reviewer string `json:"reviewer,omitempty"`
-	Send     bool   `json:"send,omitempty"`
+	Worker      string `json:"worker"`
+	Cmd         string `json:"cmd,omitempty"`
+	Review      bool   `json:"review,omitempty"`
+	Reviewer    string `json:"reviewer,omitempty"`
+	Send        bool   `json:"send,omitempty"`
+	BaseCommit  string `json:"base_commit,omitempty"`
+	SkipIfClean bool   `json:"skip_if_clean,omitempty"`
 }
 
 // VerifyWorkerResponse augments gitwt.VerifyResult with worker routing and optional auto-bounce info.
@@ -71,11 +73,13 @@ func (e *Engine) VerifyWorker(ctx context.Context, req VerifyWorkerRequest) (*Ve
 	}
 
 	vReq := gitwt.VerifyRequest{
-		Dir:      dir,
-		Cmd:      strings.TrimSpace(req.Cmd),
-		Review:   req.Review,
-		Reviewer: strings.TrimSpace(req.Reviewer),
-		Brief:    brief,
+		Dir:         dir,
+		Cmd:         strings.TrimSpace(req.Cmd),
+		Review:      req.Review,
+		Reviewer:    strings.TrimSpace(req.Reviewer),
+		Brief:       brief,
+		BaseCommit:  strings.TrimSpace(req.BaseCommit),
+		SkipIfClean: req.SkipIfClean,
 	}
 
 	var (

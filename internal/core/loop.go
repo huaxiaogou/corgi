@@ -96,12 +96,26 @@ func (e *Engine) tick(parent context.Context) {
 		fleetOK   bool
 	)
 	if e.fleet != nil {
+		scanCtx := ctx
+		var scanCancel context.CancelFunc
+		if apiMode {
+			// Cap fleet scan in API mode so a stalled local herdr never exhausts the tick
+			// deadline needed by API Dream finalization and API Router SQLite delivery.
+			scanCtx, scanCancel = context.WithTimeout(ctx, 8*time.Second)
+		}
 		var fErr error
-		rawAgents, scanned, fErr = e.fleet.AgentsWithScanned(ctx)
+		rawAgents, scanned, fErr = e.fleet.AgentsWithScanned(scanCtx)
+		if scanCancel != nil {
+			scanCancel()
+		}
 		if fErr == nil {
 			fleetOK = true
 		} else if !apiMode {
 			return // herdr temporarily unreachable; preserve queued triggers
+		} else if len(scanned) > 0 {
+			// In API mode, local herdr may be offline while remote Nodes are healthy;
+			// continue syncing and delivering to remote machines that completed a scan.
+			fleetOK = true
 		}
 	} else if !apiMode {
 		return
@@ -163,8 +177,9 @@ func (e *Engine) tick(parent context.Context) {
 	}
 
 	// 4. Drive or trigger nightly memory consolidation (Dream) and PTY context handover.
-	if fleetOK {
-		e.checkDream(ctx, live, hasRouterQueued)
+	localScanned := fleetOK && (scanned == nil || scanned[""])
+	if apiMode || localScanned {
+		e.checkDreamWithLocal(ctx, live, hasRouterQueued, localScanned)
 	}
 	if !apiMode {
 		e.checkHandover(ctx, live, hasRouterQueued)
@@ -503,9 +518,15 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 	summary := e.lastWorkerSummary(ctx, w)
 	choices := formatChoicesText(ap)
 	e.addEvent(ctx, w.Thread, w.Name+" 等你确认："+ap.Title, w.Name, "blocked")
-	_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name,
-		fmt.Sprintf("worker %s is BLOCKED on a terminal dialog (also shown as a card in chat).\nScreen:\n%s%s\nIf the answer follows from the task or is routine, answer it yourself: `%s answer %s <choice>`. Leave high-risk choices to the human.",
-			w.Name, summary, choices, e.binPath, w.Name),
+	var blockedMsg string
+	if e.isAPIRouterMode() {
+		blockedMsg = fmt.Sprintf("worker %s is BLOCKED on a terminal dialog (already shown as an interactive approval card for the human in chat).\nScreen:\n%s%s\nDo NOT try to answer terminal dialogs yourself — wait for the human to click the card. Reply only if extra context is needed; otherwise output [SILENT].",
+			w.Name, summary, choices)
+	} else {
+		blockedMsg = fmt.Sprintf("worker %s is BLOCKED on a terminal dialog (also shown as a card in chat).\nScreen:\n%s%s\nIf the answer follows from the task or is routine, answer it yourself: `%s answer %s <choice>`. Leave high-risk choices to the human.",
+			w.Name, summary, choices, e.binPath, w.Name)
+	}
+	_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name, blockedMsg,
 		"", model.RouterName, w.Name, TriggerMeta{WorkItemID: w.WorkItemID})
 
 	e.mu.Lock()
@@ -579,7 +600,7 @@ func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
 	if fromTranscript {
 		if id := e.captureWorkerReportSnapshot(ctx, w, fullText, 800); id != "" {
 			artID = id
-			artNote = fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --re <this event #tID> --worker %s on `corgi reply` (when not using --file) to attach this exact snapshot]", id, w.Name)
+			artNote = e.formatReportArtifactNote(id, w.Name)
 		}
 	}
 	if dt != nil {
@@ -659,6 +680,10 @@ func (e *Engine) deliverQueuedWithFleet(ctx context.Context, live map[string]liv
 	apiMode := e.isAPIRouterMode()
 	for target, list := range batches {
 		if target == model.RouterName && apiMode {
+			list = e.filterAutoVerifyTriggers(ctx, live, list)
+			if len(list) == 0 {
+				continue
+			}
 			e.deliverAPIRouter(ctx, list)
 			continue
 		}
@@ -864,6 +889,12 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 		e.markConstraintDelivered(paneID)
 	}
 	if target != model.RouterName {
+		for _, t := range list {
+			if t.Source == "chat" || t.Source == "wecom" {
+				e.invalidateWorkerAutoVerify(target, true)
+				break
+			}
+		}
 		e.recordWorkerDelivered(target, paneID, list)
 		if targetWorker != nil {
 			e.armWorkerStartupCheck(targetWorker, paneID, list, promptBody, preScreen, preSnap, time.Now())

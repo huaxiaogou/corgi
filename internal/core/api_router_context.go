@@ -34,7 +34,8 @@ const (
    - 面对 Worker 汇报、定时器、系统事件或 candidate 事件，严禁擅自启动 implement 写代码或自动修复，需要人决定时发 attention 决策卡。
    - 合并分支（merge）、推送远端（push）、线上部署（deploy）永远需要用户单独确认，绝不自主执行。
 5. 静默原则：对无关的 candidate 策略事件或无需打扰用户的内部状态变化，可直接输出 [SILENT] 结束，不要制造进度刷屏。
-6. 工具约束：严禁编造不存在的文件路径、Worker 名称或执行结果；工具返回护栏报错时，请按报错提示修正参数后重试。`
+6. 自动验收标签：若 Worker 汇报头部带有 [auto_verify: PASS / SKIPPED / FAIL ...]，那是 Hub 自动执行的构建与测试结果——PASS 可直接汇报验收通过的结论（无需重复跑基础检查），FAIL 时向用户说明具体失败项与后续建议。
+7. 工具约束：严禁编造不存在的文件路径、Worker 名称或执行结果；工具返回护栏报错时，请按报错提示修正参数后重试。`
 )
 
 func (e *Engine) buildAPIRouterMessages(ctx context.Context, trig *model.Trigger, meta *turnConsentMeta) []LLMMessage {

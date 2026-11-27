@@ -225,6 +225,11 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	if err != nil {
 		return nil, err
 	}
+	if strings.EqualFold(strings.TrimSpace(req.Mode), "implement") {
+		e.markWorkerImplementDispatched(wk.Name)
+	} else {
+		e.invalidateWorkerAutoVerify(wk.Name, true)
+	}
 	if createdDraftTitle && wk.WorkItemID != "" {
 		_ = e.store.SetWorkItemTitleState(ctx, wk.WorkItemID, store.WorkItemTitleDraft)
 	}
@@ -320,7 +325,9 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		}
 		brief := fmt.Sprintf("[corgi task · worker=%s · thread=%s]\n%s%s\n\nHow this works:\n- Report completion with `%s report \"outcome summary & file paths\"`.\n- If blocked on a decision only the human can make or repeated failures, report `BLOCKED: <need> · tried: <attempts> · recommendation: <choice>`.%s",
 			name, thread, strings.TrimSpace(req.Task), extraCtx.String(), workerBin, worktreePromptNote(wtPrep))
-		_, _ = e.IngestWithMeta(lctx, "router", thread, model.RouterName, brief, "", name, name, TriggerMeta{WorkItemID: wk.WorkItemID})
+		if bTrig, bErr := e.IngestWithMeta(lctx, "router", thread, model.RouterName, brief, "", name, name, TriggerMeta{WorkItemID: wk.WorkItemID}); bErr == nil && bTrig != nil && strings.EqualFold(strings.TrimSpace(req.Mode), "implement") {
+			e.setWorkerAutoVerifyMinSeq(wk.Name, bTrig.Seq)
+		}
 	}()
 
 	select {
@@ -677,6 +684,7 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 	} else if err := e.store.UpsertWorker(ctx, wk); err != nil {
 		return nil, err
 	}
+	e.invalidateWorkerAutoVerify(wk.Name, true)
 
 	verb := "新建受管任务"
 	if req.SessionID != "" {
@@ -746,6 +754,10 @@ func (e *Engine) SendToWorkerWithWork(ctx context.Context, workerName, thread, t
 // SendToWorkerWithWorkTitle steers an active or newly-adopted worker while ensuring durable
 // work-item linkage, using explicit workTitle when creating a brand-new work item.
 func (e *Engine) SendToWorkerWithWorkTitle(ctx context.Context, workerName, thread, text, workID, workTitle string) (*model.Trigger, string, error) {
+	return e.sendToWorkerInternal(ctx, workerName, thread, text, workID, workTitle, false, false)
+}
+
+func (e *Engine) sendToWorkerInternal(ctx context.Context, workerName, thread, text, workID, workTitle string, markImplement, keepAutoVerifyGen bool) (*model.Trigger, string, error) {
 	wk, err := e.store.GetWorker(ctx, workerName)
 	if err != nil || wk.Ended {
 		adopted, adoptErr := e.adoptLiveAgent(ctx, workerName, thread, text)
@@ -755,6 +767,9 @@ func (e *Engine) SendToWorkerWithWorkTitle(ctx context.Context, workerName, thre
 		wk = adopted
 	}
 	if isWorkerFaulted(wk) {
+		if e.isAPIRouterMode() {
+			return nil, "", fmt.Errorf("worker %q is paused due to fatal error (%s); call manage_work(action=\"stop_worker\", target=%q) and dispatch to a healthy worker/model", wk.Name, oneLineClip(wk.FaultError, 120), wk.Name)
+		}
 		return nil, "", fmt.Errorf("worker %q is paused due to fatal error (%s); run `%s stop %s` and dispatch to a healthy worker/model", wk.Name, oneLineClip(wk.FaultError, 120), orStr(e.binPath, "corgi"), wk.Name)
 	}
 	if thread == "" {
@@ -805,11 +820,19 @@ func (e *Engine) SendToWorkerWithWorkTitle(ctx context.Context, workerName, thre
 	if prevBranch != "" && wi != nil {
 		_ = e.store.RecordWorkItemBranch(ctx, wi.ID, prevBranch)
 	}
+	if markImplement {
+		e.markWorkerImplementDispatched(wk.Name)
+	} else if !keepAutoVerifyGen {
+		e.invalidateWorkerAutoVerify(wk.Name, true)
+	}
 	trig, err := e.IngestWithMeta(ctx, "router", thread, model.RouterName, text, "", wk.Name, wk.Name, TriggerMeta{WorkItemID: wk.WorkItemID})
 	if err != nil {
 		return nil, "", err
 	}
 	if trig != nil {
+		if markImplement {
+			e.setWorkerAutoVerifyMinSeq(wk.Name, trig.Seq)
+		}
 		e.recordWorkerIssued(wk, trig.ID, trig.Seq)
 	}
 	return trig, wk.WorkItemID, nil
@@ -903,7 +926,7 @@ func (e *Engine) Report(ctx context.Context, workerName, paneID, text string) (*
 		e.disarmWorkerStartupCheck(wk.Name)
 		if id := e.captureWorkerReportSnapshot(ctx, wk, text, 500); id != "" {
 			artID = id
-			artNote = fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --re <this event #tID> --worker %s on `corgi reply` (when not using --file) to attach this exact snapshot]", id, wk.Name)
+			artNote = e.formatReportArtifactNote(id, wk.Name)
 		}
 		snap := e.lastWorkerTurnSnapshot(ctx, wk)
 		turnNote = e.formatWorkerTurnStatusNote(ctx, wk, snap)
@@ -921,6 +944,13 @@ func (e *Engine) Report(ctx context.Context, workerName, paneID, text string) (*
 		ArtifactID: artID,
 	})
 	return trig, err
+}
+
+func (e *Engine) formatReportArtifactNote(artID, workerName string) string {
+	if e.isAPIRouterMode() {
+		return fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass re_id=<this trigger_id> and worker=%q on reply_user(purpose=\"result\") (when not using files) to attach this exact snapshot]", artID, workerName)
+	}
+	return fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --re <this event #tID> --worker %s on `corgi reply` (when not using --file) to attach this exact snapshot]", artID, workerName)
 }
 
 // Subscribe subscribes or unsubscribes a worker to a thread's incoming events.
@@ -947,6 +977,7 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 	if err != nil {
 		return fmt.Errorf("worker %q not found", workerName)
 	}
+	e.invalidateWorkerAutoVerify(wk.Name, true)
 	if wk.Session == "" && wk.PaneID != "" {
 		if sess := e.lookupRemoteSession(ctx, wk.PaneID); sess != "" {
 			wk.Session = sess

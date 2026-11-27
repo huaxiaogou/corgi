@@ -561,6 +561,7 @@ func (e *Engine) SendDirectWorkerMessage(ctx context.Context, req DirectWorkerRe
 	if err != nil {
 		return nil, false, err
 	}
+	e.invalidateWorkerAutoVerify(w.Name, true)
 
 	var slot *pendingDirectTurn
 	if req.OnDone != nil {

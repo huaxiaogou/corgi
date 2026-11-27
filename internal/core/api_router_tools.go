@@ -630,13 +630,15 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		}
 		effWorkID := wk.WorkItemID
 		if goal != "" {
-			_, boundWI, sendErr := e.SendToWorkerWithWork(ctx, wk.Name, turn.thread, goal, targetWorkID)
+			_, boundWI, sendErr := e.sendToWorkerInternal(ctx, wk.Name, turn.thread, goal, targetWorkID, "", mode == "implement", false)
 			if sendErr != nil {
 				return toolErr("续聊已打开但发送任务失败：" + sendErr.Error())
 			}
 			if boundWI != "" {
 				effWorkID = boundWI
 			}
+		} else if mode == "implement" {
+			e.markWorkerImplementDispatched(wk.Name)
 		}
 		if effWorkID != "" {
 			e.updateWorkItemScopeOnDispatch(ctx, effWorkID, mode)
@@ -687,6 +689,7 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		ProjectID:       strings.TrimSpace(args.Project),
 		OriginalRequest: origReq,
 		Constraint:      constraint,
+		Mode:            mode,
 	})
 	if err != nil {
 		return toolErr("派发 Worker 失败：" + err.Error())

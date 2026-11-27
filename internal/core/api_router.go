@@ -427,6 +427,7 @@ func (e *Engine) prepareRouterModeSwitch(ctx context.Context, prevMode, nextMode
 	e.mu.Unlock()
 
 	if prevMode == "api" && nextMode == "pty" {
+		e.invalidateAllAutoVerify()
 		e.cancelAndSettleAPIRouterTurn(ctx, "", false)
 		return nil
 	}

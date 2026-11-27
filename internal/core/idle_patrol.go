@@ -270,13 +270,21 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 		shown = shown[:patrolMaxSummaryItems]
 	}
 
+	apiMode := e.isAPIRouterMode()
 	var b strings.Builder
 	fmt.Fprintf(&b, "[corgi idle-patrol] %d idle session(s) reached patrol threshold (zero-token gate passed).\n", len(due))
 	b.WriteString("Triage strictly:\n")
-	b.WriteString("- If nothing genuinely needs a human decision, or you ALREADY reported these exact waiting items recently with zero new developments, stay COMPLETELY SILENT.\n")
-	b.WriteString("- NEVER include already-healthy / no-action status items (e.g. '已部署健康'). NEVER auto-stop manual sessions (created_by=you).\n")
-	b.WriteString("- If 2+ independent unrelated items still need attention: send ONE clean bulleted Markdown checklist via plain `reply - <<'EOF'` (NO `--opt`, NO fake mutually-exclusive A/B buttons like '先验收已完成分支' vs '批准B'); put one concise bullet per item naming the exact worker/branch and what decision is needed.\n")
-	b.WriteString("- Use `reply --digest --category patrol --worker <name> --opt ...` ONLY when there is ONE single concrete decision (e.g. 1 unmerged branch or 1 specific approval) with clear, unambiguous button labels.\n")
+	if apiMode {
+		b.WriteString("- If nothing genuinely needs a human decision, or you ALREADY reported these exact waiting items recently with zero new developments, output [SILENT].\n")
+		b.WriteString("- NEVER include already-healthy / no-action status items (e.g. '已部署健康'). NEVER auto-stop manual sessions (created_by=you).\n")
+		b.WriteString("- If 2+ independent unrelated items still need attention: send ONE clean bulleted Markdown checklist via reply_user(purpose=\"answer\") (NO choices, NO fake mutually-exclusive A/B buttons); put one concise bullet per item naming the exact worker/branch and what decision is needed.\n")
+		b.WriteString("- Use reply_user(purpose=\"attention\", choices=[...], worker=\"<name>\") ONLY when there is ONE single concrete decision (e.g. 1 unmerged branch or 1 specific approval) with clear, unambiguous choices.\n")
+	} else {
+		b.WriteString("- If nothing genuinely needs a human decision, or you ALREADY reported these exact waiting items recently with zero new developments, stay COMPLETELY SILENT.\n")
+		b.WriteString("- NEVER include already-healthy / no-action status items (e.g. '已部署健康'). NEVER auto-stop manual sessions (created_by=you).\n")
+		b.WriteString("- If 2+ independent unrelated items still need attention: send ONE clean bulleted Markdown checklist via plain `reply - <<'EOF'` (NO `--opt`, NO fake mutually-exclusive A/B buttons like '先验收已完成分支' vs '批准B'); put one concise bullet per item naming the exact worker/branch and what decision is needed.\n")
+		b.WriteString("- Use `reply --digest --category patrol --worker <name> --opt ...` ONLY when there is ONE single concrete decision (e.g. 1 unmerged branch or 1 specific approval) with clear, unambiguous button labels.\n")
+	}
 	for i, c := range shown {
 		w := c.w
 		summary := strings.TrimSpace(w.LastReport)
@@ -418,14 +426,22 @@ func (e *Engine) tryEmitMorningDigest(
 		}
 	}
 
+	apiMode := e.isAPIRouterMode()
 	var b strings.Builder
 	fmt.Fprintf(&b, "[corgi morning-digest] Daily morning review (%s). Pending/carryover: %d; stale >=%dd Corgi sessions: %d.\n",
 		now.Format("2006-01-02 15:04"), len(priorityItems), staleDays, len(staleWorkers))
 	b.WriteString("Formatting rules:\n")
-	b.WriteString("- Include ONLY genuinely unresolved items needing human action (Top 5 max; omit healthy/finished noise). If nothing truly needs action, stay SILENT.\n")
-	b.WriteString("- Always format multiple items as a clean Markdown bullet list (1 short line per item naming exact worker/branch).\n")
-	b.WriteString("- If there are 2+ independent unrelated items (and no single batch-archive action), send ONE plain bulleted Markdown summary via `reply - <<'EOF'` WITHOUT `--opt` (NEVER force unrelated items into fake mutually-exclusive A/B buttons).\n")
-	b.WriteString("- Use `reply --digest --category morning --opt ...` ONLY when there is a single clear decision or a batch-archive confirmation (pass `--category stale` for pure archival).\n")
+	if apiMode {
+		b.WriteString("- Include ONLY genuinely unresolved items needing human action (Top 5 max; omit healthy/finished noise). If nothing truly needs action, output [SILENT].\n")
+		b.WriteString("- Always format multiple items as a clean Markdown bullet list (1 short line per item naming exact worker/branch).\n")
+		b.WriteString("- If there are 2+ independent unrelated items (and no single batch-archive action), send ONE plain bulleted Markdown summary via reply_user(purpose=\"answer\") WITHOUT choices (NEVER force unrelated items into fake mutually-exclusive A/B buttons).\n")
+		b.WriteString("- Use reply_user(purpose=\"attention\", choices=[...]) ONLY when there is a single clear decision or a batch-archive confirmation.\n")
+	} else {
+		b.WriteString("- Include ONLY genuinely unresolved items needing human action (Top 5 max; omit healthy/finished noise). If nothing truly needs action, stay SILENT.\n")
+		b.WriteString("- Always format multiple items as a clean Markdown bullet list (1 short line per item naming exact worker/branch).\n")
+		b.WriteString("- If there are 2+ independent unrelated items (and no single batch-archive action), send ONE plain bulleted Markdown summary via `reply - <<'EOF'` WITHOUT `--opt` (NEVER force unrelated items into fake mutually-exclusive A/B buttons).\n")
+		b.WriteString("- Use `reply --digest --category morning --opt ...` ONLY when there is a single clear decision or a batch-archive confirmation (pass `--category stale` for pure archival).\n")
+	}
 	if len(priorityItems) > 0 {
 		b.WriteString("\nCarryover & priority items:\n")
 		limit := len(priorityItems)
@@ -444,11 +460,19 @@ func (e *Engine) tryEmitMorningDigest(
 		for i := 0; i < len(staleWorkers) && i < patrolMaxStaleNames; i++ {
 			names = append(names, fmt.Sprintf("%s (%s)", staleWorkers[i].Name, formatIdleDuration(now.Sub(*staleWorkers[i].IdleSince))))
 		}
-		fmt.Fprintf(&b, "\nStale Corgi sessions (>=%dd inactive, non-keep, lossless --resume if stopped): %s", staleDays, strings.Join(names, ", "))
+		if apiMode {
+			fmt.Fprintf(&b, "\nStale Corgi sessions (>=%dd inactive, non-keep, lossless resume via dispatch_work): %s", staleDays, strings.Join(names, ", "))
+		} else {
+			fmt.Fprintf(&b, "\nStale Corgi sessions (>=%dd inactive, non-keep, lossless --resume if stopped): %s", staleDays, strings.Join(names, ", "))
+		}
 		if len(staleWorkers) > patrolMaxStaleNames {
 			fmt.Fprintf(&b, " (+%d more)", len(staleWorkers)-patrolMaxStaleNames)
 		}
-		b.WriteString("\nOffer a single batch-archive option and remind the human they can reply with exceptions (e.g. '保留 X，其余归档' -> run `keep X` and `stop` the rest).\n")
+		if apiMode {
+			b.WriteString("\nOffer a single batch-archive option via reply_user(purpose=\"attention\") and remind the human they can reply with exceptions (e.g. '保留 X，其余归档' -> call manage_work(action=\"keep_worker\", target=\"X\") and manage_work(action=\"stop_worker\") on the rest).\n")
+		} else {
+			b.WriteString("\nOffer a single batch-archive option and remind the human they can reply with exceptions (e.g. '保留 X，其余归档' -> run `keep X` and `stop` the rest).\n")
+		}
 	}
 
 	_, _ = e.Ingest(ctx, "system", model.MainThread, "corgi", b.String(), "", model.RouterName, "morning-digest")

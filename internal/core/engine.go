@@ -53,6 +53,7 @@ type SpawnRequest struct {
 	OriginalRequest string `json:"original_request,omitempty"`
 	Constraint      string `json:"constraint,omitempty"`
 	Ephemeral       bool   `json:"ephemeral,omitempty"`
+	Mode            string `json:"mode,omitempty"` // readonly | prototype | implement (optional)
 }
 
 // SayRequest represents an incoming human message from Web, WeCom, or CLI.
@@ -168,6 +169,11 @@ type Engine struct {
 	apiLastErr             string
 	apiAllowPrivateForTest bool
 
+	// Go-driven auto-verify bounce state for implement worktree workers (protected by mu).
+	autoVerify         map[string]*workerAutoVerify
+	autoVerifyReleased map[string]bool
+	autoVerifyFn       func(ctx context.Context, req VerifyWorkerRequest) (*VerifyWorkerResponse, error)
+
 	wakeCh                     chan struct{}
 	queueMu                    sync.Mutex
 	wtMu                       sync.Mutex
@@ -237,6 +243,8 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		watchdogMarks:      map[string]*watchdogMark{},
 		constraintRemindAt: map[string]time.Time{},
 		workerTurns:        map[string]*workerTurnWatermark{},
+		autoVerify:         map[string]*workerAutoVerify{},
+		autoVerifyReleased: map[string]bool{},
 	}
 	eng.loadActiveDreamMarker(ctx)
 	return eng, nil
@@ -673,7 +681,15 @@ func (e *Engine) entryInReplyChain(ctx context.Context, fromID, targetID string)
 
 func (e *Engine) buildDispatchHint(req SayRequest) string {
 	st := e.Settings()
+	apiMode := st.EffectiveRouterMode() == "api"
 	var hints []string
+	addHint := func(flag, key, val string) {
+		if apiMode {
+			hints = append(hints, key+"="+val)
+		} else {
+			hints = append(hints, flag+" "+val)
+		}
+	}
 	effMachine := st.WorkerMachine
 	if m := strings.TrimSpace(req.Machine); m != "" {
 		resolved := m
@@ -686,35 +702,38 @@ func (e *Engine) buildDispatchHint(req SayRequest) string {
 			if name == "" {
 				name = "hub"
 			}
-			hints = append(hints, "--machine "+name)
+			addHint("--machine", "machine", name)
 		}
 	}
 	effKind := agent.NormalizeKind(st.WorkerKind)
 	if k := agent.NormalizeKind(req.Kind); k != "" {
 		effKind = k
 		if k != agent.NormalizeKind(st.WorkerKind) {
-			hints = append(hints, "--kind "+k)
+			addHint("--kind", "kind", k)
 		}
 	}
 	baseModel, baseEffort, _ := ResolveWorkerModel(st, effMachine, effKind, "", "")
 	if m := strings.TrimSpace(req.Model); m != "" && agent.ModelNameRe.MatchString(m) && m != baseModel {
-		hints = append(hints, "--model "+m)
+		addHint("--model", "model", m)
 	}
 	if ef := strings.TrimSpace(req.Effort); ef != "" && agent.ModelNameRe.MatchString(ef) && ef != baseEffort {
-		hints = append(hints, "--effort "+ef)
+		addHint("--effort", "effort", ef)
 	}
 	if pid := strings.TrimSpace(req.ProjectID); pid != "" {
 		if proj := ResolveProject(st.Projects, pid); proj != nil {
-			hints = append(hints, "--project "+proj.ID)
+			addHint("--project", "project", proj.ID)
 			if p := ProjectPathForMachine(proj, effMachine); p != "" {
-				hints = append(hints, "--cwd "+p)
+				addHint("--cwd", "cwd", p)
 			}
 		} else {
-			hints = append(hints, "--project "+pid)
+			addHint("--project", "project", pid)
 		}
 	}
 	if len(hints) == 0 {
 		return ""
+	}
+	if apiMode {
+		return "[用户本次指定运行参数（对应 dispatch_work 参数）: " + strings.Join(hints, " ") + "]"
 	}
 	return "[The human picked where this runs: spawn with " + strings.Join(hints, " ") + "]"
 }
