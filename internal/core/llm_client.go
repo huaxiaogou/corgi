@@ -25,8 +25,8 @@ const (
 	TokenHubDefaultBaseURL = "https://tokenhub.tencentmaas.com/v1"
 	// TokenHubDefaultModel is the default model for Tencent TokenHub Router mode.
 	TokenHubDefaultModel = "hy4"
-	// TokenHubDefaultEffort is the default fast reasoning effort for hy4.
-	TokenHubDefaultEffort = "no_think"
+	// TokenHubDefaultEffort is the default reasoning effort for hy4.
+	TokenHubDefaultEffort = "high"
 )
 
 var (

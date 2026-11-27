@@ -4,24 +4,14 @@ import { DirPicker } from "../../components/DirPicker";
 import { api } from "../../lib/api";
 import { normalizeKind, normalizeMachineKey } from "../../lib/dispatchDefaults";
 import { getSupportedEfforts } from "../../lib/models";
+import {
+  TOKENHUB_BASE_URL,
+  TOKENHUB_MODELS,
+  getRouterAPIEffortOptions,
+  resolveRouterAPIEffort,
+} from "../../lib/routerApiModels";
 import type { Machine, ModelCatalog, ModelEffortSpec, RouterAPISecretStatus, Settings } from "../../types/api";
 import { ModelEffortFields } from "./ModelEffortFields";
-
-const TOKENHUB_BASE_URL = "https://tokenhub.tencentmaas.com/v1";
-const TOKENHUB_MODELS = [
-  { id: "hy4", label: "hy4（混元 4 · 推荐）" },
-  { id: "glm-5.3", label: "glm-5.3" },
-  { id: "glm-5.3-flash", label: "glm-5.3-flash" },
-  { id: "kimi-k3", label: "kimi-k3" },
-] as const;
-
-const API_EFFORT_OPTIONS = [
-  { id: "", label: "不指定（模型默认）" },
-  { id: "no_think", label: "no_think（极速直出 · hy4 推荐）" },
-  { id: "low", label: "low（轻量思考）" },
-  { id: "high", label: "high（深度思考）" },
-  { id: "max", label: "max（最高思考）" },
-] as const;
 
 const ALL_KINDS = [
   { id: "agy", label: "Antigravity" },
@@ -163,7 +153,11 @@ export function SettingsTab({
   const apiProvider = draft.router_api_provider === "openai" ? "openai" : "tokenhub";
   const effectiveAPIBaseURL = apiProvider === "tokenhub" ? TOKENHUB_BASE_URL : draft.router_api_base_url ?? "";
   const effectiveAPIModel = (draft.router_api_model ?? "").trim() || (apiProvider === "tokenhub" ? "hy4" : "");
-  const effectiveAPIEffort = draft.router_api_effort ?? (apiProvider === "tokenhub" && effectiveAPIModel === "hy4" ? "no_think" : "");
+  const apiEffortOptions = useMemo(
+    () => getRouterAPIEffortOptions(apiProvider, effectiveAPIModel),
+    [apiProvider, effectiveAPIModel]
+  );
+  const effectiveAPIEffort = resolveRouterAPIEffort(apiProvider, effectiveAPIModel, draft.router_api_effort);
 
   const draftAPIOrigin = useMemo(() => {
     try {
@@ -409,14 +403,18 @@ export function SettingsTab({
             <button
               type="button"
               onClick={() =>
-                setDraft((prev) => ({
-                  ...prev,
-                  router_mode: "api",
-                  router_api_provider: prev.router_api_provider || "tokenhub",
-                  router_api_base_url: prev.router_api_base_url || TOKENHUB_BASE_URL,
-                  router_api_model: prev.router_api_model || "hy4",
-                  router_api_effort: prev.router_api_effort ?? "no_think",
-                }))
+                setDraft((prev) => {
+                  const nextProv = prev.router_api_provider || "tokenhub";
+                  const nextModel = prev.router_api_model || (nextProv === "tokenhub" ? "hy4" : "");
+                  return {
+                    ...prev,
+                    router_mode: "api",
+                    router_api_provider: nextProv,
+                    router_api_base_url: prev.router_api_base_url || TOKENHUB_BASE_URL,
+                    router_api_model: nextModel,
+                    router_api_effort: resolveRouterAPIEffort(nextProv, nextModel, prev.router_api_effort),
+                  };
+                })
               }
               className={`px-2.5 py-1 rounded-md cursor-pointer ${
                 routerMode === "api" ? "surface-bg font-medium text-primary" : "text-secondary"
@@ -446,18 +444,21 @@ export function SettingsTab({
                   onChange={(e) => {
                     const nextProv = e.target.value === "openai" ? "openai" : "tokenhub";
                     setTestResult(null);
-                    setDraft((prev) => ({
-                      ...prev,
-                      router_api_provider: nextProv,
-                      router_api_base_url:
-                        nextProv === "tokenhub" ? TOKENHUB_BASE_URL : prev.router_api_base_url === TOKENHUB_BASE_URL ? "" : prev.router_api_base_url,
-                      router_api_model: nextProv === "tokenhub" ? prev.router_api_model || "hy4" : prev.router_api_model || "",
-                      router_api_effort: nextProv === "tokenhub" ? prev.router_api_effort ?? "no_think" : prev.router_api_effort ?? "",
-                    }));
+                    setDraft((prev) => {
+                      const nextModel = nextProv === "tokenhub" ? prev.router_api_model || "hy4" : prev.router_api_model || "";
+                      return {
+                        ...prev,
+                        router_api_provider: nextProv,
+                        router_api_base_url:
+                          nextProv === "tokenhub" ? TOKENHUB_BASE_URL : prev.router_api_base_url === TOKENHUB_BASE_URL ? "" : prev.router_api_base_url,
+                        router_api_model: nextModel,
+                        router_api_effort: resolveRouterAPIEffort(nextProv, nextModel, prev.router_api_effort),
+                      };
+                    });
                   }}
                   className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline"
                 >
-                  <option value="tokenhub">腾讯 TokenHub（推荐 · hy4）</option>
+                  <option value="tokenhub">腾讯 TokenHub</option>
                   <option value="openai">自定义 OpenAI 兼容（HTTPS）</option>
                 </select>
               </label>
@@ -490,10 +491,11 @@ export function SettingsTab({
                       onChange={(e) => {
                         const v = e.target.value;
                         if (v === "__custom__") return;
+                        setTestResult(null);
                         setDraft((prev) => ({
                           ...prev,
                           router_api_model: v,
-                          router_api_effort: v === "hy4" ? prev.router_api_effort || "no_think" : prev.router_api_effort ?? "",
+                          router_api_effort: resolveRouterAPIEffort("tokenhub", v, prev.router_api_effort),
                         }));
                       }}
                       className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline"
@@ -523,15 +525,18 @@ export function SettingsTab({
                 <span className="text-muted">推理强度（reasoning_effort）</span>
                 <select
                   value={effectiveAPIEffort}
-                  onChange={(e) => setDraft((prev) => ({ ...prev, router_api_effort: e.target.value }))}
+                  onChange={(e) => {
+                    setTestResult(null);
+                    setDraft((prev) => ({ ...prev, router_api_effort: e.target.value }));
+                  }}
                   className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline"
                 >
-                  {API_EFFORT_OPTIONS.map((opt) => (
+                  {apiEffortOptions.map((opt) => (
                     <option key={opt.id || "default"} value={opt.id}>
                       {opt.label}
                     </option>
                   ))}
-                  {!API_EFFORT_OPTIONS.some((o) => o.id === effectiveAPIEffort) && effectiveAPIEffort && (
+                  {!apiEffortOptions.some((o) => o.id === effectiveAPIEffort) && effectiveAPIEffort && (
                     <option value={effectiveAPIEffort}>{effectiveAPIEffort}</option>
                   )}
                 </select>

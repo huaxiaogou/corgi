@@ -155,6 +155,27 @@ func (e *Engine) isAPIRouterMode() bool {
 	return e.settings.EffectiveRouterMode() == "api"
 }
 
+// NormalizeTokenHubEffort ensures known Tencent TokenHub models only receive their
+// provider-supported reasoning_effort values (e.g. hy4: high|no_think; glm-5.3/kimi-k3: low|high|max).
+func NormalizeTokenHubEffort(modelName, rawEffort string) string {
+	m := strings.TrimSpace(modelName)
+	ef := strings.TrimSpace(rawEffort)
+	switch m {
+	case "hy4":
+		if ef == "high" || ef == "no_think" {
+			return ef
+		}
+		return "high"
+	case "glm-5.3", "glm-5.3-flash", "kimi-k3":
+		if ef == "low" || ef == "high" || ef == "max" {
+			return ef
+		}
+		return "low"
+	default:
+		return ef
+	}
+}
+
 func normalizeRouterAPISettings(ns *model.Settings, allowPrivateForTest bool) error {
 	if ns == nil {
 		return nil
@@ -170,9 +191,7 @@ func normalizeRouterAPISettings(ns *model.Settings, allowPrivateForTest bool) er
 		if ns.RouterAPIModel == "" {
 			ns.RouterAPIModel = TokenHubDefaultModel
 		}
-		if ns.RouterAPIEffort == "" && ns.RouterAPIModel == TokenHubDefaultModel {
-			ns.RouterAPIEffort = TokenHubDefaultEffort
-		}
+		ns.RouterAPIEffort = NormalizeTokenHubEffort(ns.RouterAPIModel, ns.RouterAPIEffort)
 	}
 	if ns.RouterMode == "api" || strings.TrimSpace(ns.RouterAPIBaseURL) != "" {
 		baseURL, _, err := NormalizeRouterAPIBaseURL(ns.RouterAPIProvider, ns.RouterAPIBaseURL, allowPrivateForTest)
@@ -307,6 +326,9 @@ func (e *Engine) TestRouterAPI(ctx context.Context, req TestRouterAPIRequest) Te
 		modelName = orStr(st.RouterAPIModel, TokenHubDefaultModel)
 	}
 	effort := strings.TrimSpace(req.Effort)
+	if prov == RouterAPIProviderTokenHub {
+		effort = NormalizeTokenHubEffort(modelName, effort)
+	}
 	apiKey := strings.TrimSpace(req.APIKey)
 	if apiKey == "" && e.store != nil {
 		sec, sErr := e.store.LoadRouterAPISecret(ctx)
@@ -377,13 +399,17 @@ func (e *Engine) resolveActiveRouterAPIConfig(ctx context.Context) (LLMClientCon
 	if sec.BoundOrigin != origin {
 		return LLMClientConfig{}, "", "", "", fmt.Errorf("%w: API Base URL 已变更为 %s，请重新录入对应的 API Key", ErrLLMAuth, origin)
 	}
+	eff := strings.TrimSpace(st.RouterAPIEffort)
+	if prov == RouterAPIProviderTokenHub {
+		eff = NormalizeTokenHubEffort(modelName, eff)
+	}
 	cacheKey := fmt.Sprintf("corgi:%s:%s:v1", prov, modelName)
 	return LLMClientConfig{
 		Provider:            prov,
 		BaseURL:             baseURL,
 		APIKey:              sec.APIKey,
 		AllowPrivateForTest: allowTest,
-	}, modelName, strings.TrimSpace(st.RouterAPIEffort), cacheKey, nil
+	}, modelName, eff, cacheKey, nil
 }
 
 // prepareRouterModeSwitch serializes transitions between "pty" and "api", settling active work

@@ -567,4 +567,18 @@ func TestAPIRouterReviewRegressions(t *testing.T) {
 	if paused {
 		t.Fatalf("HTTP 400 input error must NOT set apiAuthPaused")
 	}
+
+	// 6. TokenHub effort normalization clamps unsupported efforts per model.
+	if got := NormalizeTokenHubEffort("hy4", "max"); got != "high" {
+		t.Fatalf("hy4 max should normalize to high, got %q", got)
+	}
+	if got := NormalizeTokenHubEffort("hy4", "no_think"); got != "no_think" {
+		t.Fatalf("hy4 no_think should stay no_think, got %q", got)
+	}
+	if got := NormalizeTokenHubEffort("glm-5.3", "no_think"); got != "low" {
+		t.Fatalf("glm-5.3 no_think should normalize to low, got %q", got)
+	}
+	if got := NormalizeTokenHubEffort("glm-5.3", "max"); got != "max" {
+		t.Fatalf("glm-5.3 max should stay max, got %q", got)
+	}
 }
