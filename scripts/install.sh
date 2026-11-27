@@ -124,7 +124,7 @@ ensure_shell_path() {
     fi
   fi
   if [ -n "$updated" ]; then
-    step "已自动将 $BIN_DIR 写入$updated"
+    step "已自动将 ${BIN_DIR} 写入${updated}"
     if [ ! -L /usr/local/bin/corgi ]; then
       say "    当前终端若未立即生效，执行一次：export PATH=\"$BIN_DIR:\$PATH\""
     fi
@@ -147,7 +147,7 @@ install_binary() {
     cp "$CORGI_BINARY" "$tmp/$asset"
   elif src=$(checkout); then
     if [ -x "$src/dist/$asset" ] && [ -z "${CORGI_FORCE_BUILD:-}" ]; then
-      step "使用本地构建产物（$src/dist/$asset）"
+      step "使用本地构建产物（${src}/dist/${asset}）"
       cp "$src/dist/$asset" "$tmp/$asset"
     else
       command -v go >/dev/null 2>&1 || die "从源码编译需要 Go 1.25+：https://go.dev/dl/"
@@ -157,11 +157,11 @@ install_binary() {
         (cd "$src/web" && npm install --no-audit --no-fund && npm run build) || die "前端构建失败"
       fi
       v=$(git -C "$src" describe --tags --always --dirty 2>/dev/null || echo dev)
-      step "从源码编译（$src，$v）"
+      step "从源码编译（${src}，${v}）"
       (cd "$src" && CGO_ENABLED=0 go build -ldflags "-X main.version=$v" -o "$tmp/$asset" ./cmd/corgi) || die "Go 编译失败"
     fi
   else
-    step "下载 $asset（$VERSION）"
+    step "下载 ${asset}（${VERSION}）"
     fetch "$base/$asset" "$tmp/$asset" || die "下载失败：$base/$asset"
     if fetch "$base/SHA256SUMS.txt" "$tmp/SHA256SUMS.txt" 2>/dev/null; then
       want=$(grep " $asset\$" "$tmp/SHA256SUMS.txt" | awk '{print $1}')
@@ -236,7 +236,7 @@ $args
       sleep 1
     done
     launchctl kickstart -k "gui/$uid/$label" >/dev/null 2>&1 || true
-    step "已作为后台服务常驻（launchd: $label）"
+    step "已作为后台服务常驻（launchd: ${label}）"
     say "    日志：tail -f $log"
   else
     unitdir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
@@ -279,7 +279,7 @@ WantedBy=default.target"
     systemctl --user daemon-reload
     systemctl --user enable --now "corgi-$name" >/dev/null
     systemctl --user restart "corgi-$name"
-    step "已作为后台服务常驻（systemd --user: corgi-$name）"
+    step "已作为后台服务常驻（systemd --user: corgi-${name}）"
     say "    日志：journalctl --user -u corgi-$name -f"
     if command -v loginctl >/dev/null 2>&1 && ! loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes; then
       if loginctl enable-linger "$(id -un)" 2>/dev/null; then
@@ -308,7 +308,7 @@ setup_herdr() {
     fi
   fi
   if [ -z "$hb" ] || [ ! -x "$hb" ]; then
-    warn "未找到 herdr：这台电脑上的 Agent 将暂时无法由 Corgi 驱动${1:+（$1）}。"
+    warn "未找到 herdr：这台电脑上的 Agent 将暂时无法由 Corgi 驱动${1:+（${1}）}。"
     return 0
   fi
 
@@ -397,6 +397,6 @@ case "$mode" in
     setup_herdr
     ;;
   *)
-    die "未知模式：$mode（支持 hub、node 或留空仅安装命令）"
+    die "未知模式：${mode}（支持 hub、node 或留空仅安装命令）"
     ;;
 esac
