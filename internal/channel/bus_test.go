@@ -133,7 +133,7 @@ func TestWebGroupSyncReportAttachmentAndWorkerTag(t *testing.T) {
 	// 1. Web message posted in a wecom group thread mirrors back to WeCom group.
 	bus.OnUserMessage(ctx, &model.Entry{Channel: "web", Thread: "wecom:grp-88", Text: "请把单测也跑一遍"})
 
-	// 2. Group reply referencing a worker + explicit file attachment gets [#worker] prefix and pushes file.
+	// 2. Group reply referencing a worker + explicit file attachment stays clean (no [#worker] prefix) and pushes file.
 	bus.OnReply(ctx, &model.Entry{
 		Thread: "wecom:grp-88",
 		Ref:    "api-profiler",
@@ -147,8 +147,8 @@ func TestWebGroupSyncReportAttachmentAndWorkerTag(t *testing.T) {
 	if len(msgs) != 2 || msgs[0].chat != "grp-88" || !strings.Contains(msgs[0].body, "**[Web]**") {
 		t.Fatalf("unexpected mirrored messages: %+v", msgs)
 	}
-	if !strings.HasPrefix(msgs[1].body, "[#api-profiler] ") {
-		t.Fatalf("expected [#api-profiler] prefix in group reply, got %q", msgs[1].body)
+	if msgs[1].body != "剖析完成，详单见附件" || strings.Contains(msgs[1].body, "[#api-profiler]") {
+		t.Fatalf("expected clean Corgi group reply without [#api-profiler] prefix, got %q", msgs[1].body)
 	}
 	if len(files) != 1 || files[0].chat != "grp-88" || files[0].name != "perf-report.md" || !strings.Contains(files[0].body, "All checks green") {
 		t.Fatalf("expected report attachment pushed to WeCom, got %+v", files)

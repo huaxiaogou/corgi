@@ -40,18 +40,19 @@ type Bus struct {
 	sendFileFn      func(ctx context.Context, chatID, filename string, data []byte) error
 	sendStreamFn    wecom.StreamSendFunc
 
-	mu                sync.Mutex
-	flushMu           sync.Mutex
-	chatSendMu        map[string]*sync.Mutex
-	subs              map[chan struct{}]struct{}
-	outbox            map[string][]outboxItem
-	routerStreams     map[string][]*activeWeComStream
-	lastRouterReplyAt map[string]time.Time
-	seenWeComMsgs     map[string]time.Time
-	pendingWebQuote   map[string]string
-	wecomCardStates   map[string]*wecomDecisionCardState
-	webSeenAt         time.Time
-	wecomActiveAt     time.Time
+	mu                 sync.Mutex
+	flushMu            sync.Mutex
+	chatSendMu         map[string]*sync.Mutex
+	subs               map[chan struct{}]struct{}
+	outbox             map[string][]outboxItem
+	routerStreams      map[string][]*activeWeComStream
+	lastRouterReplyAt  map[string]time.Time
+	seenWeComMsgs      map[string]time.Time
+	pendingWebQuote    map[string]string
+	pendingFocusNotice map[string]string
+	wecomCardStates    map[string]*wecomDecisionCardState
+	webSeenAt          time.Time
+	wecomActiveAt      time.Time
 }
 
 // NewBus wires the Super-Agent Engine to Web SSE subscribers and the WeCom client.
@@ -60,18 +61,19 @@ func NewBus(eng *core.Engine, wc *wecom.Client, logger *slog.Logger) *Bus {
 		logger = slog.Default()
 	}
 	b := &Bus{
-		engine:            eng,
-		wecom:             wc,
-		logger:            logger,
-		flushDelay:        20 * time.Second,
-		chatSendMu:        map[string]*sync.Mutex{},
-		subs:              map[chan struct{}]struct{}{},
-		outbox:            map[string][]outboxItem{},
-		routerStreams:     map[string][]*activeWeComStream{},
-		lastRouterReplyAt: map[string]time.Time{},
-		seenWeComMsgs:     map[string]time.Time{},
-		pendingWebQuote:   map[string]string{},
-		wecomCardStates:   map[string]*wecomDecisionCardState{},
+		engine:             eng,
+		wecom:              wc,
+		logger:             logger,
+		flushDelay:         20 * time.Second,
+		chatSendMu:         map[string]*sync.Mutex{},
+		subs:               map[chan struct{}]struct{}{},
+		outbox:             map[string][]outboxItem{},
+		routerStreams:      map[string][]*activeWeComStream{},
+		lastRouterReplyAt:  map[string]time.Time{},
+		seenWeComMsgs:      map[string]time.Time{},
+		pendingWebQuote:    map[string]string{},
+		pendingFocusNotice: map[string]string{},
+		wecomCardStates:    map[string]*wecomDecisionCardState{},
 	}
 	if wc != nil {
 		b.sendFn = wc.SendMarkdown
@@ -283,6 +285,39 @@ func (b *Bus) clearPendingWebQuote(thread string) {
 	b.mu.Unlock()
 }
 
+func (b *Bus) setPendingFocusNotice(thread, notice string) {
+	notice = strings.TrimSpace(notice)
+	if thread == "" || notice == "" {
+		return
+	}
+	b.mu.Lock()
+	if b.pendingFocusNotice == nil {
+		b.pendingFocusNotice = map[string]string{}
+	}
+	b.pendingFocusNotice[thread] = notice
+	b.mu.Unlock()
+}
+
+func (b *Bus) takePendingFocusNotice(thread string) string {
+	if thread == "" {
+		return ""
+	}
+	b.mu.Lock()
+	n := b.pendingFocusNotice[thread]
+	delete(b.pendingFocusNotice, thread)
+	b.mu.Unlock()
+	return n
+}
+
+func (b *Bus) clearPendingFocusNotice(thread string) {
+	if thread == "" {
+		return
+	}
+	b.mu.Lock()
+	delete(b.pendingFocusNotice, thread)
+	b.mu.Unlock()
+}
+
 func formatWebQuoteSummary(raw string, maxRunes int) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -332,16 +367,22 @@ func formatWebMirrorMessage(raw string) string {
 	return "**[Web]** " + summary
 }
 
-func prependWebQuoteHeader(webQuote, body string) string {
-	q := strings.TrimSpace(webQuote)
-	if q == "" {
+func prependReplyHeaders(webQuote, focusNotice, body string) string {
+	var headers []string
+	if q := strings.TrimSpace(webQuote); q != "" {
+		headers = append(headers, "> 来自 Web："+q)
+	}
+	if n := strings.TrimSpace(focusNotice); n != "" {
+		headers = append(headers, n)
+	}
+	if len(headers) == 0 {
 		return body
 	}
-	header := "> 来自 Web：" + q
+	head := strings.Join(headers, "\n")
 	if strings.TrimSpace(body) == "" {
-		return header
+		return head
 	}
-	return header + "\n\n" + body
+	return head + "\n\n" + body
 }
 
 func (b *Bus) notifyLevel() string {
@@ -422,6 +463,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 
 	if suppress {
 		b.clearPendingWebQuote(entry.Thread)
+		b.clearPendingFocusNotice(entry.Thread)
 		if !hasExplicitFiles {
 			return core.ReplyDelivery{}
 		}
@@ -445,6 +487,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 	// normal plain-text WeCom delivery below (never cardified and never sealed with "请在下方卡片选择 👇").
 	if action != nil && action.IsDecision() {
 		b.clearPendingWebQuote(entry.Thread)
+		focusNotice := b.takePendingFocusNotice(entry.Thread)
 		st := b.takeRouterStreamForReply(entry.Thread, entry)
 		if st != nil && st.chatID != "" && chatID == "" {
 			chatID = st.chatID
@@ -452,10 +495,14 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 		cardPushed := b.pushWeComDecisionCard(ctx, entry.Thread, chatID, action, false)
 		if st != nil {
 			if cardPushed {
-				_, _ = st.seal(ctx, "", "请在下方卡片选择 👇")
+				sealText := "请在下方卡片选择 👇"
+				if focusNotice != "" {
+					sealText = focusNotice + "\n\n" + sealText
+				}
+				_, _ = st.seal(ctx, "", sealText)
 			} else {
 				// Fall back to readable reply prose if card push failed or WeCom went offline.
-				_, _ = st.seal(ctx, "", formatWeComReply(entry))
+				_, _ = st.seal(ctx, "", prependReplyHeaders("", focusNotice, formatWeComReply(entry)))
 			}
 		}
 		if hasExplicitFiles {
@@ -475,6 +522,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 	}
 
 	webQuote := b.takePendingWebQuote(entry.Thread)
+	focusNotice := b.takePendingFocusNotice(entry.Thread)
 
 	// Per-recipient causal FIFO Delivery Gate:
 	// Take any open Router stream up front so canonical recipient chatID is unified across
@@ -486,7 +534,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 	}
 	chatID = b.canonicalWeComChat(entry.Thread, streamChatID)
 
-	body := prependWebQuoteHeader(webQuote, formatWeComReply(entry))
+	body := prependReplyHeaders(webQuote, focusNotice, formatWeComReply(entry))
 	combined := body
 	if hasExplicitFiles && linksBlock != "" {
 		if combined != "" {
@@ -499,7 +547,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 	item := outboxItem{
 		text:          combined,
 		at:            now,
-		immediate:     hasExplicitFiles || st != nil || wecomRecent || webQuote != "",
+		immediate:     hasExplicitFiles || st != nil || wecomRecent || webQuote != "" || focusNotice != "",
 		useACK:        hasExplicitFiles && linksBlock != "",
 		hasFiles:      hasExplicitFiles,
 		entry:         entry,
@@ -652,24 +700,10 @@ func queuedAttachmentResults(attachments []core.AttachmentFile, reason string) [
 }
 
 func formatWeComReply(entry *model.Entry) string {
-	txt := strings.TrimSpace(entry.Text)
-	if strings.HasPrefix(txt, "[#") {
-		return txt
+	if entry == nil {
+		return ""
 	}
-	tag := ""
-	if entry.WorkerRef != nil && strings.TrimSpace(entry.WorkerRef.Name) != "" {
-		tag = strings.TrimSpace(entry.WorkerRef.Name)
-	} else if strings.HasPrefix(entry.Thread, "wecom:") {
-		if entry.Re != nil && entry.Re.Worker != "" {
-			tag = entry.Re.Worker
-		} else if entry.Ref != "" && !strings.Contains(entry.Ref, ":") {
-			tag = entry.Ref
-		}
-	}
-	if tag != "" {
-		return "[#" + tag + "] " + txt
-	}
-	return txt
+	return strings.TrimSpace(entry.Text)
 }
 
 func (b *Bus) sendReplyAttachments(ctx context.Context, chatID string, entry *model.Entry, attachments []core.AttachmentFile, allowLongFallback bool) []core.AttachmentDelivery {

@@ -516,6 +516,83 @@ func (c *Client) UpdateWorkerPickerCard(ctx context.Context, reqID, taskID, curr
 	return nil
 }
 
+// BuildDirectFocusCard renders an interactive card with live action buttons (no replace_text lock)
+// shown right after entering direct chat so the human can return to Corgi or switch with one tap.
+func BuildDirectFocusCard(taskID, title, workerName, detail string) map[string]any {
+	tid := sanitizeTaskID(firstNonEmpty(taskID, fmt.Sprintf("nav:focus:%d", time.Now().UnixNano())))
+	handle := strings.TrimSpace(workerName)
+	desc := "直聊中"
+	if handle != "" {
+		desc = "直聊中 · #" + handle
+	}
+	card := map[string]any{
+		"card_type": "button_interaction",
+		"source": map[string]any{
+			"desc":       "Corgi · 直聊中",
+			"desc_color": 1,
+		},
+		"main_title": map[string]any{
+			"title": clipRunes(firstNonEmpty(title, "#"+handle, "直聊会话"), cardMainTitleMaxRunes),
+			"desc":  clipRunes(desc, cardMainDescMaxRunes),
+		},
+		"task_id": tid,
+		"button_list": []map[string]any{
+			{
+				"text":  "返回 Corgi 主对话",
+				"style": 1,
+				"key":   "nav:main",
+			},
+			{
+				"text":  "切换其他",
+				"style": 2,
+				"key":   "nav:picker",
+			},
+		},
+	}
+	if strings.TrimSpace(detail) != "" {
+		card["sub_title_text"] = clipRunes(detail, cardSubTitleMaxRunes)
+	}
+	return card
+}
+
+// SendDirectFocusCard pushes a live direct-chat control card with one-tap return/switch buttons.
+func (c *Client) SendDirectFocusCard(ctx context.Context, chatID, title, workerName, detail string) error {
+	chatID = c.resolveTarget(chatID)
+	if chatID == "" {
+		return nil
+	}
+	taskID := fmt.Sprintf("nav:focus:%d", time.Now().UnixNano())
+	sctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := c.callRPC(sctx, "aibot_send_msg", map[string]any{
+		"chatid":        chatID,
+		"msgtype":       "template_card",
+		"template_card": BuildDirectFocusCard(taskID, title, workerName, detail),
+	})
+	if err != nil {
+		return fmt.Errorf("send wecom direct focus card: %w", err)
+	}
+	return nil
+}
+
+// UpdateDirectFocusCard updates a picker card in-place into a live direct-chat control card.
+func (c *Client) UpdateDirectFocusCard(ctx context.Context, reqID, taskID, title, workerName, detail string) error {
+	reqID = strings.TrimSpace(reqID)
+	if reqID == "" {
+		return nil
+	}
+	uctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := c.callRPCWithReqID(uctx, reqID, "aibot_respond_update_msg", map[string]any{
+		"response_type": "update_template_card",
+		"template_card": BuildDirectFocusCard(taskID, title, workerName, detail),
+	})
+	if err != nil {
+		return fmt.Errorf("update wecom direct focus card %s: %w", taskID, err)
+	}
+	return nil
+}
+
 // UpdateNavCard updates a navigation template card in-place after click.
 func (c *Client) UpdateNavCard(ctx context.Context, reqID, taskID, title, statusText, detail string) error {
 	reqID = strings.TrimSpace(reqID)

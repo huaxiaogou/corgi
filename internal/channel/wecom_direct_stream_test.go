@@ -2,14 +2,17 @@ package channel
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kiperjing/corgi/internal/channel/wecom"
 	"github.com/kiperjing/corgi/internal/core"
+	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
 	"github.com/kiperjing/corgi/internal/store"
@@ -95,8 +98,8 @@ func TestWeComRouterStreamSealsOnReplyWithoutDuplicateMarkdown(t *testing.T) {
 		t.Fatalf("expected 2 stream frames (init + finish), got %d: %+v", len(*streams), *streams)
 	}
 	fin := (*streams)[1]
-	if !fin.finish || fin.reqID != "req-router-1" || !strings.Contains(fin.content, "[#latency-check] 已派给 MacBook 上的 agy 排查。") {
-		t.Fatalf("unexpected final stream frame: %+v", fin)
+	if !fin.finish || fin.reqID != "req-router-1" || !strings.Contains(fin.content, "已派给 MacBook 上的 agy 排查。") || strings.Contains(fin.content, "[#latency-check]") {
+		t.Fatalf("expected clean Corgi final stream without [#worker] prefix, got: %+v", fin)
 	}
 	_ = eng
 }
@@ -168,8 +171,11 @@ func TestWeComFocusReturnMainAndPickerFallback(t *testing.T) {
 		Text:     "/help",
 	})
 	mu.Lock()
-	if len(*streams) != 1 || !(*streams)[0].finish || !strings.Contains((*streams)[0].content, "直连") || !strings.Contains((*streams)[0].content, "/back") {
+	if len(*streams) != 1 || !(*streams)[0].finish || !strings.Contains((*streams)[0].content, "直聊中") || !strings.Contains((*streams)[0].content, "/back") {
 		t.Fatalf("expected instant /help showing active worker + /back, got %+v", *streams)
+	}
+	if strings.Contains((*streams)[0].content, "不经过 Corgi") || strings.Contains((*streams)[0].content, "不经 Corgi") {
+		t.Fatalf("/help text violated copy redline: %q", (*streams)[0].content)
 	}
 	mu.Unlock()
 
@@ -397,5 +403,350 @@ func TestWeComQuoteMainChatWhileFocusedRoutesOnceToRouter(t *testing.T) {
 	}
 	if plain := formatWeComDirectPrompt("", "直接说"); plain != "直接说" {
 		t.Fatalf("unexpected plain direct prompt: %q", plain)
+	}
+}
+
+func TestWeComFocusTTLAutoReturnLegacyAndEnded(t *testing.T) {
+	_, st, bus, streams, _, mu := openWeComStreamTestEnvWithStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	focusKey := wecomFocusKey("single", "U1", "U1")
+
+	mustJSON := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	// Seed an ended worker for the ended-worker test case.
+	if err := st.UpsertWorker(ctx, &model.Worker{
+		Name: "stopped-w", Kind: "agy", Cwd: "/tmp", Thread: model.MainThread,
+		Status: "done", Ended: true, Title: "已停任务", CreatedAt: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name            string
+		seedKV          string
+		msgID           string
+		reqID           string
+		wantNoticeSub   string
+		wantNoNoticeSub bool
+	}{
+		{
+			name: "expired 60m TTL auto-returns to Corgi and prepends one-time notice",
+			seedKV: mustJSON(core.WeComFocus{
+				Worker:    "taihu-plan",
+				Title:     "太湖方案",
+				EnteredAt: now.Add(-2 * time.Hour),
+				UpdatedAt: now.Add(-65 * time.Minute),
+			}),
+			msgID:         "msg-ttl-1",
+			reqID:         "req-ttl-1",
+			wantNoticeSub: "> 已超过 60m 未直聊，已自动回到 Corgi 主对话（原直聊 #taihu-plan）",
+		},
+		{
+			name:            "legacy focus without UpdatedAt silently expires to Corgi",
+			seedKV:          `{"worker":"legacy-w","title":"旧直聊"}`,
+			msgID:           "msg-legacy-1",
+			reqID:           "req-legacy-1",
+			wantNoNoticeSub: true,
+		},
+		{
+			name: "ended worker focus auto-returns to Corgi without reviving worker",
+			seedKV: mustJSON(core.WeComFocus{
+				Worker:    "stopped-w",
+				Title:     "已停任务",
+				EnteredAt: now.Add(-5 * time.Minute),
+				UpdatedAt: now.Add(-1 * time.Minute),
+			}),
+			msgID:         "msg-ended-1",
+			reqID:         "req-ended-1",
+			wantNoticeSub: "> 原直聊会话 #stopped-w 已结束，已自动回到 Corgi 主对话",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mu.Lock()
+			*streams = nil
+			mu.Unlock()
+
+			if err := st.SetKV(ctx, focusKey, tc.seedKV); err != nil {
+				t.Fatal(err)
+			}
+			bus.HandleWeComMessage(ctx, wecom.IncomingMessage{
+				ReqID:    tc.reqID,
+				MsgID:    tc.msgID,
+				ChatType: "single",
+				ChatID:   "U1",
+				FromUser: "U1",
+				Text:     "现在整体进展怎么样？",
+			})
+
+			// Focus KV must be cleaned.
+			if f := bus.loadWeComFocus(ctx, focusKey); f != nil {
+				t.Fatalf("expected expired focus cleared, got %+v", f)
+			}
+
+			// First Corgi reply seals the router stream with the auto-return notice (if any).
+			bus.OnReply(ctx, &model.Entry{ID: "e-" + tc.msgID, Thread: model.MainThread, Text: "整体正常。"}, nil, nil)
+
+			mu.Lock()
+			got := append([]capturedStreamFrame(nil), (*streams)...)
+			mu.Unlock()
+			if len(got) != 2 || !got[1].finish {
+				t.Fatalf("expected 2 router stream frames (init + finish), got %+v", got)
+			}
+			if tc.wantNoticeSub != "" && !strings.Contains(got[1].content, tc.wantNoticeSub) {
+				t.Fatalf("expected notice %q in %q", tc.wantNoticeSub, got[1].content)
+			}
+			if tc.wantNoNoticeSub && strings.Contains(got[1].content, "已自动回到") {
+				t.Fatalf("expected silent legacy upgrade, got %q", got[1].content)
+			}
+			if !strings.Contains(got[1].content, "整体正常。") {
+				t.Fatalf("missing Corgi reply text in %q", got[1].content)
+			}
+
+			// Second Corgi reply must NOT repeat the notice.
+			if gotNotice := bus.takePendingFocusNotice(model.MainThread); gotNotice != "" {
+				t.Fatalf("expected pending focus notice consumed on first reply, still got %q", gotNotice)
+			}
+		})
+	}
+}
+
+func TestFormatDirectReplyBodyHeaderFooterTruncationAndRedline(t *testing.T) {
+	cases := []struct {
+		name              string
+		title             string
+		worker            string
+		machine           string
+		fullText          string
+		previewURL        string
+		quotaErr          string
+		inFocus           bool
+		curFocus          string
+		maxBytes          int
+		wantHeader        string
+		wantFooter        string
+		wantPreviewLink   bool
+		wantTruncatedNote bool
+	}{
+		{
+			name:       "focus mode with distinct title",
+			title:      "会话身份提醒",
+			worker:     "agy-3637",
+			machine:    "MacBook",
+			fullText:   "已更新前端顶栏和提示条。",
+			inFocus:    true,
+			curFocus:   "agy-3637",
+			wantHeader: "↳ 直聊 · 会话身份提醒（#agy-3637 · MacBook）",
+			wantFooter: "> **↳ 直聊中 · 会话身份提醒（#agy-3637）** · 发 /back 回 Corgi · /w 切换",
+		},
+		{
+			name:       "one-shot quote while in main chat",
+			title:      "",
+			worker:     "api-profiler",
+			machine:    "Hub",
+			fullText:   "慢查询已定位到 orders 表。",
+			inFocus:    false,
+			curFocus:   "",
+			wantHeader: "↳ 直聊 · #api-profiler（Hub）",
+			wantFooter: "> ↳ 单次直问 · #api-profiler · 当前仍在 Corgi 主对话",
+		},
+		{
+			name:       "one-shot quote of another worker while focused",
+			title:      "",
+			worker:     "worker-b",
+			machine:    "Hub",
+			fullText:   "B 已核对。",
+			inFocus:    false,
+			curFocus:   "worker-a",
+			wantHeader: "↳ 直聊 · #worker-b（Hub）",
+			wantFooter: "> ↳ 单次直问 · #worker-b · 当前焦点仍在 #worker-a（发 /back 回 Corgi）",
+		},
+		{
+			name:              "over-budget body clips middle prose while preserving header, preview link, and footer",
+			title:             "长报告直聊",
+			worker:            "report-w",
+			machine:           "Hub",
+			fullText:          strings.Repeat("这是一段超长直聊回复内容，用于验证字节裁剪后尾注绝不丢失。", 500),
+			previewURL:        "https://corgi.example/p/tok123",
+			inFocus:           true,
+			curFocus:          "report-w",
+			maxBytes:          1200,
+			wantHeader:        "↳ 直聊 · 长报告直聊（#report-w · Hub）",
+			wantFooter:        "> **↳ 直聊中 · 长报告直聊（#report-w）** · 发 /back 回 Corgi · /w 切换",
+			wantPreviewLink:   true,
+			wantTruncatedNote: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := formatDirectReplyBody(tc.title, tc.worker, tc.machine, tc.fullText, tc.previewURL, tc.quotaErr, tc.inFocus, tc.curFocus, tc.maxBytes)
+			if !strings.HasPrefix(out, tc.wantHeader) {
+				t.Fatalf("header mismatch:\ngot:  %q\nwant prefix: %q", out, tc.wantHeader)
+			}
+			if !strings.HasSuffix(out, tc.wantFooter) {
+				t.Fatalf("footer mismatch:\ngot:  %q\nwant suffix: %q", out, tc.wantFooter)
+			}
+			if tc.maxBytes > 0 && len(out) > tc.maxBytes {
+				t.Fatalf("output len=%d exceeded maxBytes=%d", len(out), tc.maxBytes)
+			}
+			if tc.wantPreviewLink && !strings.Contains(out, "🔗 [在线预览 · 完整报告]("+tc.previewURL+")") {
+				t.Fatalf("preview link lost during truncation: %q", out)
+			}
+			if tc.wantTruncatedNote && !strings.Contains(out, "内容过长") {
+				t.Fatalf("expected truncation notice in %q", out)
+			}
+			if strings.Contains(out, "不经过 Corgi") || strings.Contains(out, "不经 Corgi") {
+				t.Fatalf("direct reply violated copy redline: %q", out)
+			}
+			// Round-trip verify: quoting either the header or footer extracts the exact worker handle.
+			if gotTag := core.ExtractQuoteWorkerTag(tc.wantHeader); gotTag != tc.worker {
+				t.Fatalf("ExtractQuoteWorkerTag(header %q) = %q, want %q", tc.wantHeader, gotTag, tc.worker)
+			}
+			if gotTag := core.ExtractQuoteWorkerTag(tc.wantFooter); gotTag != tc.worker {
+				t.Fatalf("ExtractQuoteWorkerTag(footer %q) = %q, want %q", tc.wantFooter, gotTag, tc.worker)
+			}
+		})
+	}
+}
+
+func TestWeComQuoteCorgiWorkerRefReportNeverLeaksToWorker(t *testing.T) {
+	_, st, bus, streams, _, mu := openWeComStreamTestEnvWithStore(t)
+	ctx := context.Background()
+
+	// Seed a Corgi reply with WorkerRef (report forwarded by Corgi).
+	if err := st.InsertEntry(ctx, &model.Entry{
+		ID:        "e-report-1",
+		Thread:    model.MainThread,
+		Role:      "corgi",
+		Text:      "api-profiler 查完了，建议给 orders 表加联合索引。",
+		WorkerRef: &model.EntryWorkerRef{Name: "api-profiler"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	focusKey := wecomFocusKey("single", "U1", "U1")
+	bus.saveWeComFocus(ctx, focusKey, &wecomFocus{Worker: "other-w", Title: "另一个任务"})
+
+	// 1. While focused on other-w, quoting Corgi's WorkerRef report routes ONCE to Corgi Router
+	// without losing focus on other-w.
+	bus.HandleWeComMessage(ctx, wecom.IncomingMessage{
+		ReqID:     "req-quote-report",
+		MsgID:     "msg-quote-report",
+		ChatType:  "single",
+		ChatID:    "U1",
+		FromUser:  "U1",
+		Text:      "把 api-profiler 停掉吧",
+		QuoteText: "api-profiler 查完了，建议给 orders 表加联合索引。",
+	})
+	if f := bus.loadWeComFocus(ctx, focusKey); f == nil || f.Worker != "other-w" {
+		t.Fatalf("expected focus other-w preserved, got %+v", f)
+	}
+	mu.Lock()
+	if len(*streams) != 1 || (*streams)[0].reqID != "req-quote-report" || !strings.Contains((*streams)[0].content, "正在思考并分析你的请求") {
+		t.Fatalf("expected Corgi report quote routed to Router, got %+v", *streams)
+	}
+	*streams = nil
+	mu.Unlock()
+
+	// 2. Even quoting a historical legacy "[#api-profiler] ..." message in main chat goes to Corgi Router.
+	bus.saveWeComFocus(ctx, focusKey, nil)
+	bus.HandleWeComMessage(ctx, wecom.IncomingMessage{
+		ReqID:     "req-legacy-bracket",
+		MsgID:     "msg-legacy-bracket",
+		ChatType:  "single",
+		ChatID:    "U1",
+		FromUser:  "U1",
+		Text:      "帮我归档这个",
+		QuoteText: "[#api-profiler] 发现缺索引",
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*streams) != 1 || (*streams)[0].reqID != "req-legacy-bracket" || !strings.Contains((*streams)[0].content, "正在思考并分析你的请求") {
+		t.Fatalf("expected legacy [#worker] quote routed to Corgi Router, got %+v", *streams)
+	}
+}
+
+func TestDirectWorkerThinkPrefixAndLocalRemoteTimeoutConsistent(t *testing.T) {
+	eng, _, bus, streams, _, mu := openWeComStreamTestEnvWithStore(t)
+	ctx := context.Background()
+
+	// 1. Think prefix [直聊 #worker] is preserved on line 1 even after real tool/thinking lines arrive.
+	logPath := filepath.Join(t.TempDir(), "worker.jsonl")
+	content := `{"type":"message","role":"user","content":[{"type":"input_text","text":"查日志"}]}` + "\n" +
+		`{"type":"function_call","name":"Bash","arguments":{"command":"tail -n 20 app.log","description":"查看最近日志"}}` + "\n"
+	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, watchCtx := bus.openWorkerStream(ctx, model.MainThread, "U1", "req-think", "log-worker", "日志排查", true, "log-worker")
+	if st == nil || watchCtx == nil {
+		t.Fatal("expected openWorkerStream to succeed")
+	}
+	st.pollMu.Lock()
+	st.locateFn = func(context.Context) (string, agent.Adapter) { return logPath, &agent.CodeBuddyAdapter{} }
+	st.pollMu.Unlock()
+	st.attachLocalTranscript(ctx, false)
+	think, _ := st.pollLocalThink(ctx, false)
+	if !strings.HasPrefix(think, "[直聊 #log-worker]\n") || !strings.Contains(think, "查看最近日志") {
+		t.Fatalf("expected [直聊 #log-worker] preserved above tool steps, got %q", think)
+	}
+	st.abort()
+
+	// 2. Local worker timeout seal carries dedicated direct header + footer.
+	mu.Lock()
+	*streams = nil
+	mu.Unlock()
+	localSt, localCtx := bus.openWorkerStream(ctx, model.MainThread, "U1", "req-local-to", "local-w", "本地直聊", true, "local-w")
+	localTimer := time.NewTimer(10 * time.Millisecond)
+	bus.watchLocalWorkerTranscript(localCtx, localTimer, localSt, "local-w", "", nil)
+	localTimer.Stop()
+
+	mu.Lock()
+	var localFin *capturedStreamFrame
+	for i := range *streams {
+		if (*streams)[i].finish {
+			localFin = &(*streams)[i]
+		}
+	}
+	mu.Unlock()
+	if localFin == nil || !strings.Contains(localFin.content, "↳ 直聊 · #local-w 仍在后台处理中，完成后会自动发给你。") ||
+		!strings.Contains(localFin.content, "↳ 直聊中 · 本地直聊（#local-w）") {
+		t.Fatalf("unexpected local timeout seal: %+v", localFin)
+	}
+
+	// 3. Remote worker timeout seals (both nil-fleet and offline-remote paths) carry identical direct header + footer.
+	for _, withFleet := range []bool{false, true} {
+		if withFleet {
+			eng.SetFleet(fleet.NewFleet(nil, "hub", t.TempDir(), "test", []string{"claude"}))
+		} else {
+			eng.SetFleet(nil)
+		}
+		mu.Lock()
+		*streams = nil
+		mu.Unlock()
+		remSt, remCtx := bus.openWorkerStream(ctx, model.MainThread, "U1", "req-remote-to", "remote-w", "远程直聊", true, "remote-w")
+		remTimer := time.NewTimer(10 * time.Millisecond)
+		bus.watchRemoteWorkerSSE(remCtx, remTimer, remSt, "remote-w", "mac-offline", "w1:p1@mac-offline", remSt.initThink)
+		remTimer.Stop()
+
+		mu.Lock()
+		var remFin *capturedStreamFrame
+		for i := range *streams {
+			if (*streams)[i].finish {
+				remFin = &(*streams)[i]
+			}
+		}
+		mu.Unlock()
+		if remFin == nil || !strings.Contains(remFin.content, "↳ 直聊 · #remote-w 仍在后台处理中，完成后会自动发给你。") ||
+			!strings.Contains(remFin.content, "↳ 直聊中 · 远程直聊（#remote-w）") {
+			t.Fatalf("unexpected remote timeout seal (withFleet=%v): %+v", withFleet, remFin)
+		}
 	}
 }

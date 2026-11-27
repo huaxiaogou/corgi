@@ -20,12 +20,17 @@ import (
 )
 
 type activeWeComStream struct {
-	session   *wecom.StreamSession
-	chatID    string
-	thread    string
-	cancel    context.CancelFunc
-	startedAt time.Time
-	initThink string
+	session            *wecom.StreamSession
+	chatID             string
+	thread             string
+	cancel             context.CancelFunc
+	startedAt          time.Time
+	initThink          string
+	thinkPrefix        string
+	workerName         string
+	workerTitle        string
+	inFocusMode        bool
+	currentFocusWorker string
 
 	pollMu       sync.Mutex
 	triggerID    string
@@ -155,22 +160,29 @@ func (b *Bus) startRouterStream(ctx context.Context, thread, chatID, reqID strin
 	return st
 }
 
-func (b *Bus) openWorkerStream(ctx context.Context, thread, chatID, reqID, workerName string) (*activeWeComStream, context.Context) {
+func (b *Bus) openWorkerStream(ctx context.Context, thread, chatID, reqID, workerName, workerTitle string, inFocusMode bool, currentFocusWorker string) (*activeWeComStream, context.Context) {
 	reqID = strings.TrimSpace(reqID)
 	if reqID == "" || !b.canSendStream() {
 		return nil, nil
 	}
 	watchCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	sess := wecom.NewStreamSession(reqID, chatID, b.sendStreamFn)
-	initThink := fmt.Sprintf("正在连接 #%s 并开始思考…", workerName)
+	workerName = strings.TrimSpace(workerName)
+	thinkPrefix := fmt.Sprintf("[直聊 #%s]", workerName)
+	initThink := fmt.Sprintf("%s 正在连接并开始思考…", thinkPrefix)
 	st := &activeWeComStream{
-		session:      sess,
-		chatID:       chatID,
-		thread:       thread,
-		cancel:       cancel,
-		startedAt:    time.Now(),
-		initThink:    initThink,
-		lastChangeAt: time.Now(),
+		session:            sess,
+		chatID:             chatID,
+		thread:             thread,
+		cancel:             cancel,
+		startedAt:          time.Now(),
+		initThink:          initThink,
+		thinkPrefix:        thinkPrefix,
+		workerName:         workerName,
+		workerTitle:        strings.TrimSpace(workerTitle),
+		inFocusMode:        inFocusMode,
+		currentFocusWorker: strings.TrimSpace(currentFocusWorker),
+		lastChangeAt:       time.Now(),
 	}
 	if err := sess.SendProgress(watchCtx, initThink, "", true); err != nil {
 		b.logger.Debug("send initial wecom worker stream frame failed", "worker", workerName, "err", err)
@@ -184,12 +196,59 @@ func (b *Bus) beginWatchWorkerStream(watchCtx context.Context, st *activeWeComSt
 	if st == nil || watchCtx == nil {
 		return
 	}
-	initThink := fmt.Sprintf("已转发给 #%s（%s），正在思考…", workerName, machineLabel)
+	workerName = strings.TrimSpace(workerName)
+	thinkPrefix := fmt.Sprintf("[直聊 #%s]", workerName)
+	initThink := fmt.Sprintf("%s 已转发（%s），正在思考…", thinkPrefix, machineLabel)
 	st.pollMu.Lock()
+	st.workerName = workerName
+	st.thinkPrefix = thinkPrefix
 	st.initThink = initThink
 	st.pollMu.Unlock()
 	_ = st.session.SendProgress(watchCtx, initThink, "", false)
 	go b.watchWorkerStream(watchCtx, st, workerName, initThink)
+}
+
+func applyThinkPrefix(prefix, think string) string {
+	prefix = strings.TrimSpace(prefix)
+	think = strings.TrimSpace(think)
+	if prefix == "" || think == "" {
+		return think
+	}
+	if strings.HasPrefix(think, prefix) {
+		return think
+	}
+	return prefix + "\n" + think
+}
+
+func (st *activeWeComStream) getThinkPrefix() string {
+	if st == nil {
+		return ""
+	}
+	st.pollMu.Lock()
+	defer st.pollMu.Unlock()
+	return st.thinkPrefix
+}
+
+func formatDirectTimeoutBody(st *activeWeComStream, workerName string) string {
+	title := ""
+	inFocus := false
+	curFocus := ""
+	if st != nil {
+		st.pollMu.Lock()
+		if workerName == "" {
+			workerName = st.workerName
+		}
+		title = st.workerTitle
+		inFocus = st.inFocusMode
+		curFocus = st.currentFocusWorker
+		st.pollMu.Unlock()
+	}
+	workerName = strings.TrimSpace(workerName)
+	body := fmt.Sprintf("↳ 直聊 · #%s 仍在后台处理中，完成后会自动发给你。", workerName)
+	if footer := formatDirectFooter(title, workerName, inFocus, curFocus); footer != "" {
+		body += "\n\n" + footer
+	}
+	return body
 }
 
 func (st *activeWeComStream) attachLocalTranscript(ctx context.Context, isBaseline bool) {
@@ -241,6 +300,7 @@ func (st *activeWeComStream) pollLocalThink(ctx context.Context, recheckPath boo
 	tr := st.tr
 	baseAt := st.baselineAt
 	fallback := st.initThink
+	prefix := st.thinkPrefix
 	st.pollMu.Unlock()
 	if tr == nil {
 		return "", false
@@ -260,7 +320,7 @@ func (st *activeWeComStream) pollLocalThink(ctx context.Context, recheckPath boo
 		st.pollMu.Unlock()
 	}
 	recent := filterMessagesAfterOffset(msgs, baseAt)
-	return formatProgressThink(sliceAfterLastUser(recent, 0), fallback), polled
+	return applyThinkPrefix(prefix, formatProgressThink(sliceAfterLastUser(recent, 0), fallback)), polled
 }
 
 func filterMessagesAfterOffset(msgs []*model.Message, afterOffset int64) []*model.Message {
@@ -557,7 +617,7 @@ func (b *Bus) watchWorkerStream(ctx context.Context, st *activeWeComStream, work
 	}
 
 	if machine != "" && paneID != "" {
-		b.watchRemoteWorkerSSE(ctx, timer, st, machine, paneID, initThink)
+		b.watchRemoteWorkerSSE(ctx, timer, st, workerName, machine, paneID, initThink)
 		return
 	}
 	b.watchLocalWorkerTranscript(ctx, timer, st, workerName, localPath, ad)
@@ -586,7 +646,7 @@ func (b *Bus) watchLocalWorkerTranscript(ctx context.Context, timer *time.Timer,
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			_, _ = st.seal(ctx, "", fmt.Sprintf("[#%s] 仍在后台处理中，完成后会自动发给你。", workerName))
+			_, _ = st.seal(ctx, "", formatDirectTimeoutBody(st, workerName))
 			return
 		case <-tick.C:
 			if st.session.Finished() {
@@ -601,11 +661,14 @@ func (b *Bus) watchLocalWorkerTranscript(ctx context.Context, timer *time.Timer,
 	}
 }
 
-func (b *Bus) watchRemoteWorkerSSE(ctx context.Context, timer *time.Timer, st *activeWeComStream, machine, paneID, initThink string) {
+func (b *Bus) watchRemoteWorkerSSE(ctx context.Context, timer *time.Timer, st *activeWeComStream, workerName, machine, paneID, initThink string) {
 	fl := b.engine.Fleet()
 	if fl == nil {
-		<-timer.C
-		_, _ = st.seal(ctx, "", "仍在后台处理中，完成后会自动发给你。")
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+			_, _ = st.seal(ctx, "", formatDirectTimeoutBody(st, workerName))
+		}
 		return
 	}
 	_, hc, ok := fl.RemoteMachineByID(machine)
@@ -613,7 +676,7 @@ func (b *Bus) watchRemoteWorkerSSE(ctx context.Context, timer *time.Timer, st *a
 		select {
 		case <-ctx.Done():
 		case <-timer.C:
-			_, _ = st.seal(ctx, "", "仍在后台处理中，完成后会自动发给你。")
+			_, _ = st.seal(ctx, "", formatDirectTimeoutBody(st, workerName))
 		}
 		return
 	}
@@ -624,7 +687,7 @@ func (b *Bus) watchRemoteWorkerSSE(ctx context.Context, timer *time.Timer, st *a
 		select {
 		case <-sseCtx.Done():
 		case <-timer.C:
-			_, _ = st.seal(ctx, "", "仍在后台处理中，完成后会自动发给你。")
+			_, _ = st.seal(ctx, "", formatDirectTimeoutBody(st, workerName))
 			cancelSSE()
 		}
 	}()
@@ -684,7 +747,7 @@ func (b *Bus) watchRemoteWorkerSSE(ctx context.Context, timer *time.Timer, st *a
 				return
 			}
 			delta := orderedMessagesSince(msgMap, baselineIdx)
-			if think := formatProgressThink(sliceAfterLastUser(delta, 0), initThink); think != "" {
+			if think := applyThinkPrefix(st.getThinkPrefix(), formatProgressThink(sliceAfterLastUser(delta, 0), initThink)); think != "" {
 				_ = st.session.SendProgress(sseCtx, think, "", false)
 			}
 		case "live":
