@@ -154,8 +154,17 @@ export interface Thread {
   last_at: string;
 }
 
+export interface MediaRef {
+  path: string;
+  machine?: string;
+  name?: string;
+  mime?: string;
+  size?: number;
+}
+
 export interface RouterView {
   alive: boolean;
+  mode?: "pty" | "api" | string;
   status: string;
   pane_id?: string;
   kind: string;
@@ -313,7 +322,19 @@ export interface TriggerView {
   status: string;
 }
 
+export interface RouterAPISecretStatus {
+  has_router_api_key: boolean;
+  router_api_key_masked?: string;
+  router_api_key_bound_origin?: string;
+  router_api_key_origin_match?: boolean;
+}
+
 export interface Settings {
+  router_mode?: "pty" | "api" | string;
+  router_api_provider?: "tokenhub" | "openai" | string;
+  router_api_base_url?: string;
+  router_api_model?: string;
+  router_api_effort?: string;
   router_kind: string;
   router_model?: string;
   router_effort?: string;

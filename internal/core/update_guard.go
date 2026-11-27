@@ -30,7 +30,7 @@ func (e *Engine) isHubUpdating() bool {
 // exclusive reservation blocking new Router/Dream/Handover transitions until release()
 // is invoked (or the process replaces itself via syscall.Exec).
 func (e *Engine) TryReserveHubRestart(ctx context.Context) (func(), bool, string) {
-	if e.fleet != nil {
+	if !e.isAPIRouterMode() && e.fleet != nil {
 		ags, scanned, err := e.fleet.AgentsWithScanned(ctx)
 		if err != nil || !scanned[""] {
 			return nil, false, "本地 herdr 状态暂不可用"
@@ -59,7 +59,7 @@ func (e *Engine) TryReserveHubRestart(ctx context.Context) (func(), bool, string
 	case e.handover != nil:
 		e.mu.Unlock()
 		return nil, false, "Corgi 正在交接会话"
-	case e.routerLaunching || e.routerDispatching || !e.routerAskedAt.IsZero():
+	case e.apiTurn != nil || e.routerLaunching || e.routerDispatching || !e.routerAskedAt.IsZero():
 		e.mu.Unlock()
 		return nil, false, "Corgi 正在回复或启动中"
 	case e.settings.Paused:
@@ -144,7 +144,7 @@ func (e *Engine) checkAutoUpdate(ctx context.Context, live map[string]liveInfo, 
 	updater := e.autoUpdater
 	enabled := e.settings.AutoUpdate
 	lastCheck := e.lastAutoUpdateCheck
-	busy := e.dream != nil || e.handover != nil || e.hubUpdating || e.routerLaunching || e.routerDispatching || !e.routerAskedAt.IsZero() || e.settings.Paused
+	busy := e.dream != nil || e.handover != nil || e.hubUpdating || e.apiTurn != nil || e.routerLaunching || e.routerDispatching || !e.routerAskedAt.IsZero() || e.settings.Paused
 	runCtx := e.runCtx
 	e.mu.Unlock()
 	if updater == nil || !enabled || busy || hasRouterQueued || now.Sub(lastCheck) < time.Minute {

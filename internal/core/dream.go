@@ -682,7 +682,7 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 			"", []string{"派人去修", "先不用"}, false)
 	}
 	e.notifyChanged()
-	if !e.isLocalRouterAlive(ctx) {
+	if !e.isAPIRouterMode() && !e.isLocalRouterAlive(ctx) {
 		e.ensureRouter(ctx)
 	}
 }

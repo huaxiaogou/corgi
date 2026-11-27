@@ -186,8 +186,17 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_expires ON artifacts(expires_at);
 // Store provides incremental, WAL-backed SQLite persistence for Corgi.
 type Store struct {
 	db    *sql.DB
+	path  string
 	seqMu sync.Mutex
 	seq   int64
+}
+
+// DBPath returns the filesystem path of the SQLite database (empty for in-memory stores).
+func (s *Store) DBPath() string {
+	if s == nil || s.path == ":memory:" {
+		return ""
+	}
+	return s.path
 }
 
 // Open opens (or creates) the SQLite database at path and applies schema migrations.
@@ -207,7 +216,7 @@ func Open(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate sqlite: %w", err)
@@ -400,6 +409,38 @@ func (s *Store) SaveSettings(ctx context.Context, st model.Settings) error {
 		return fmt.Errorf("encode settings: %w", err)
 	}
 	return s.SetKV(ctx, "settings", string(b))
+}
+
+const routerAPISecretKVKey = "router_api_secret"
+
+// LoadRouterAPISecret loads the stored API Router secret bound to its origin.
+func (s *Store) LoadRouterAPISecret(ctx context.Context) (*model.RouterAPISecret, error) {
+	raw, ok, err := s.GetKV(ctx, routerAPISecretKVKey)
+	if err != nil || !ok || raw == "" {
+		return nil, err
+	}
+	var sec model.RouterAPISecret
+	if err := json.Unmarshal([]byte(raw), &sec); err != nil {
+		return nil, fmt.Errorf("decode router_api_secret: %w", err)
+	}
+	if sec.APIKey == "" {
+		return nil, nil
+	}
+	return &sec, nil
+}
+
+// SaveRouterAPISecret persists the API Router secret separately from public Settings.
+func (s *Store) SaveRouterAPISecret(ctx context.Context, sec model.RouterAPISecret) error {
+	b, err := json.Marshal(sec)
+	if err != nil {
+		return fmt.Errorf("encode router_api_secret: %w", err)
+	}
+	return s.SetKV(ctx, routerAPISecretKVKey, string(b))
+}
+
+// DeleteRouterAPISecret removes the stored API Router secret.
+func (s *Store) DeleteRouterAPISecret(ctx context.Context) error {
+	return s.DeleteKV(ctx, routerAPISecretKVKey)
 }
 
 // LoadPolicies loads fast-path source policies from kv, falling back to defaults.

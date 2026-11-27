@@ -445,7 +445,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 	// normal plain-text WeCom delivery below (never cardified and never sealed with "请在下方卡片选择 👇").
 	if action != nil && action.IsDecision() {
 		b.clearPendingWebQuote(entry.Thread)
-		st := b.takeRouterStream(entry.Thread)
+		st := b.takeRouterStreamForReply(entry.Thread, entry)
 		if st != nil && st.chatID != "" && chatID == "" {
 			chatID = st.chatID
 		}
@@ -479,7 +479,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 	// Per-recipient causal FIFO Delivery Gate:
 	// Take any open Router stream up front so canonical recipient chatID is unified across
 	// streams, immediate replies, file deliveries, and outbox retries.
-	st := b.takeRouterStream(entry.Thread)
+	st := b.takeRouterStreamForReply(entry.Thread, entry)
 	streamChatID := ""
 	if st != nil {
 		streamChatID = st.chatID
@@ -982,6 +982,7 @@ func (b *Bus) HandleWeComMessage(ctx context.Context, msg wecom.IncomingMessage)
 	b.mu.Unlock()
 
 	text := msg.Text
+	var mediaRefs []model.MediaRef
 	if len(msg.Attachments) > 0 && uploadDir != "" {
 		var saved []string
 		for _, att := range msg.Attachments {
@@ -991,6 +992,10 @@ func (b *Bus) HandleWeComMessage(ctx context.Context, msg wecom.IncomingMessage)
 				continue
 			}
 			saved = append(saved, p)
+			mediaRefs = append(mediaRefs, model.MediaRef{
+				Path: p,
+				Name: filepath.Base(p),
+			})
 		}
 		if len(saved) > 0 {
 			if text != "" {
@@ -1018,12 +1023,13 @@ func (b *Bus) HandleWeComMessage(ctx context.Context, msg wecom.IncomingMessage)
 		replyChatID = msg.FromUser
 	}
 	st := b.startRouterStream(ctx, thread, replyChatID, msg.ReqID)
-	_, _, err := b.engine.Say(ctx, core.SayRequest{
+	en, trig, err := b.engine.Say(ctx, core.SayRequest{
 		Thread:    thread,
 		Channel:   "wecom",
 		From:      msg.FromUser,
 		Text:      text,
 		QuoteText: msg.QuoteText,
+		Media:     mediaRefs,
 		IdemKey:   "wecom:" + msg.MsgID,
 	})
 	if err != nil {
@@ -1032,6 +1038,17 @@ func (b *Bus) HandleWeComMessage(ctx context.Context, msg wecom.IncomingMessage)
 			b.clearRouterStreamIfMatch(st)
 			_, _ = st.seal(ctx, "", "接收消息失败："+err.Error())
 		}
+		return
+	}
+	if st != nil {
+		entryID, trigID := "", ""
+		if en != nil {
+			entryID = en.ID
+		}
+		if trig != nil {
+			trigID = trig.ID
+		}
+		st.setRefIDs(entryID, trigID)
 	}
 }
 

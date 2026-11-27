@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import type { FleetUpdateController } from "../../hooks/useFleetUpdate";
 import { api } from "../../lib/api";
-import type { DeviceView, Machine, MemorySnapshot, PendingWeComUser, Policy, Settings, Timer, TriggerView } from "../../types/api";
+import type {
+  DeviceView,
+  Machine,
+  MemorySnapshot,
+  PendingWeComUser,
+  Policy,
+  RouterAPISecretStatus,
+  Settings,
+  Timer,
+  TriggerView,
+} from "../../types/api";
 import { DevicesTab } from "./DevicesTab";
 import { HooksTab } from "./HooksTab";
 import { MemoryTab } from "./MemoryTab";
@@ -13,6 +23,10 @@ type TabKey = "settings" | "projects" | "hooks" | "memory" | "timers" | "devices
 
 interface SettingsResp {
   settings: Settings;
+  has_router_api_key?: boolean;
+  router_api_key_masked?: string;
+  router_api_key_bound_origin?: string;
+  router_api_key_origin_match?: boolean;
   effective_public_url?: string;
   flag_public_url?: string;
   policies: Policy[];
@@ -42,6 +56,7 @@ export function AutomationView({
 }) {
   const [tab, setTab] = useState<TabKey>("settings");
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [routerAPISecret, setRouterAPISecret] = useState<RouterAPISecretStatus>({ has_router_api_key: false });
   const [effectivePublicURL, setEffectivePublicURL] = useState("");
   const [flagPublicURL, setFlagPublicURL] = useState("");
   const [wecomOnline, setWecomOnline] = useState(false);
@@ -60,6 +75,12 @@ export function AutomationView({
   const loadSettingsMeta = useCallback(async () => {
     const r = await api<SettingsResp>("/api/super/settings");
     setSettings(r.settings);
+    setRouterAPISecret({
+      has_router_api_key: Boolean(r.has_router_api_key),
+      router_api_key_masked: r.router_api_key_masked ?? "",
+      router_api_key_bound_origin: r.router_api_key_bound_origin ?? "",
+      router_api_key_origin_match: Boolean(r.router_api_key_origin_match),
+    });
     setEffectivePublicURL(r.effective_public_url ?? "");
     setFlagPublicURL(r.flag_public_url ?? "");
     setWecomOnline(r.wecom_online);
@@ -158,9 +179,12 @@ export function AutomationView({
           {tab === "settings" && settings && (
             <SettingsTab
               settings={settings}
+              routerAPISecret={routerAPISecret}
               hubAgents={hubAgents}
               machines={machines}
               onSavePatch={patchSettings}
+              onUpdateAPISecret={setRouterAPISecret}
+              onToast={onToast}
             />
           )}
           {tab === "projects" && settings && (

@@ -591,11 +591,7 @@ func (e *Engine) rerouteFaultedWorkerTriggers(ctx context.Context, w *model.Work
 		if t.Seq > maxSeq {
 			maxSeq = t.Seq
 		}
-		t.Targets = removeStr(t.Targets, w.Name)
-		if len(t.Targets) == 0 {
-			t.Status = "delivered"
-		}
-		_ = e.store.UpdateTrigger(ctx, t)
+		_ = e.store.AckTriggerTarget(ctx, t.ID, w.Name)
 	}
 	wiTag := ""
 	if w.WorkItemID != "" {

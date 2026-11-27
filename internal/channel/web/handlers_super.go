@@ -28,11 +28,27 @@ func (s *Server) handleSuperSay(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.Channel == "" {
+	// Never trust caller-supplied ActionID on public /api/super/say (only server-created action
+	// resolution creates entries bound to an approved ActionID).
+	req.ActionID = ""
+	// Derive human provenance at trusted ingress instead of trusting caller-spoofed channel/from.
+	master, dev := s.identity(r)
+	if dev != nil && dev.Kind == "browser" {
 		req.Channel = "web"
-	}
-	if req.From == "" {
 		req.From = "you"
+	} else if master {
+		switch strings.ToLower(strings.TrimSpace(req.Channel)) {
+		case "cli":
+			req.Channel = "cli"
+		default:
+			req.Channel = "web"
+		}
+		if strings.TrimSpace(req.From) == "" {
+			req.From = "you"
+		}
+	} else {
+		req.Channel = "machine"
+		req.From = "machine"
 	}
 	queued, item, entry, trig, err := s.Engine.SubmitChatSay(r.Context(), req.SayRequest, req.Mode)
 	if err != nil {
@@ -241,9 +257,19 @@ func (s *Server) handleResolveAction(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	by := strings.TrimSpace(body.By)
-	if by == "" {
+	master, dev := s.identity(r)
+	by := "web"
+	if dev != nil && dev.Kind == "browser" {
 		by = "web"
+	} else if master {
+		switch strings.ToLower(strings.TrimSpace(body.By)) {
+		case "cli", "router", "web":
+			by = strings.ToLower(strings.TrimSpace(body.By))
+		default:
+			by = "web"
+		}
+	} else {
+		by = "machine"
 	}
 	var (
 		act *model.Action
@@ -711,13 +737,14 @@ func (s *Server) handleSuperDeleteTimer(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	st := s.Engine.Settings()
 	// Never return plaintext WeCom secret back to the browser; expose masked sentinel.
 	masked := st
 	if masked.WeComSecret != "" {
 		masked.WeComSecret = "••••••••"
 	}
+	secInfo := s.Engine.RouterAPISecretInfo(r.Context())
 	hookKey := ""
 	if s.Auth != nil {
 		hookKey = s.Auth.HookKey()
@@ -740,16 +767,20 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"settings":             masked,
-		"effective_public_url": s.Engine.EffectivePublicURL(),
-		"flag_public_url":      s.Engine.FlagPublicURL(),
-		"policies":             s.Engine.Policies(),
-		"wecom_online":         s.Bus.WeComOnline(),
-		"wecom_error":          wecomErr,
-		"wecom_pending":        wecomPending,
-		"hub_agents":           hubAgents,
-		"machines":             machines,
-		"hook_key":             hookKey,
+		"settings":                    masked,
+		"has_router_api_key":          secInfo.HasKey,
+		"router_api_key_masked":       secInfo.Masked,
+		"router_api_key_bound_origin": secInfo.BoundOrigin,
+		"router_api_key_origin_match": secInfo.OriginMatch,
+		"effective_public_url":        s.Engine.EffectivePublicURL(),
+		"flag_public_url":             s.Engine.FlagPublicURL(),
+		"policies":                    s.Engine.Policies(),
+		"wecom_online":                s.Bus.WeComOnline(),
+		"wecom_error":                 wecomErr,
+		"wecom_pending":               wecomPending,
+		"hub_agents":                  hubAgents,
+		"machines":                    machines,
+		"hook_key":                    hookKey,
 	})
 }
 
@@ -819,8 +850,23 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.Settings != nil && body.Settings.WeComSecret == "••••••••" {
-		body.Settings.WeComSecret = s.Engine.Settings().WeComSecret
+	if body.Settings != nil {
+		cur := s.Engine.Settings()
+		modifiesRouter := body.Settings.EffectiveRouterMode() != cur.EffectiveRouterMode() ||
+			body.Settings.RouterAPIProvider != cur.RouterAPIProvider ||
+			body.Settings.RouterAPIBaseURL != cur.RouterAPIBaseURL ||
+			body.Settings.RouterAPIModel != cur.RouterAPIModel ||
+			body.Settings.RouterAPIEffort != cur.RouterAPIEffort ||
+			body.Settings.RouterKind != cur.RouterKind ||
+			body.Settings.RouterModel != cur.RouterModel ||
+			body.Settings.RouterEffort != cur.RouterEffort
+		if modifiesRouter && !s.isOwnerRequest(r) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "仅 Hub 管理员或已配对浏览器可修改大脑配置"})
+			return
+		}
+		if body.Settings.WeComSecret == "••••••••" {
+			body.Settings.WeComSecret = cur.WeComSecret
+		}
 	}
 	if err := s.Engine.SaveConfig(r.Context(), body.Settings, body.Policies); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -840,6 +886,59 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleSetRouterAPIKey(w http.ResponseWriter, r *http.Request) {
+	if !s.isOwnerRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "仅 Hub 管理员或已配对浏览器可配置 API Key"})
+		return
+	}
+	var body struct {
+		Provider string `json:"provider"`
+		BaseURL  string `json:"base_url"`
+		APIKey   string `json:"api_key"`
+		Clear    bool   `json:"clear"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Clear {
+		if err := s.Engine.ClearRouterAPIKey(r.Context()); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "has_router_api_key": false})
+		return
+	}
+	info, err := s.Engine.SetRouterAPIKey(r.Context(), body.Provider, body.BaseURL, body.APIKey)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                          true,
+		"has_router_api_key":          info.HasKey,
+		"router_api_key_masked":       info.Masked,
+		"router_api_key_bound_origin": info.BoundOrigin,
+		"router_api_key_origin_match": info.OriginMatch,
+	})
+}
+
+func (s *Server) handleTestRouterAPI(w http.ResponseWriter, r *http.Request) {
+	if !s.isOwnerRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "仅 Hub 管理员或已配对浏览器可测试大脑 API"})
+		return
+	}
+	var body core.TestRouterAPIRequest
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	res := s.Engine.TestRouterAPI(r.Context(), body)
+	code := http.StatusOK
+	if !res.OK {
+		code = http.StatusBadRequest
+	}
+	writeJSON(w, code, res)
 }
 
 func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {

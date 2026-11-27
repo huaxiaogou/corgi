@@ -28,11 +28,41 @@ type activeWeComStream struct {
 	initThink string
 
 	pollMu       sync.Mutex
+	triggerID    string
+	entryID      string
 	locateFn     func(context.Context) (string, agent.Adapter)
 	tr           *agent.TranscriptReader
 	lastPath     string
 	baselineAt   int64
 	lastChangeAt time.Time
+}
+
+func (st *activeWeComStream) setRefIDs(entryID, triggerID string) {
+	if st == nil {
+		return
+	}
+	st.pollMu.Lock()
+	st.entryID = strings.TrimSpace(entryID)
+	st.triggerID = strings.TrimSpace(triggerID)
+	st.pollMu.Unlock()
+}
+
+func (st *activeWeComStream) getTriggerID() string {
+	if st == nil {
+		return ""
+	}
+	st.pollMu.Lock()
+	defer st.pollMu.Unlock()
+	return st.triggerID
+}
+
+func (st *activeWeComStream) getEntryID() string {
+	if st == nil {
+		return ""
+	}
+	st.pollMu.Lock()
+	defer st.pollMu.Unlock()
+	return st.entryID
 }
 
 func (b *Bus) canSendStream() bool {
@@ -303,6 +333,90 @@ func (b *Bus) takeRouterStream(thread string) *activeWeComStream {
 // or by watchRouterStream's continuous-idle safety guard so brief mid-turn tool flickers
 // never prematurely split a WeCom reply into two bubbles.
 func (b *Bus) OnRouterTurnEnd(context.Context) {}
+
+// OnAPIRouterTurnEnd deterministically and idempotently seals ONLY the WeCom stream bound
+// to triggerID when an in-process API Router turn finishes without emitting an OnReply
+// (e.g. deliberate silence, cancellation, or provider error), never popping another message's stream.
+func (b *Bus) OnAPIRouterTurnEnd(ctx context.Context, thread, triggerID, reason string) {
+	triggerID = strings.TrimSpace(triggerID)
+	if thread == "" || triggerID == "" {
+		return
+	}
+	st := b.takeRouterStreamByTrigger(thread, triggerID)
+	if st == nil {
+		return
+	}
+	msg := "已处理完成。"
+	switch strings.TrimSpace(reason) {
+	case "cancelled":
+		msg = "已停止当前处理。"
+	case "error":
+		msg = "处理遇到异常，稍后可重试。"
+	case "dispatched":
+		msg = "已安排处理，有进展会同步给你。"
+	case "silent":
+		msg = "已处理，如需进一步操作请告诉我。"
+	}
+	_, _ = st.seal(ctx, "", msg)
+}
+
+func (b *Bus) takeRouterStreamByTrigger(thread, triggerID string) *activeWeComStream {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	q := b.routerStreams[thread]
+	for i, st := range q {
+		if st.getTriggerID() == triggerID {
+			q = append(q[:i], q[i+1:]...)
+			if len(q) == 0 {
+				delete(b.routerStreams, thread)
+			} else {
+				b.routerStreams[thread] = q
+			}
+			return st
+		}
+	}
+	return nil
+}
+
+// takeRouterStreamForReply prefers matching an exact WeCom stream by quoted entry ID (so a
+// concurrent Web reply on chat:main cannot pop a WeCom user's stream), falling back to FIFO
+// only when the reply does not reference a known non-WeCom entry.
+func (b *Bus) takeRouterStreamForReply(thread string, entry *model.Entry) *activeWeComStream {
+	reEntry := ""
+	if entry != nil && entry.Re != nil {
+		reEntry = strings.TrimSpace(entry.Re.Entry)
+	}
+	if reEntry != "" {
+		b.mu.Lock()
+		q := b.routerStreams[thread]
+		for i, st := range q {
+			if st.getEntryID() == reEntry {
+				q = append(q[:i], q[i+1:]...)
+				if len(q) == 0 {
+					delete(b.routerStreams, thread)
+				} else {
+					b.routerStreams[thread] = q
+				}
+				b.mu.Unlock()
+				return st
+			}
+		}
+		// If the reply explicitly quotes an entry and we have active streams whose entryIDs are
+		// already bound to OTHER entries, check if the quoted entry came from Web (never steal WeCom's stream).
+		hasBoundStreams := len(q) > 0
+		for _, st := range q {
+			if st.getEntryID() == "" {
+				hasBoundStreams = false
+				break
+			}
+		}
+		b.mu.Unlock()
+		if hasBoundStreams {
+			return nil
+		}
+	}
+	return b.takeRouterStream(thread)
+}
 
 func (b *Bus) watchRouterStream(ctx context.Context, st *activeWeComStream) {
 	timer := time.NewTimer(wecom.StreamMaxDuration)

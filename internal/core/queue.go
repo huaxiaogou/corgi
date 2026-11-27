@@ -258,6 +258,7 @@ func (e *Engine) SubmitChatSay(ctx context.Context, req SayRequest, mode string)
 				Model:       req.Model,
 				Effort:      req.Effort,
 				ProjectID:   req.ProjectID,
+				Media:       append([]model.MediaRef(nil), req.Media...),
 				ClientMsgID: clientMsgID,
 				CreatedAt:   time.Now(),
 			}
@@ -300,6 +301,7 @@ func (e *Engine) SteerChatPrompt(ctx context.Context, thread, qid string) (*mode
 		Model:       item.Model,
 		Effort:      item.Effort,
 		ProjectID:   item.ProjectID,
+		Media:       append([]model.MediaRef(nil), item.Media...),
 		ClientMsgID: item.ClientMsgID,
 	}, true)
 	if err != nil {
@@ -313,8 +315,22 @@ func (e *Engine) SteerChatPrompt(ctx context.Context, thread, qid string) (*mode
 	return entry, trig, nil
 }
 
-// StopRouter sends Esc to Corgi Router's terminal pane and pauses router auto-drain if messages are queued.
+// StopRouter interrupts Corgi Router (cancels the active API turn or sends Esc to PTY)
+// and pauses router auto-drain if messages are queued.
 func (e *Engine) StopRouter(ctx context.Context, thread string) (bool, error) {
+	if e.isAPIRouterMode() {
+		thread = orStr(strings.TrimSpace(thread), model.MainThread)
+		scope := RouterQueueScope(thread)
+		items, _ := e.store.ListQueuedPrompts(ctx, scope)
+		paused := len(items) > 0
+		// Pause auto-drain BEFORE cancelling so the settling turn's wake() cannot promote the next queued prompt.
+		if paused {
+			e.setQueuePaused(scope, true)
+		}
+		e.cancelAndSettleAPIRouterTurn(ctx, thread, true)
+		e.notifyChanged()
+		return paused, nil
+	}
 	if e.fleet == nil {
 		return false, fmt.Errorf("fleet not configured")
 	}
@@ -417,6 +433,12 @@ func (e *Engine) ChatQueueSnapshot(ctx context.Context, thread string) ([]*model
 }
 
 func (e *Engine) isRouterWorking(ctx context.Context) bool {
+	if e.isAPIRouterMode() {
+		e.mu.Lock()
+		busy := e.apiTurn != nil
+		e.mu.Unlock()
+		return busy
+	}
 	if e.fleet == nil {
 		return false
 	}
@@ -439,22 +461,31 @@ func (e *Engine) isRouterWorking(ctx context.Context) bool {
 // drainRouterPrompts promotes at most one queued web chat prompt into a real Entry+Trigger
 // once Router is idle and has no pending triggers waiting.
 func (e *Engine) drainRouterPrompts(ctx context.Context, live map[string]liveInfo) {
-	li, alive := live[model.RouterName]
-	if alive && li.status == "working" {
-		e.queueMu.Lock()
-		for k := range e.drainCooldown {
-			if strings.HasPrefix(k, routerQueuePrefix) {
-				delete(e.drainCooldown, k)
-			}
+	if e.isAPIRouterMode() {
+		e.mu.Lock()
+		busy := e.apiTurn != nil || e.hubUpdating || e.routerDispatching
+		e.mu.Unlock()
+		if busy {
+			return
 		}
-		e.queueMu.Unlock()
-		return
-	}
-	if alive && (li.status == "blocked" || (!li.ready && li.status == "unknown")) {
-		return
+	} else {
+		li, alive := live[model.RouterName]
+		if alive && li.status == "working" {
+			e.queueMu.Lock()
+			for k := range e.drainCooldown {
+				if strings.HasPrefix(k, routerQueuePrefix) {
+					delete(e.drainCooldown, k)
+				}
+			}
+			e.queueMu.Unlock()
+			return
+		}
+		if alive && (li.status == "blocked" || (!li.ready && li.status == "unknown")) {
+			return
+		}
 	}
 	e.mu.Lock()
-	if e.routerLaunching || e.hubUpdating || e.routerDispatching {
+	if e.routerLaunching || e.hubUpdating || e.routerDispatching || e.apiTurn != nil {
 		e.mu.Unlock()
 		return
 	}
@@ -496,6 +527,7 @@ func (e *Engine) drainRouterPrompts(ctx context.Context, live map[string]liveInf
 			Model:       item.Model,
 			Effort:      item.Effort,
 			ProjectID:   item.ProjectID,
+			Media:       append([]model.MediaRef(nil), item.Media...),
 			ClientMsgID: item.ClientMsgID,
 		}, false); err != nil {
 			e.logger.Warn("drain router queued prompt failed", "id", item.ID, "err", err)

@@ -100,20 +100,21 @@ type AgentView struct {
 
 // QueuedPrompt is one durable human prompt waiting for a busy agent pane or main Corgi chat thread.
 type QueuedPrompt struct {
-	ID        string    `json:"id"`
-	Seq       int64     `json:"seq,omitempty"`
-	Scope     string    `json:"scope"` // pane_id (for single agent) or "router:<thread>" (for main Corgi chat)
-	PaneID    string    `json:"pane_id,omitempty"`
-	Thread    string    `json:"thread,omitempty"`
-	Text      string    `json:"text"`
-	ReEntryID string    `json:"re,omitempty"`
-	Machine     string    `json:"machine,omitempty"`
-	Kind        string    `json:"kind,omitempty"`
-	Model       string    `json:"model,omitempty"`
-	Effort      string    `json:"effort,omitempty"`
-	ProjectID   string    `json:"project_id,omitempty"`
-	ClientMsgID string    `json:"client_msg_id,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string     `json:"id"`
+	Seq         int64      `json:"seq,omitempty"`
+	Scope       string     `json:"scope"` // pane_id (for single agent) or "router:<thread>" (for main Corgi chat)
+	PaneID      string     `json:"pane_id,omitempty"`
+	Thread      string     `json:"thread,omitempty"`
+	Text        string     `json:"text"`
+	ReEntryID   string     `json:"re,omitempty"`
+	Machine     string     `json:"machine,omitempty"`
+	Kind        string     `json:"kind,omitempty"`
+	Model       string     `json:"model,omitempty"`
+	Effort      string     `json:"effort,omitempty"`
+	ProjectID   string     `json:"project_id,omitempty"`
+	Media       []MediaRef `json:"media,omitempty"`
+	ClientMsgID string     `json:"client_msg_id,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 // PaneState is the aggregated fleet pane snapshot pushed over SSE.
@@ -233,6 +234,7 @@ type EndedSession struct {
 // RouterView summarizes the live state of Corgi's resident Router session.
 type RouterView struct {
 	Alive    bool   `json:"alive"`
+	Mode     string `json:"mode,omitempty"` // pty | api
 	Status   string `json:"status"`
 	PaneID   string `json:"pane_id,omitempty"`
 	Kind     string `json:"kind"`

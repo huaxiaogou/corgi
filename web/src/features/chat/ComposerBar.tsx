@@ -6,7 +6,7 @@ import { createIMETracker, classifyEnterKey } from "../../lib/composerInput";
 import { capturePasteSnapshot, resolvePastedFiles } from "../../lib/pasteImage";
 import { formatDispatchSummary, resolveEffectiveDispatch } from "../../lib/dispatchDefaults";
 import { getSupportedEfforts } from "../../lib/models";
-import type { Entry, Machine, ModelCatalog, WorkItem, WorkerDispatchDefaults } from "../../types/api";
+import type { Entry, Machine, MediaRef, ModelCatalog, WorkItem, WorkerDispatchDefaults } from "../../types/api";
 
 const ALL_KINDS = ["agy", "codebuddy", "codex", "claude"];
 const IMG_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
@@ -39,6 +39,7 @@ interface Props {
     model: string;
     effort: string;
     projectId: string;
+    media?: MediaRef[];
     clientMsgId: string;
   }) => Promise<void>;
   onToast: (msg: string) => void;
@@ -69,7 +70,7 @@ export function ComposerBar({
   const [projectId, setProjectId] = useState("");
   const [overrideOpen, setOverrideOpen] = useState(false);
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
-  const [attachments, setAttachments] = useState<{ name: string; path: string }[]>([]);
+  const [attachments, setAttachments] = useState<{ name: string; path: string; machine?: string; mime?: string; size?: number }[]>([]);
   const [dragging, setDragging] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -182,7 +183,10 @@ export function ComposerBar({
     for (const f of Array.from(files)) {
       try {
         const up = await uploadFile(f, targetMachine);
-        setAttachments((prev) => [...prev, { name: up.name, path: up.path }]);
+        setAttachments((prev) => [
+          ...prev,
+          { name: up.name, path: up.path, machine: targetMachine || "", mime: f.type || undefined, size: f.size },
+        ]);
       } catch (err) {
         onToast(err instanceof Error ? err.message : "上传失败");
       }
@@ -220,6 +224,16 @@ export function ComposerBar({
         model,
         effort,
         projectId,
+        media:
+          attachments.length > 0
+            ? attachments.map((a) => ({
+                path: a.path,
+                machine: a.machine || undefined,
+                name: a.name,
+                mime: a.mime,
+                size: a.size,
+              }))
+            : undefined,
         clientMsgId: msgId,
       });
       setText("");

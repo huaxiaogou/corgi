@@ -161,7 +161,11 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 
 	e.mu.Lock()
 	st := e.settings
+	apiMode := st.EffectiveRouterMode() == "api"
+	apiTurn := e.apiTurn
+	apiAuthPaused := e.apiAuthPaused
 	rv := model.RouterView{
+		Mode:     st.EffectiveRouterMode(),
 		Kind:     st.RouterKind,
 		Model:    st.RouterModel,
 		Effort:   st.RouterEffort,
@@ -171,11 +175,27 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 		Handover: e.handover != nil,
 		Dreaming: e.dream != nil,
 	}
-	if e.routerLaunching {
-		rv.Status = "starting"
-	}
-	if e.dream != nil {
-		rv.Status = "dreaming"
+	if apiMode {
+		rv.Kind = "api"
+		rv.Model = orStr(st.RouterAPIModel, TokenHubDefaultModel)
+		rv.Effort = st.RouterAPIEffort
+		rv.Context = 0
+		rv.RotateAt = 0
+		rv.Handover = false
+		if apiTurn != nil {
+			rv.Alive = true
+			rv.Status = "working"
+			rv.Replied = apiTurn.hasReplied()
+		} else if e.dream != nil {
+			rv.Status = "dreaming"
+		}
+	} else {
+		if e.routerLaunching {
+			rv.Status = "starting"
+		}
+		if e.dream != nil {
+			rv.Status = "dreaming"
+		}
 	}
 	askedAt := e.routerAskedAt
 	repliedAt := e.routerRepliedAt
@@ -183,7 +203,17 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 	sink := e.sink
 	e.mu.Unlock()
 
-	if e.fleet != nil {
+	if apiMode {
+		if rv.Status != "working" && rv.Status != "dreaming" {
+			if e.hasConfiguredRouterAPIKey(ctx, st) && !apiAuthPaused {
+				rv.Alive = true
+				rv.Status = "idle"
+			} else {
+				rv.Alive = false
+				rv.Status = "asleep"
+			}
+		}
+	} else if e.fleet != nil {
 		now := time.Now()
 		actx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		live, err := e.fleet.Agents(actx)

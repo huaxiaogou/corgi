@@ -36,6 +36,16 @@ type EntryWorkerRef struct {
 	WorkItemID string `json:"work_item_id,omitempty"`
 }
 
+// MediaRef identifies a trusted server-recorded uploaded or WeCom-downloaded media file
+// attached to a specific human message.
+type MediaRef struct {
+	Path    string `json:"path"`
+	Machine string `json:"machine,omitempty"`
+	Name    string `json:"name,omitempty"`
+	MIME    string `json:"mime,omitempty"`
+	Size    int64  `json:"size,omitempty"`
+}
+
 // Entry is one human-facing message or event in a conversation thread.
 type Entry struct {
 	ID          string            `json:"id"`
@@ -52,6 +62,7 @@ type Entry struct {
 	Options     []string          `json:"options,omitempty"`
 	Files       []string          `json:"files,omitempty"`
 	FileMachine string            `json:"file_machine,omitempty"`
+	Media       []MediaRef        `json:"media,omitempty"`
 	Artifacts   []ArtifactSummary `json:"artifacts,omitempty"`
 	WorkerRef   *EntryWorkerRef   `json:"worker_ref,omitempty"`
 	WorkItemID  string            `json:"work_item_id,omitempty"`
@@ -107,6 +118,7 @@ type WorkItem struct {
 	ID        string            `json:"id"`
 	Thread    string            `json:"thread"`
 	Title     string            `json:"title"`
+	Scope     string            `json:"scope,omitempty"` // "" | readonly | prototype | implement
 	NextStep  string            `json:"next_step,omitempty"`
 	Workers   []string          `json:"workers,omitempty"`
 	Branches  []string          `json:"branches,omitempty"`
@@ -137,21 +149,22 @@ type SearchResult struct {
 
 // Trigger is one durable event in the Super-Agent inbox.
 type Trigger struct {
-	ID         string    `json:"id"`
-	Seq        int64     `json:"seq"`
-	Source     string    `json:"source"` // chat | wecom | timer | worker | router | system
-	Thread     string    `json:"thread"`
-	From       string    `json:"from,omitempty"`
-	Text       string    `json:"text"`
-	At         time.Time `json:"at"`
-	Policy     string    `json:"policy"` // respond | candidate | ignore
-	Status     string    `json:"status"` // queued | delivered | ignored
-	Targets    []string  `json:"targets,omitempty"`
-	IdemKey    string    `json:"idem_key,omitempty"`
-	Ref        string    `json:"ref,omitempty"`
-	Steer      bool      `json:"steer,omitempty"`
-	ArtifactID string    `json:"artifact_id,omitempty"`
-	WorkItemID string    `json:"work_item_id,omitempty"`
+	ID         string     `json:"id"`
+	Seq        int64      `json:"seq"`
+	Source     string     `json:"source"` // chat | wecom | timer | worker | router | system
+	Thread     string     `json:"thread"`
+	From       string     `json:"from,omitempty"`
+	Text       string     `json:"text"`
+	At         time.Time  `json:"at"`
+	Policy     string     `json:"policy"` // respond | candidate | ignore
+	Status     string     `json:"status"` // queued | delivered | ignored
+	Targets    []string   `json:"targets,omitempty"`
+	IdemKey    string     `json:"idem_key,omitempty"`
+	Ref        string     `json:"ref,omitempty"`
+	Steer      bool       `json:"steer,omitempty"`
+	ArtifactID string     `json:"artifact_id,omitempty"`
+	WorkItemID string     `json:"work_item_id,omitempty"`
+	Media      []MediaRef `json:"media,omitempty"`
 }
 
 // Thread groups triggers and worker subscriptions for a conversation or WeCom group topic.
@@ -332,8 +345,21 @@ type ProjectWorkspace struct {
 	Paths   map[string]string `json:"paths,omitempty"`
 }
 
+// RouterAPISecret stores the API Router credential separately from public Settings,
+// bound to the exact HTTPS origin it was configured for.
+type RouterAPISecret struct {
+	APIKey      string    `json:"api_key"`
+	BoundOrigin string    `json:"bound_origin"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 // Settings holds durable Corgi configuration.
 type Settings struct {
+	RouterMode           string                                `json:"router_mode,omitempty"`         // pty (default) | api
+	RouterAPIProvider    string                                `json:"router_api_provider,omitempty"` // tokenhub | openai
+	RouterAPIBaseURL     string                                `json:"router_api_base_url,omitempty"`
+	RouterAPIModel       string                                `json:"router_api_model,omitempty"`
+	RouterAPIEffort      string                                `json:"router_api_effort,omitempty"`
 	RouterKind           string                                `json:"router_kind"`
 	RouterModel          string                                `json:"router_model,omitempty"`
 	RouterEffort         string                                `json:"router_effort,omitempty"`
@@ -363,6 +389,14 @@ type Settings struct {
 	WeComSecret          string                                `json:"wecom_secret,omitempty"`
 	WeComAllowUsers      []string                              `json:"wecom_allow_users,omitempty"`
 	WeComDefaultTo       string                                `json:"wecom_default_to,omitempty"` // default single-chat userid for proactive push
+}
+
+// EffectiveRouterMode returns the normalized router backend mode ("api" or "pty").
+func (s Settings) EffectiveRouterMode() string {
+	if strings.EqualFold(strings.TrimSpace(s.RouterMode), "api") {
+		return "api"
+	}
+	return "pty"
 }
 
 // MorningDigestEnabled reports whether daily morning summary digests are active (defaults to true).

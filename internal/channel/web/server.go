@@ -200,6 +200,8 @@ func (s *Server) registerSuperRoutes(mux *http.ServeMux, api func(string, http.H
 	api("POST /api/super/seen", s.handleSuperSeen)
 	api("POST /api/super/router/restart", s.handleRestartRouter)
 	api("POST /api/super/router/stop", s.handleStopRouter)
+	api("POST /api/super/router/api-key", s.handleSetRouterAPIKey)
+	api("POST /api/super/router/test-api", s.handleTestRouterAPI)
 	api("POST /api/super/queue/{qid}/steer", s.handleSteerChatQueue)
 	api("POST /api/super/queue/{qid}/cancel", s.handleCancelChatQueue)
 	api("POST /api/super/queue/resume", s.handleResumeChatQueue)
@@ -223,6 +225,13 @@ func (s *Server) identity(r *http.Request) (bool, *model.Device) {
 		return false, nil
 	}
 	return s.Auth.Verify(r.Context(), s.extractToken(r))
+}
+
+// isOwnerRequest reports whether the request is authenticated with the Hub master token
+// or an owner-paired browser session (excluding paired remote machine tokens).
+func (s *Server) isOwnerRequest(r *http.Request) bool {
+	master, dev := s.identity(r)
+	return master || (dev != nil && dev.Kind == "browser")
 }
 
 func (s *Server) auth(next http.Handler) http.Handler {

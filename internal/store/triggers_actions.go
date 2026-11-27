@@ -46,6 +46,135 @@ func (s *Store) UpdateTrigger(ctx context.Context, t *model.Trigger) error {
 	return nil
 }
 
+// ReplaceTriggerTargets transactionally stores resolved targets on a queued trigger when it
+// currently has no targets persisted yet, preserving any concurrent updates.
+func (s *Store) ReplaceTriggerTargets(ctx context.Context, id string, targets []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin replace trigger targets %s: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	var raw string
+	err = tx.QueryRowContext(ctx, `SELECT data FROM triggers WHERE id = ?`, id).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("read trigger %s: %w", id, err)
+	}
+	var t model.Trigger
+	if err := json.Unmarshal([]byte(raw), &t); err != nil {
+		return fmt.Errorf("decode trigger %s: %w", id, err)
+	}
+	if t.Status != "queued" || len(t.Targets) > 0 {
+		return nil
+	}
+	t.Targets = append([]string(nil), targets...)
+	data, err := mustJSON(&t)
+	if err != nil {
+		return fmt.Errorf("encode trigger %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE triggers SET data = ? WHERE id = ?`, data, id); err != nil {
+		return fmt.Errorf("update trigger targets %s: %w", id, err)
+	}
+	return tx.Commit()
+}
+
+// AckTriggerTarget transactionally removes target from a trigger's remaining Targets list and
+// marks the trigger delivered once no targets remain. Safe against concurrent deliveries to
+// other targets of the same trigger.
+func (s *Store) AckTriggerTarget(ctx context.Context, id, target string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin ack trigger %s: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	var raw string
+	err = tx.QueryRowContext(ctx, `SELECT data FROM triggers WHERE id = ?`, id).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read trigger %s: %w", id, err)
+	}
+	var t model.Trigger
+	if err := json.Unmarshal([]byte(raw), &t); err != nil {
+		return fmt.Errorf("decode trigger %s: %w", id, err)
+	}
+	if t.Status != "queued" {
+		return nil
+	}
+	rem := make([]string, 0, len(t.Targets))
+	for _, x := range t.Targets {
+		if x != target {
+			rem = append(rem, x)
+		}
+	}
+	t.Targets = rem
+	if len(rem) == 0 {
+		t.Status = "delivered"
+	}
+	data, err := mustJSON(&t)
+	if err != nil {
+		return fmt.Errorf("encode trigger %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE triggers SET status = ?, data = ? WHERE id = ?`, t.Status, data, id); err != nil {
+		return fmt.Errorf("ack trigger %s: %w", id, err)
+	}
+	return tx.Commit()
+}
+
+// RerouteTriggerTarget transactionally replaces oldTarget with newTarget on a queued trigger
+// without clobbering concurrent target updates.
+func (s *Store) RerouteTriggerTarget(ctx context.Context, id, oldTarget, newTarget string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin reroute trigger %s: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	var raw string
+	err = tx.QueryRowContext(ctx, `SELECT data FROM triggers WHERE id = ?`, id).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read trigger %s: %w", id, err)
+	}
+	var t model.Trigger
+	if err := json.Unmarshal([]byte(raw), &t); err != nil {
+		return fmt.Errorf("decode trigger %s: %w", id, err)
+	}
+	if t.Status != "queued" {
+		return nil
+	}
+	next := make([]string, 0, len(t.Targets)+1)
+	hasNew := false
+	for _, x := range t.Targets {
+		if x == oldTarget {
+			continue
+		}
+		if x == newTarget {
+			hasNew = true
+		}
+		next = append(next, x)
+	}
+	if newTarget != "" && !hasNew {
+		next = append(next, newTarget)
+	}
+	t.Targets = next
+	data, err := mustJSON(&t)
+	if err != nil {
+		return fmt.Errorf("encode trigger %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE triggers SET data = ? WHERE id = ?`, data, id); err != nil {
+		return fmt.Errorf("reroute trigger %s: %w", id, err)
+	}
+	return tx.Commit()
+}
+
 // GetTriggerByIdemKey loads an existing trigger by its unique non-empty idempotency key.
 func (s *Store) GetTriggerByIdemKey(ctx context.Context, idemKey string) (*model.Trigger, error) {
 	idemKey = strings.TrimSpace(idemKey)

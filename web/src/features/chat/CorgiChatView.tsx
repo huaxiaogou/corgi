@@ -1331,7 +1331,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
           onClearReply={() => setReplyTo(null)}
           onClearLinkedWork={() => setLinkedWork(null)}
           onToast={onToast}
-          onSend={async ({ text, machine, kind, model, effort, projectId, clientMsgId }) => {
+          onSend={async ({ text, machine, kind, model, effort, projectId, media, clientMsgId }) => {
             const reId = replyTo?.id ?? "";
             const finalText = linkedWork ? formatWorkItemPrompt(linkedWork, text) : text;
             const shouldQueue = router?.status === "working" || effectiveQueue.length > 0;
@@ -1349,6 +1349,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                 model,
                 effort,
                 project_id: projectId,
+                media,
                 client_msg_id: clientMsgId,
                 mode: shouldQueue ? "queue" : "auto",
               });

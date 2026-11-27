@@ -57,21 +57,22 @@ type SpawnRequest struct {
 
 // SayRequest represents an incoming human message from Web, WeCom, or CLI.
 type SayRequest struct {
-	Thread        string `json:"thread"`
-	Channel       string `json:"channel"` // web | wecom | cli
-	From          string `json:"from"`
-	Text          string `json:"text"`
-	ReEntryID     string `json:"re"`
-	ActionID      string `json:"action_id,omitempty"`
-	PromptContext string `json:"-"`
-	QuoteText     string `json:"quote_text,omitempty"`
-	Machine       string `json:"machine,omitempty"`
-	Kind          string `json:"kind,omitempty"`
-	Model         string `json:"model,omitempty"`
-	Effort        string `json:"effort,omitempty"`
-	ProjectID     string `json:"project_id,omitempty"`
-	IdemKey       string `json:"idem_key,omitempty"`
-	ClientMsgID   string `json:"client_msg_id,omitempty"`
+	Thread        string           `json:"thread"`
+	Channel       string           `json:"channel"` // web | wecom | cli
+	From          string           `json:"from"`
+	Text          string           `json:"text"`
+	ReEntryID     string           `json:"re"`
+	ActionID      string           `json:"action_id,omitempty"`
+	PromptContext string           `json:"-"`
+	QuoteText     string           `json:"quote_text,omitempty"`
+	Machine       string           `json:"machine,omitempty"`
+	Kind          string           `json:"kind,omitempty"`
+	Model         string           `json:"model,omitempty"`
+	Effort        string           `json:"effort,omitempty"`
+	ProjectID     string           `json:"project_id,omitempty"`
+	Media         []model.MediaRef `json:"media,omitempty"`
+	IdemKey       string           `json:"idem_key,omitempty"`
+	ClientMsgID   string           `json:"client_msg_id,omitempty"`
 }
 
 type screenMark struct {
@@ -155,6 +156,17 @@ type Engine struct {
 	bypassExitTimeout       time.Duration
 	bypassStartRetryTimeout time.Duration
 	rereadTrigID            string
+
+	// In-process native API Router runtime state (protected by mu except apiSwitchMu).
+	apiSwitchMu            sync.Mutex
+	apiTurn                *apiRouterTurn
+	apiTurnGen             uint64
+	apiConfigEpoch         uint64
+	apiBackoffUntil        time.Time
+	apiFailCount           int
+	apiAuthPaused          bool
+	apiLastErr             string
+	apiAllowPrivateForTest bool
 
 	wakeCh                     chan struct{}
 	queueMu                    sync.Mutex
@@ -291,9 +303,12 @@ func (e *Engine) Policies() []model.Policy {
 // SaveConfig persists updated Settings and/or Policies and refreshes Router docs.
 func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []model.Policy) error {
 	var (
-		routerChanged bool
-		nextSettings  model.Settings
-		nextPolicies  []model.Policy
+		routerChanged    bool
+		apiConfigChanged bool
+		prevMode         string
+		nextMode         string
+		nextSettings     model.Settings
+		nextPolicies     []model.Policy
 	)
 	e.mu.Lock()
 	if st != nil {
@@ -352,10 +367,21 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 		}
 		ns.PublicURL = normPubURL
 		NormalizeDispatchConfig(&ns)
-		routerChanged = prev.RouterKind != ns.RouterKind ||
+		if err := normalizeRouterAPISettings(&ns, e.apiAllowPrivateForTest); err != nil {
+			e.mu.Unlock()
+			return err
+		}
+		prevMode = prev.EffectiveRouterMode()
+		nextMode = ns.EffectiveRouterMode()
+		apiConfigChanged = prevMode != nextMode ||
+			prev.RouterAPIProvider != ns.RouterAPIProvider ||
+			prev.RouterAPIBaseURL != ns.RouterAPIBaseURL ||
+			prev.RouterAPIModel != ns.RouterAPIModel ||
+			prev.RouterAPIEffort != ns.RouterAPIEffort
+		routerChanged = nextMode == "pty" && (prev.RouterKind != ns.RouterKind ||
 			prev.RouterModel != ns.RouterModel ||
 			prev.RouterEffort != ns.RouterEffort ||
-			prev.AskPermissions != ns.AskPermissions
+			prev.AskPermissions != ns.AskPermissions)
 		nextSettings = ns
 	}
 	if pols != nil {
@@ -371,6 +397,14 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 	}
 	sink := e.sink
 	e.mu.Unlock()
+
+	if st != nil && prevMode != nextMode {
+		e.apiSwitchMu.Lock()
+		defer e.apiSwitchMu.Unlock()
+		if err := e.prepareRouterModeSwitch(ctx, prevMode, nextMode); err != nil {
+			return err
+		}
+	}
 
 	if st != nil {
 		if err := e.store.SaveSettings(ctx, nextSettings); err != nil {
@@ -391,6 +425,13 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 			clear(e.bypassHealFailAt)
 		}
 		e.settings = nextSettings
+		if apiConfigChanged {
+			e.apiConfigEpoch++
+			e.apiBackoffUntil = time.Time{}
+			e.apiFailCount = 0
+			e.apiAuthPaused = false
+			e.apiLastErr = ""
+		}
 	}
 	if pols != nil {
 		e.policies = nextPolicies
@@ -399,8 +440,10 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 	e.mu.Unlock()
 
 	if st != nil {
-		if docChanged, err := e.memory.WriteRouterDocsChanged(e.binPath, curSettings); err == nil && docChanged && !routerChanged {
-			e.queueRouterDocReread(ctx)
+		if curSettings.EffectiveRouterMode() == "pty" {
+			if docChanged, err := e.memory.WriteRouterDocsChanged(e.binPath, curSettings); err == nil && docChanged && !routerChanged {
+				e.queueRouterDocReread(ctx)
+			}
 		}
 	}
 	if routerChanged && e.fleet != nil {
@@ -409,6 +452,9 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 			defer cancel()
 			_ = e.RestartRouter(rctx)
 		}()
+	}
+	if apiConfigChanged {
+		e.wake()
 	}
 	sink.OnStateChanged()
 	return nil
@@ -481,6 +527,7 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 		At:       now,
 		Re:       quote,
 		ActionID: strings.TrimSpace(req.ActionID),
+		Media:    append([]model.MediaRef(nil), req.Media...),
 	}
 
 	// Build prompt payload enriched with one-off dispatch overrides or quote context.
@@ -524,6 +571,7 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 		IdemKey: idemKey,
 		Ref:     entry.ID,
 		Steer:   steer,
+		Media:   append([]model.MediaRef(nil), req.Media...),
 	}
 	if decision == "ignore" {
 		trig.Status = "ignored"

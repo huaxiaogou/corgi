@@ -50,6 +50,52 @@ func (s *Store) SetWorkItemTitleState(ctx context.Context, id, state string) err
 	return s.SetKV(ctx, workItemTitleStateKey(id), state)
 }
 
+func workItemScopeKey(id string) string { return "wi_scope:" + strings.TrimSpace(id) }
+
+// GetWorkItemScope loads the optional authorization scope ("", "readonly", "prototype", "implement")
+// stored in kv with zero schema migration (mirroring wi_title:* governance metadata).
+func (s *Store) GetWorkItemScope(ctx context.Context, id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	v, ok, err := s.GetKV(ctx, workItemScopeKey(id))
+	if err != nil || !ok {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+// SetWorkItemScope updates the optional authorization scope ("", "readonly", "prototype", "implement")
+// for an existing work item in kv (zero schema migration).
+func (s *Store) SetWorkItemScope(ctx context.Context, id, scope string) (*model.WorkItem, error) {
+	id = strings.TrimSpace(id)
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if id == "" {
+		return nil, fmt.Errorf("work item id is required")
+	}
+	switch scope {
+	case "", "readonly", "prototype", "implement":
+	default:
+		return nil, fmt.Errorf("invalid work item scope %q", scope)
+	}
+	wi, err := s.GetWorkItem(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if scope == "" {
+		if err := s.DeleteKV(ctx, workItemScopeKey(id)); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := s.SetKV(ctx, workItemScopeKey(id), scope); err != nil {
+			return nil, err
+		}
+	}
+	wi.Scope = scope
+	return wi, nil
+}
+
 // UnbindWorkerFromWorkItem transactionally detaches workerName from work item id (and clears
 // worker.WorkItemID when it still points to id) while preserving all historical branches,
 // artifacts, and the live worker pane.
@@ -152,6 +198,7 @@ func (s *Store) GetWorkItem(ctx context.Context, id string) (*model.WorkItem, er
 	if err != nil {
 		return nil, fmt.Errorf("get work item %s: %w", id, err)
 	}
+	wi.Scope = s.GetWorkItemScope(ctx, wi.ID)
 	return wi, nil
 }
 
@@ -169,16 +216,24 @@ func (s *Store) ListWorkItems(ctx context.Context, includeClosed bool) ([]*model
 	if err != nil {
 		return nil, fmt.Errorf("list work items: %w", err)
 	}
-	defer rows.Close()
 	out := []*model.WorkItem{}
 	for rows.Next() {
 		wi, err := scanWorkItem(rows)
 		if err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		out = append(out, wi)
 	}
-	return out, rows.Err()
+	rErr := rows.Err()
+	_ = rows.Close()
+	if rErr != nil {
+		return nil, rErr
+	}
+	for _, wi := range out {
+		wi.Scope = s.GetWorkItemScope(ctx, wi.ID)
+	}
+	return out, nil
 }
 
 // UpdateWorkItemFields updates mutable metadata and merges optional worker/branch references transactionally.

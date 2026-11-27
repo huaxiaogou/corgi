@@ -123,6 +123,9 @@ func (e *Engine) readReplyAttachments(ctx context.Context, rawMachine string, ra
 			cleanPath string
 		)
 		if resolvedMachine == "" {
+			if e.store != nil && IsProtectedHubDBPath(e.store.DBPath(), norm) {
+				return nil, nil, "", fmt.Errorf("attachment path %q is not allowed", norm)
+			}
 			name, data, cleanPath, err = ReadAttachmentFile(norm)
 		} else {
 			name, data, cleanPath, err = e.readRemoteAttachmentFile(ctx, resolvedMachine, norm)
@@ -313,6 +316,44 @@ func isBlockedAttachmentPath(p string) bool {
 				return true
 			}
 			if i+1 < len(segs) && segs[i+1] == "artifacts" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsProtectedHubDBPath reports whether candidate resolves (including symlinks/aliases) to the
+// Hub's SQLite database file or its WAL/SHM companions.
+func IsProtectedHubDBPath(dbPath, candidate string) bool {
+	dbPath = strings.TrimSpace(dbPath)
+	candidate = strings.TrimSpace(candidate)
+	if dbPath == "" || dbPath == ":memory:" || candidate == "" {
+		return false
+	}
+	resolve := func(p string) string {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			abs = filepath.Clean(p)
+		}
+		if realPath, err := filepath.EvalSymlinks(abs); err == nil {
+			return filepath.Clean(realPath)
+		}
+		if realDir, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+			return filepath.Join(realDir, filepath.Base(abs))
+		}
+		return filepath.Clean(abs)
+	}
+	candReal := resolve(candidate)
+	dbReal := resolve(dbPath)
+	candInfo, candErr := os.Stat(candReal)
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		target := dbReal + suffix
+		if candReal == target || strings.EqualFold(candReal, target) {
+			return true
+		}
+		if candErr == nil {
+			if tInfo, tErr := os.Stat(target); tErr == nil && os.SameFile(candInfo, tInfo) {
 				return true
 			}
 		}

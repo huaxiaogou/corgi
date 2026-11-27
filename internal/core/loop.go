@@ -21,11 +21,14 @@ func (e *Engine) Run(ctx context.Context) {
 	e.mu.Lock()
 	e.runCtx = ctx
 	e.mu.Unlock()
+	e.reconcileAPIRouterInflight(ctx)
 	e.EmitPendingAutoUpdateNotice(ctx)
-	if changed, err := e.memory.WriteRouterDocsChanged(e.binPath, e.Settings()); err != nil {
-		e.logger.Warn("write router docs", "err", err)
-	} else if changed {
-		e.queueRouterDocReread(ctx)
+	if !e.isAPIRouterMode() {
+		if changed, err := e.memory.WriteRouterDocsChanged(e.binPath, e.Settings()); err != nil {
+			e.logger.Warn("write router docs", "err", err)
+		} else if changed {
+			e.queueRouterDocReread(ctx)
+		}
 	}
 	tick := time.NewTicker(1500 * time.Millisecond)
 	defer tick.Stop()
@@ -86,50 +89,69 @@ func (e *Engine) tick(parent context.Context) {
 		}
 	}
 
-	rawAgents, scanned, err := e.fleet.AgentsWithScanned(ctx)
-	if err != nil {
-		return // herdr temporarily unreachable; preserve queued triggers
+	apiMode := e.isAPIRouterMode()
+	var (
+		rawAgents []model.Agent
+		scanned   map[string]bool
+		fleetOK   bool
+	)
+	if e.fleet != nil {
+		var fErr error
+		rawAgents, scanned, fErr = e.fleet.AgentsWithScanned(ctx)
+		if fErr == nil {
+			fleetOK = true
+		} else if !apiMode {
+			return // herdr temporarily unreachable; preserve queued triggers
+		}
+	} else if !apiMode {
+		return
 	}
 	live := map[string]liveInfo{}
-	for i := range rawAgents {
-		a := &rawAgents[i]
-		if (a.Name == nil || *a.Name == "") && a.PaneID != "" && a.Agent != nil && *a.Agent != "" {
-			fallback := deriveFallbackWorkerName(*a.Agent, a.PaneID)
-			a.Name = &fallback
-			e.fleet.RememberName(a.PaneID, fallback)
+	if fleetOK {
+		for i := range rawAgents {
+			a := &rawAgents[i]
+			if (a.Name == nil || *a.Name == "") && a.PaneID != "" && a.Agent != nil && *a.Agent != "" {
+				fallback := deriveFallbackWorkerName(*a.Agent, a.PaneID)
+				a.Name = &fallback
+				e.fleet.RememberName(a.PaneID, fallback)
+			}
+			if a.Name == nil || *a.Name == "" {
+				continue
+			}
+			name := *a.Name
+			if isHubSystemName(name) && !isHubLocalPane(a.PaneID) {
+				continue
+			}
+			li := liveInfo{pane: a.PaneID, status: a.AgentStatus, ready: a.Ready}
+			if a.Agent != nil {
+				li.kind = *a.Agent
+			}
+			if a.Session != nil {
+				li.session = extractSessionID(a.Session.Kind, a.Session.Value)
+			}
+			if name == model.RouterName && !apiMode {
+				li.status = e.stabilizeRouterStatus(a.PaneID, li.kind, li.status, now)
+			}
+			live[name] = li
 		}
-		if a.Name == nil || *a.Name == "" {
-			continue
+		if !apiMode {
+			if _, alive := live[model.RouterName]; !alive {
+				e.clearRouterLive()
+			}
 		}
-		name := *a.Name
-		if isHubSystemName(name) && !isHubLocalPane(a.PaneID) {
-			continue
-		}
-		li := liveInfo{pane: a.PaneID, status: a.AgentStatus, ready: a.Ready}
-		if a.Agent != nil {
-			li.kind = *a.Agent
-		}
-		if a.Session != nil {
-			li.session = extractSessionID(a.Session.Kind, a.Session.Value)
-		}
-		if name == model.RouterName {
-			li.status = e.stabilizeRouterStatus(a.PaneID, li.kind, li.status, now)
-		}
-		live[name] = li
+
+		// Auto-adopt any live non-system agent session into Corgi's managed workers table
+		// so no orphan unmanaged sessions ever exist.
+		e.adoptUnmanagedAgents(ctx, rawAgents)
+
+		// 2. Sync worker states, detect bare-shell failures, create Actions on blocked dialogs or quota errors.
+		e.syncWorkers(ctx, live, scanned, now)
 	}
-	if _, alive := live[model.RouterName]; !alive {
-		e.clearRouterLive()
+
+	// 3. Guard PTY Router against trust blocks, transient API errors, and stalled turns.
+	if !apiMode {
+		e.handleRouterLifecycle(ctx, live, now)
 	}
-
-	// Auto-adopt any live non-system agent session into Corgi's managed workers table
-	// so no orphan unmanaged sessions ever exist.
-	e.adoptUnmanagedAgents(ctx, rawAgents)
-
-	// 2. Sync worker states, detect bare-shell failures, create Actions on blocked dialogs or quota errors.
-	e.syncWorkers(ctx, live, scanned, now)
-
-	// 3. Guard Router against trust blocks, transient API errors, and stalled turns.
-	e.handleRouterLifecycle(ctx, live, now)
 
 	queued, _ := e.store.ListQueuedTriggers(ctx)
 	hasRouterQueued := false
@@ -140,9 +162,13 @@ func (e *Engine) tick(parent context.Context) {
 		}
 	}
 
-	// 4. Drive or trigger nightly memory consolidation (Dream) and context handover.
-	e.checkDream(ctx, live, hasRouterQueued)
-	e.checkHandover(ctx, live, hasRouterQueued)
+	// 4. Drive or trigger nightly memory consolidation (Dream) and PTY context handover.
+	if fleetOK {
+		e.checkDream(ctx, live, hasRouterQueued)
+	}
+	if !apiMode {
+		e.checkHandover(ctx, live, hasRouterQueued)
+	}
 
 	if e.Settings().Paused || e.Dreaming() || e.handingOver() || e.isHubUpdating() {
 		return
@@ -150,13 +176,17 @@ func (e *Engine) tick(parent context.Context) {
 
 	// 5. Drain idle main-chat queue, route/deliver triggers, and drain idle single-agent queues.
 	e.drainRouterPrompts(ctx, live)
-	e.deliverQueued(ctx, live, scanned)
-	e.drainPanePrompts(ctx, rawAgents)
+	e.deliverQueuedWithFleet(ctx, live, scanned, fleetOK)
+	if fleetOK {
+		e.drainPanePrompts(ctx, rawAgents)
+	}
 
 	// 6. Watchdog for stalled/thrashing workers and zero-token gated idle patrol / morning digest.
-	e.checkStalls(ctx, live, now)
-	e.checkWorkerThrash(ctx, live, now)
-	e.checkIdlePatrol(ctx, live, now)
+	if fleetOK {
+		e.checkStalls(ctx, live, now)
+		e.checkWorkerThrash(ctx, live, now)
+		e.checkIdlePatrol(ctx, live, now)
+	}
 
 	// 7. Optional overnight idle auto-update after tonight's scheduled Dream succeeds/skips.
 	e.checkAutoUpdate(ctx, live, hasRouterQueued, now)
@@ -596,6 +626,10 @@ func workerMachineID(w *model.Worker) string {
 }
 
 func (e *Engine) deliverQueued(ctx context.Context, live map[string]liveInfo, scanned map[string]bool) {
+	e.deliverQueuedWithFleet(ctx, live, scanned, true)
+}
+
+func (e *Engine) deliverQueuedWithFleet(ctx context.Context, live map[string]liveInfo, scanned map[string]bool, fleetOK bool) {
 	queued, err := e.store.ListQueuedTriggers(ctx)
 	if err != nil || len(queued) == 0 {
 		return
@@ -615,13 +649,22 @@ func (e *Engine) deliverQueued(ctx context.Context, live map[string]liveInfo, sc
 			if len(t.Targets) == 0 {
 				t.Targets = []string{model.RouterName}
 			}
+			_ = e.store.ReplaceTriggerTargets(ctx, t.ID, t.Targets)
 		}
 		for _, target := range t.Targets {
 			batches[target] = append(batches[target], t)
 		}
 	}
 
+	apiMode := e.isAPIRouterMode()
 	for target, list := range batches {
+		if target == model.RouterName && apiMode {
+			e.deliverAPIRouter(ctx, list)
+			continue
+		}
+		if !fleetOK {
+			continue
+		}
 		li, alive := live[target]
 		if !alive {
 			if target == model.RouterName {
@@ -688,11 +731,7 @@ func (e *Engine) rerouteDeadWorkerTriggers(ctx context.Context, target string, l
 		}
 	}
 	for _, t := range list {
-		t.Targets = removeStr(t.Targets, target)
-		if !slices.Contains(t.Targets, model.RouterName) {
-			t.Targets = append(t.Targets, model.RouterName)
-		}
-		_ = e.store.UpdateTrigger(ctx, t)
+		_ = e.store.RerouteTriggerTarget(ctx, t.ID, target, model.RouterName)
 	}
 }
 
@@ -832,11 +871,7 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 	}
 
 	for _, t := range list {
-		t.Targets = removeStr(t.Targets, target)
-		if len(t.Targets) == 0 {
-			t.Status = "delivered"
-		}
-		_ = e.store.UpdateTrigger(ctx, t)
+		_ = e.store.AckTriggerTarget(ctx, t.ID, target)
 	}
 	e.notifyChanged()
 }
@@ -933,8 +968,20 @@ func (e *Engine) ensureRouter(ctx context.Context) {
 	}()
 }
 
-// RestartRouter closes the current Router workspace so the next tick spawns a fresh session.
+// RestartRouter closes the Hub-local PTY Router workspace (or cancels & resets the API Router).
 func (e *Engine) RestartRouter(ctx context.Context) error {
+	if e.isAPIRouterMode() {
+		e.cancelAndSettleAPIRouterTurn(ctx, "", true)
+		e.mu.Lock()
+		e.apiBackoffUntil = time.Time{}
+		e.apiFailCount = 0
+		e.apiAuthPaused = false
+		e.apiLastErr = ""
+		e.mu.Unlock()
+		e.wake()
+		e.notifyChanged()
+		return nil
+	}
 	if e.fleet == nil {
 		return fmt.Errorf("fleet not configured")
 	}
@@ -945,7 +992,7 @@ func (e *Engine) RestartRouter(ctx context.Context) error {
 	}
 	var closeErr error
 	for _, w := range ws {
-		if w.Label == model.RouterLabel {
+		if w.Label == model.RouterLabel && isHubLocalPane(w.ID) {
 			if cErr := e.fleet.CloseWorkspace(ctx, w.ID); cErr != nil {
 				e.logger.Warn("restart router: close workspace failed", "workspace_id", w.ID, "err", cErr)
 				if closeErr == nil {

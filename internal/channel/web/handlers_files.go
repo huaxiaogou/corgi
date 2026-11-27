@@ -239,6 +239,10 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	as := r.URL.Query().Get("as")
 	download := r.URL.Query().Get("download") == "1"
 	p := s.expand(rawPath)
+	if s.Store != nil && core.IsProtectedHubDBPath(s.Store.DBPath(), p) {
+		writeReadFileError(w, r, http.StatusForbidden, "受保护的系统数据库文件不可读取")
+		return
+	}
 	fi, err := os.Stat(p)
 	if err != nil {
 		writeReadFileError(w, r, http.StatusNotFound, "找不到文件")
@@ -345,6 +349,10 @@ func (s *Server) handleReadAttachment(w http.ResponseWriter, r *http.Request) {
 		Path string `json:"path"`
 	}
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if s.Store != nil && core.IsProtectedHubDBPath(s.Store.DBPath(), body.Path) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "受保护的系统数据库文件不可读取"})
 		return
 	}
 	name, data, cleanPath, err := core.ReadAttachmentFile(body.Path)
