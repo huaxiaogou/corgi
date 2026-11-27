@@ -154,6 +154,63 @@ func TestWebGroupSyncReportAttachmentAndWorkerTag(t *testing.T) {
 	}
 }
 
+func TestOnUserMessageMirrorsMainThreadOnlyInNormalMode(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	eng, err := core.NewEngine(context.Background(), st, nil, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var sent []struct{ chat, body string }
+	bus := NewBus(eng, nil, nil)
+	bus.sendFn = func(_ context.Context, chatID, markdown string) error {
+		mu.Lock()
+		sent = append(sent, struct{ chat, body string }{chatID, markdown})
+		mu.Unlock()
+		return nil
+	}
+
+	ctx := context.Background()
+	sample := &model.Entry{
+		Channel: "web",
+		Thread:  model.MainThread,
+		Text:    "画个新的拍板卡原型\n\n附件：\n/Users/kiperjing/.corgi/uploads/20261127/card.png",
+	}
+
+	// Default quiet mode: main-chat Web user message stays silent on WeCom.
+	bus.OnUserMessage(ctx, sample)
+	mu.Lock()
+	if len(sent) != 0 {
+		t.Fatalf("expected quiet mode to skip main-chat Web mirror, got %+v", sent)
+	}
+	mu.Unlock()
+
+	// Switch to normal mode: main-chat Web user message mirrors cleanly with basename attachment summary.
+	cfg := eng.Settings()
+	cfg.NotifyLevel = "normal"
+	if err := eng.SaveConfig(ctx, &cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+	bus.OnUserMessage(ctx, sample)
+	// Action-linked decision receipts must still be skipped to avoid duplicate pings.
+	bus.OnUserMessage(ctx, &model.Entry{Channel: "web", Thread: model.MainThread, ActionID: "a1", Text: "同意"})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 1 {
+		t.Fatalf("expected exactly 1 mirrored message in normal mode, got %+v", sent)
+	}
+	if sent[0].chat != "" || sent[0].body != "**[Web]** 画个新的拍板卡原型（附件：card.png）" {
+		t.Fatalf("unexpected mirrored message: %+v", sent[0])
+	}
+}
+
 func TestHandleWeComCardClickResolvesAndUpdatesCard(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "corgi.db"))

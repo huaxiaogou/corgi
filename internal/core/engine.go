@@ -855,8 +855,9 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 				ShareURL:   e.BuildPreviewURL(ctx, art.ID),
 				Data:       data,
 			})
-			if art.EntryID == "" || (workID != "" && art.WorkItemID == "") {
-				if art.EntryID == "" {
+			unlinkedEntry := art.EntryID == "" || strings.HasPrefix(art.EntryID, "standalone:")
+			if unlinkedEntry || (workID != "" && art.WorkItemID == "") {
+				if unlinkedEntry {
 					art.EntryID = eid
 				}
 				if workID != "" && art.WorkItemID == "" {

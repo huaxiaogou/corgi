@@ -324,9 +324,15 @@ func (e *Engine) stageArtifacts(
 		}
 		stagedPaths = append(stagedPaths, finalPath)
 
+		recEntryID := entryID
+		if recEntryID == "" {
+			// Assign a unique synthetic key for standalone snapshots so SQLite's
+			// UNIQUE(entry_id, ordinal) never collides across multiple worker reports.
+			recEntryID = "standalone:" + id
+		}
 		rec := &model.Artifact{
 			ID:             id,
-			EntryID:        entryID,
+			EntryID:        recEntryID,
 			Ordinal:        i,
 			Thread:         thread,
 			WorkItemID:     workID,

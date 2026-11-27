@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -140,22 +141,77 @@ func (b *Bus) canSendMarkdown() bool {
 	return true
 }
 
-// OnUserMessage mirrors messages typed in a Web WeCom-group channel back to that WeCom group.
+// OnUserMessage mirrors messages typed in Web back to WeCom:
+// - WeCom group threads (`wecom:*`) always mirror back to that WeCom group.
+// - Main single-chat thread (`chat:main`) mirrors in `normal` notify mode so phone WeCom
+//   keeps a complete Q&A timeline without missing Web-originated prompts; `quiet` stays silent.
 // Action-linked decision entries are skipped here because OnActionResolved pushes a structured sync receipt.
 func (b *Bus) OnUserMessage(ctx context.Context, entry *model.Entry) {
-	if entry == nil || entry.Channel != "web" || entry.ActionID != "" || !strings.HasPrefix(entry.Thread, "wecom:") {
+	if entry == nil || entry.Channel != "web" || entry.ActionID != "" {
 		return
 	}
 	if !b.canSendMarkdown() {
 		return
 	}
-	chatID := threadToWeComChat(entry.Thread)
-	if chatID == "" {
+	var chatID string
+	switch {
+	case strings.HasPrefix(entry.Thread, "wecom:"):
+		chatID = threadToWeComChat(entry.Thread)
+		if chatID == "" {
+			return
+		}
+	case entry.Thread == model.MainThread:
+		if b.notifyLevel() != "normal" {
+			return
+		}
+		// Empty chatID routes to the configured / most-recent WeCom single-chat user.
+	default:
 		return
 	}
-	if err := b.sendFn(ctx, chatID, "**[Web]** "+entry.Text); err != nil {
-		b.logger.Warn("mirror web group message to wecom failed", "chat_id", chatID, "err", err)
+	body := formatWebMirrorMessage(entry.Text)
+	if body == "" {
+		return
 	}
+	if err := b.sendFn(ctx, chatID, body); err != nil {
+		b.logger.Warn("mirror web message to wecom failed", "thread", entry.Thread, "chat_id", chatID, "err", err)
+	}
+}
+
+func formatWebMirrorMessage(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	mainText := raw
+	var attachNames []string
+	if idx := strings.Index(raw, "\n\n附件：\n"); idx >= 0 {
+		mainText = strings.TrimSpace(raw[:idx])
+		attachBlock := raw[idx+len("\n\n附件：\n"):]
+		for _, line := range strings.Split(attachBlock, "\n") {
+			p := strings.TrimSpace(line)
+			if p == "" {
+				continue
+			}
+			base := filepath.Base(p)
+			if base != "" && base != "." && base != "/" {
+				attachNames = append(attachNames, base)
+			}
+		}
+	}
+	if r := []rune(mainText); len(r) > 240 {
+		mainText = string(r[:240]) + "…"
+	}
+	attachSuffix := ""
+	if len(attachNames) > 0 {
+		if len(attachNames) > 3 {
+			attachNames = append(attachNames[:3], "等")
+		}
+		attachSuffix = "（附件：" + strings.Join(attachNames, "、") + "）"
+	}
+	if mainText == "" && attachSuffix != "" {
+		return "**[Web]** 发送了" + strings.TrimPrefix(strings.TrimSuffix(attachSuffix, "）"), "（")
+	}
+	return "**[Web]** " + mainText + attachSuffix
 }
 
 func (b *Bus) notifyLevel() string {
