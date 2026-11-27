@@ -35,14 +35,15 @@ type Bus struct {
 	sendFileFn      func(ctx context.Context, chatID, filename string, data []byte) error
 	sendStreamFn    wecom.StreamSendFunc
 
-	mu            sync.Mutex
-	flushMu       sync.Mutex
-	subs          map[chan struct{}]struct{}
-	outbox        map[string][]outboxItem
-	routerStreams map[string]*activeWeComStream
-	seenWeComMsgs map[string]time.Time
-	webSeenAt     time.Time
-	wecomActiveAt time.Time
+	mu              sync.Mutex
+	flushMu         sync.Mutex
+	subs            map[chan struct{}]struct{}
+	outbox          map[string][]outboxItem
+	routerStreams   map[string]*activeWeComStream
+	seenWeComMsgs   map[string]time.Time
+	pendingWebQuote map[string]string
+	webSeenAt       time.Time
+	wecomActiveAt   time.Time
 }
 
 // NewBus wires the Super-Agent Engine to Web SSE subscribers and the WeCom client.
@@ -51,14 +52,15 @@ func NewBus(eng *core.Engine, wc *wecom.Client, logger *slog.Logger) *Bus {
 		logger = slog.Default()
 	}
 	b := &Bus{
-		engine:        eng,
-		wecom:         wc,
-		logger:        logger,
-		flushDelay:    20 * time.Second,
-		subs:          map[chan struct{}]struct{}{},
-		outbox:        map[string][]outboxItem{},
-		routerStreams: map[string]*activeWeComStream{},
-		seenWeComMsgs: map[string]time.Time{},
+		engine:          eng,
+		wecom:           wc,
+		logger:          logger,
+		flushDelay:      20 * time.Second,
+		subs:            map[chan struct{}]struct{}{},
+		outbox:          map[string][]outboxItem{},
+		routerStreams:   map[string]*activeWeComStream{},
+		seenWeComMsgs:   map[string]time.Time{},
+		pendingWebQuote: map[string]string{},
 	}
 	if wc != nil {
 		b.sendFn = wc.SendMarkdown
@@ -141,31 +143,27 @@ func (b *Bus) canSendMarkdown() bool {
 	return true
 }
 
-// OnUserMessage mirrors messages typed in Web back to WeCom:
-// - WeCom group threads (`wecom:*`) always mirror back to that WeCom group.
-// - Main single-chat thread (`chat:main`) mirrors in `normal` notify mode so phone WeCom
-//   keeps a complete Q&A timeline without missing Web-originated prompts; `quiet` stays silent.
+// OnUserMessage bridges messages typed in Web back to WeCom:
+// - WeCom group threads (`wecom:*`) mirror immediately as `**[Web]** ...` to that group.
+// - Main single-chat thread (`chat:main`) does NOT send a standalone left-side bubble; instead it
+//   records a compact summary so Corgi's first WeCom reply prepends a native grey `> 来自 Web：...`
+//   blockquote line (zero extra bubbles or duplicate notifications).
 // Action-linked decision entries are skipped here because OnActionResolved pushes a structured sync receipt.
 func (b *Bus) OnUserMessage(ctx context.Context, entry *model.Entry) {
 	if entry == nil || entry.Channel != "web" || entry.ActionID != "" {
 		return
 	}
-	if !b.canSendMarkdown() {
+	if entry.Thread == model.MainThread {
+		if summary := formatWebQuoteSummary(entry.Text, 140); summary != "" {
+			b.setPendingWebQuote(entry.Thread, summary)
+		}
 		return
 	}
-	var chatID string
-	switch {
-	case strings.HasPrefix(entry.Thread, "wecom:"):
-		chatID = threadToWeComChat(entry.Thread)
-		if chatID == "" {
-			return
-		}
-	case entry.Thread == model.MainThread:
-		if b.notifyLevel() != "normal" {
-			return
-		}
-		// Empty chatID routes to the configured / most-recent WeCom single-chat user.
-	default:
+	if !strings.HasPrefix(entry.Thread, "wecom:") || !b.canSendMarkdown() {
+		return
+	}
+	chatID := threadToWeComChat(entry.Thread)
+	if chatID == "" {
 		return
 	}
 	body := formatWebMirrorMessage(entry.Text)
@@ -173,14 +171,49 @@ func (b *Bus) OnUserMessage(ctx context.Context, entry *model.Entry) {
 		return
 	}
 	if err := b.sendFn(ctx, chatID, body); err != nil {
-		b.logger.Warn("mirror web message to wecom failed", "thread", entry.Thread, "chat_id", chatID, "err", err)
+		b.logger.Warn("mirror web group message to wecom failed", "chat_id", chatID, "err", err)
 	}
 }
 
-func formatWebMirrorMessage(raw string) string {
+func (b *Bus) setPendingWebQuote(thread, summary string) {
+	if thread == "" || summary == "" {
+		return
+	}
+	b.mu.Lock()
+	if b.pendingWebQuote == nil {
+		b.pendingWebQuote = map[string]string{}
+	}
+	b.pendingWebQuote[thread] = summary
+	b.mu.Unlock()
+}
+
+func (b *Bus) takePendingWebQuote(thread string) string {
+	if thread == "" {
+		return ""
+	}
+	b.mu.Lock()
+	q := b.pendingWebQuote[thread]
+	delete(b.pendingWebQuote, thread)
+	b.mu.Unlock()
+	return q
+}
+
+func (b *Bus) clearPendingWebQuote(thread string) {
+	if thread == "" {
+		return
+	}
+	b.mu.Lock()
+	delete(b.pendingWebQuote, thread)
+	b.mu.Unlock()
+}
+
+func formatWebQuoteSummary(raw string, maxRunes int) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
+	}
+	if maxRunes <= 0 {
+		maxRunes = 140
 	}
 	mainText := raw
 	var attachNames []string
@@ -198,8 +231,9 @@ func formatWebMirrorMessage(raw string) string {
 			}
 		}
 	}
-	if r := []rune(mainText); len(r) > 240 {
-		mainText = string(r[:240]) + "…"
+	mainText = strings.Join(strings.Fields(mainText), " ")
+	if r := []rune(mainText); len(r) > maxRunes {
+		mainText = string(r[:maxRunes]) + "…"
 	}
 	attachSuffix := ""
 	if len(attachNames) > 0 {
@@ -209,9 +243,29 @@ func formatWebMirrorMessage(raw string) string {
 		attachSuffix = "（附件：" + strings.Join(attachNames, "、") + "）"
 	}
 	if mainText == "" && attachSuffix != "" {
-		return "**[Web]** 发送了" + strings.TrimPrefix(strings.TrimSuffix(attachSuffix, "）"), "（")
+		return "发送了" + strings.TrimPrefix(strings.TrimSuffix(attachSuffix, "）"), "（")
 	}
-	return "**[Web]** " + mainText + attachSuffix
+	return mainText + attachSuffix
+}
+
+func formatWebMirrorMessage(raw string) string {
+	summary := formatWebQuoteSummary(raw, 240)
+	if summary == "" {
+		return ""
+	}
+	return "**[Web]** " + summary
+}
+
+func prependWebQuoteHeader(webQuote, body string) string {
+	q := strings.TrimSpace(webQuote)
+	if q == "" {
+		return body
+	}
+	header := "> 来自 Web：" + q
+	if strings.TrimSpace(body) == "" {
+		return header
+	}
+	return header + "\n\n" + body
 }
 
 func (b *Bus) notifyLevel() string {
@@ -290,6 +344,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 	}
 
 	if suppress {
+		b.clearPendingWebQuote(entry.Thread)
 		if !hasExplicitFiles {
 			return core.ReplyDelivery{}
 		}
@@ -310,6 +365,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 
 	// Decision cards (--opt / --check) bypass Outbox batching and push immediately when not suppressed.
 	if action != nil && (len(action.Choices) > 0 || action.Kind == model.ActionKindRouterCheck) {
+		b.clearPendingWebQuote(entry.Thread)
 		if st := b.takeRouterStream(entry.Thread); st != nil {
 			if st.chatID != "" && chatID == "" {
 				chatID = st.chatID
@@ -342,11 +398,13 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 		return core.ReplyDelivery{}
 	}
 
+	webQuote := b.takePendingWebQuote(entry.Thread)
+
 	// Ordinary reply with explicit files: seal active passive stream (body + links) when open,
 	// else immediately send 1 Markdown message via ACK-capable RPC, then send original source files.
 	if hasExplicitFiles {
 		var del core.ReplyDelivery
-		body := formatWeComReply(entry)
+		body := prependWebQuoteHeader(webQuote, formatWeComReply(entry))
 		combined := body
 		if linksBlock != "" {
 			if combined != "" {
@@ -390,7 +448,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 		return del
 	}
 
-	body := formatWeComReply(entry)
+	body := prependWebQuoteHeader(webQuote, formatWeComReply(entry))
 	streamSealed := false
 	if st := b.takeRouterStream(entry.Thread); st != nil {
 		if st.chatID != "" && chatID == "" {
@@ -404,8 +462,8 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 	}
 	if !streamSealed && b.canSendMarkdown() {
 		b.mu.Lock()
-		if wecomRecent {
-			// Active WeCom conversation: deliver immediately instead of holding 20s in Outbox.
+		if wecomRecent || webQuote != "" {
+			// Active WeCom conversation or first reply to a Web prompt: deliver immediately instead of holding 20s in Outbox.
 			send := b.sendFn
 			b.mu.Unlock()
 			if err := send(ctx, chatID, body); err != nil {
@@ -710,6 +768,7 @@ func (b *Bus) HandleWeComMessage(ctx context.Context, msg wecom.IncomingMessage)
 	if b.handleWeComControlOrDirect(ctx, msg, thread, text) {
 		return
 	}
+	b.clearPendingWebQuote(thread)
 
 	replyChatID := msg.ChatID
 	if replyChatID == "" {

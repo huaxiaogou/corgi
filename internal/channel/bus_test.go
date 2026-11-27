@@ -154,7 +154,7 @@ func TestWebGroupSyncReportAttachmentAndWorkerTag(t *testing.T) {
 	}
 }
 
-func TestOnUserMessageMirrorsMainThreadOnlyInNormalMode(t *testing.T) {
+func TestWebMainChatQuoteAttachesOnceToFirstWeComReply(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "corgi.db"))
 	if err != nil {
@@ -166,6 +166,12 @@ func TestOnUserMessageMirrorsMainThreadOnlyInNormalMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg := eng.Settings()
+	cfg.NotifyLevel = "normal"
+	if err := eng.SaveConfig(context.Background(), &cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+
 	var mu sync.Mutex
 	var sent []struct{ chat, body string }
 	bus := NewBus(eng, nil, nil)
@@ -177,37 +183,62 @@ func TestOnUserMessageMirrorsMainThreadOnlyInNormalMode(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	sample := &model.Entry{
+	// 1. Web main-chat message produces ZERO standalone WeCom bubbles.
+	bus.OnUserMessage(ctx, &model.Entry{
 		Channel: "web",
 		Thread:  model.MainThread,
 		Text:    "画个新的拍板卡原型\n\n附件：\n/Users/kiperjing/.corgi/uploads/20261127/card.png",
-	}
-
-	// Default quiet mode: main-chat Web user message stays silent on WeCom.
-	bus.OnUserMessage(ctx, sample)
+	})
 	mu.Lock()
 	if len(sent) != 0 {
-		t.Fatalf("expected quiet mode to skip main-chat Web mirror, got %+v", sent)
+		t.Fatalf("expected 0 standalone bubbles for main-chat Web message, got %+v", sent)
 	}
 	mu.Unlock()
 
-	// Switch to normal mode: main-chat Web user message mirrors cleanly with basename attachment summary.
-	cfg := eng.Settings()
-	cfg.NotifyLevel = "normal"
-	if err := eng.SaveConfig(ctx, &cfg, nil); err != nil {
-		t.Fatal(err)
-	}
-	bus.OnUserMessage(ctx, sample)
-	// Action-linked decision receipts must still be skipped to avoid duplicate pings.
-	bus.OnUserMessage(ctx, &model.Entry{Channel: "web", Thread: model.MainThread, ActionID: "a1", Text: "同意"})
+	// 2. First Corgi reply immediately sends 1 WeCom bubble with grey blockquote header.
+	bus.OnReply(ctx, &model.Entry{
+		ID:     "e1",
+		Thread: model.MainThread,
+		Text:   "收到，我会按你附的截图重新做一版拍板卡原型。",
+	}, nil, nil)
+
+	// 3. Second Corgi reply for the same turn does NOT repeat the Web quote header.
+	bus.OnReply(ctx, &model.Entry{
+		ID:     "e2",
+		Thread: model.MainThread,
+		Text:   "新版拍板卡原型已完成。",
+	}, nil, nil)
+	bus.FlushDue(ctx, true)
 
 	mu.Lock()
-	defer mu.Unlock()
-	if len(sent) != 1 {
-		t.Fatalf("expected exactly 1 mirrored message in normal mode, got %+v", sent)
+	if len(sent) != 2 {
+		t.Fatalf("expected 2 WeCom replies total, got %+v", sent)
 	}
-	if sent[0].chat != "" || sent[0].body != "**[Web]** 画个新的拍板卡原型（附件：card.png）" {
-		t.Fatalf("unexpected mirrored message: %+v", sent[0])
+	wantFirst := "> 来自 Web：画个新的拍板卡原型（附件：card.png）\n\n收到，我会按你附的截图重新做一版拍板卡原型。"
+	if sent[0].chat != "" || sent[0].body != wantFirst {
+		t.Fatalf("unexpected first reply with Web quote:\ngot:  %q\nwant: %q", sent[0].body, wantFirst)
+	}
+	if sent[1].body != "新版拍板卡原型已完成。" {
+		t.Fatalf("expected second reply without repeated Web quote, got %q", sent[1].body)
+	}
+	sent = nil
+	mu.Unlock()
+
+	// 4. Subsequent WeCom message clears any unconsumed Web quote so WeCom turns stay clean.
+	bus.OnUserMessage(ctx, &model.Entry{Channel: "web", Thread: model.MainThread, Text: "旧网页问题"})
+	bus.HandleWeComMessage(ctx, wecom.IncomingMessage{
+		ReqID:    "req-wc-1",
+		MsgID:    "msg-wc-1",
+		ChatType: "single",
+		ChatID:   "U1",
+		FromUser: "U1",
+		Text:     "改在企微问",
+	})
+	bus.OnReply(ctx, &model.Entry{ID: "e3", Thread: model.MainThread, Text: "好的，按企微说的办。"}, nil, nil)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 1 || strings.Contains(sent[0].body, "来自 Web") {
+		t.Fatalf("expected WeCom message to clear pending Web quote, got %+v", sent)
 	}
 }
 
