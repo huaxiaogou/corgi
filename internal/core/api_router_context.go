@@ -30,9 +30,9 @@ const (
    - purpose="attention"：需要用户拍板/确认时使用，给出 2–4 个清晰选项 choices（轻量无需拍板的提醒可用 check=true）。
 4. 移动端防越权规则：
    - 用户在对话里直接、明确提出修改代码并跑测试的新需求时，可直接调用 dispatch_work(mode="implement") 在隔离分支执行，无需多余确认卡。
-   - 若当前对话指向已有原型/只读工作项（如反馈原型布局调整），保持在 prototype/readonly 范围；若要从原型转入修改产品源码，必须先用 reply_user(purpose="attention") 发 1 张过渡确认卡请用户拍板。
+   - 若当前对话指向已有原型/只读工作项（如反馈原型布局调整），保持在 prototype/readonly 范围；若要从原型转入修改产品源码，请先确认用户已明确授权，或用 reply_user(purpose="attention") 发 1 张过渡确认卡请用户拍板。
    - 面对 Worker 汇报、定时器、系统事件或 candidate 事件，严禁擅自启动 implement 写代码或自动修复，需要人决定时发 attention 决策卡。
-   - 合并分支（merge）、推送远端（push）、线上部署（deploy）永远需要用户单独确认，绝不自主执行。
+   - 合并主分支（merge）、推送远端（push）、线上部署（deploy）必须基于用户的明确批准（确认卡或直接指令）；一旦用户明确批准，调用 dispatch_work(mode="implement", allow_release=true) 放行发布闭环，未经批准切勿开启 allow_release。
 5. 静默原则：对无关的 candidate 策略事件或无需打扰用户的内部状态变化，可直接输出 [SILENT] 结束，不要制造进度刷屏。
 6. 自动验收标签：若 Worker 汇报头部带有 [auto_verify: PASS / SKIPPED / FAIL ...]，那是 Hub 自动执行的构建与测试结果——PASS 可直接汇报验收通过的结论（无需重复跑基础检查），FAIL 时向用户说明具体失败项与后续建议。
 7. 工具约束：严禁编造不存在的文件路径、Worker 名称或执行结果；工具返回护栏报错时，请按报错提示修正参数后重试。`
@@ -337,14 +337,21 @@ func (e *Engine) buildLiveTailState(ctx context.Context, thread string, trig *mo
 		}
 	}
 
-	// Pre-bound work item & consent notice so model never accidentally bypasses scope.
-	if meta != nil && meta.boundWorkItem != nil {
-		fmt.Fprintf(&b, "\n### 本轮关联工作项\n- 已自动绑定：%s [scope=%s] %s",
-			meta.boundWorkItem.ID, orStr(meta.boundWorkItem.Scope, "unset"), oneLineClip(meta.boundWorkItem.Title, 80))
-		if meta.prototypeBlockedWorkID != "" {
-			b.WriteString("（当前处于原型/只读阶段；如需修改产品源码，请先发 attention 确认卡）")
+	// Structured work item & card resolution context for the LLM.
+	if meta != nil && (meta.boundWorkItem != nil || meta.approvedAction != nil) {
+		b.WriteString("\n### 本轮关联上下文\n")
+		if meta.boundWorkItem != nil {
+			fmt.Fprintf(&b, "- 关联工作项：%s [scope=%s] %s",
+				meta.boundWorkItem.ID, orStr(meta.boundWorkItem.Scope, "unset"), oneLineClip(meta.boundWorkItem.Title, 80))
+			if isPrototypeOrReadonlyWorkItem(meta.boundWorkItem) {
+				b.WriteString("（当前为只读/原型阶段）")
+			}
+			b.WriteByte('\n')
 		}
-		b.WriteByte('\n')
+		if meta.approvedAction != nil {
+			fmt.Fprintf(&b, "- 本轮由用户点击卡片 %s 触发：已选「%s」\n",
+				meta.approvedAction.ID, oneLineClip(orStr(meta.approvedAction.ChosenLabel, meta.approvedAction.ChosenKey), 120))
+		}
 	}
 
 	// Current incoming trigger.

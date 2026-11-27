@@ -41,23 +41,28 @@ type nightlyDreamSlot struct {
 }
 
 type dreamRun struct {
-	id          string
-	at          time.Time
-	observedAt  time.Time
-	mode        string
-	started     bool
-	worked      bool
-	recovered   bool
-	apiDone     bool
-	apiOK       bool
-	apiErr      string
-	idleAt      time.Time
-	reason      string
-	blockedAt   time.Time
-	told        bool
-	archivedRef string
-	workspaceID string
-	paneID      string
+	id             string
+	at             time.Time
+	observedAt     time.Time
+	mode           string
+	started        bool
+	worked         bool
+	recovered      bool
+	apiDone        bool
+	apiOK          bool
+	apiErr         string
+	apiErrIsAuth   bool
+	step           int
+	lastTool       string
+	lastProgressAt time.Time
+	cancel         context.CancelFunc
+	idleAt         time.Time
+	reason         string
+	blockedAt      time.Time
+	told           bool
+	archivedRef    string
+	workspaceID    string
+	paneID         string
 }
 
 func dreamWorkspaceLabel(runID string) string {
@@ -156,6 +161,14 @@ func (e *Engine) Dreaming() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.dream != nil
+}
+
+// isBlockingDream reports whether an active Dream session suspends the main Router loop
+// (true for PTY Dream which closes the local PTY Router; false for async in-process API Dream).
+func (e *Engine) isBlockingDream() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.dream != nil && e.dream.mode != "api"
 }
 
 // LastDream returns the timestamp of the last completed dream run (zero if never).
@@ -270,22 +283,23 @@ func (e *Engine) StartDream(ctx context.Context, reason string) error {
 
 	now := time.Now()
 	e.mu.Lock()
-	if e.dream != nil || e.handover != nil || e.hubUpdating || e.apiTurn != nil {
-		e.mu.Unlock()
-		return fmt.Errorf("Corgi 正在整理记忆、处理对话、交接会话或升级中")
-	}
 	st := e.settings
 	mode := st.EffectiveRouterMode()
+	if e.dream != nil || e.handover != nil || e.hubUpdating || (mode != "api" && e.apiTurn != nil) {
+		e.mu.Unlock()
+		return fmt.Errorf("Corgi 正在整理记忆、交接会话或升级中")
+	}
 	if mode != "api" && e.fleet == nil {
 		e.mu.Unlock()
 		return fmt.Errorf("本机终端服务未连接，无法启动 PTY 做梦")
 	}
 	d := &dreamRun{
-		id:         now.Format("20060102-150405.000000000"),
-		at:         now,
-		observedAt: now,
-		mode:       mode,
-		reason:     reason,
+		id:             now.Format("20060102-150405.000000000"),
+		at:             now,
+		observedAt:     now,
+		lastProgressAt: now,
+		mode:           mode,
+		reason:         reason,
 	}
 	e.dream = d
 	e.mu.Unlock()
@@ -501,9 +515,8 @@ func (e *Engine) driveDream(ctx context.Context, d *dreamRun, live map[string]li
 			e.finishDream(ctx, d, apiOK)
 			return
 		}
-		if time.Since(d.at) > 8*time.Minute {
-			e.finishDream(ctx, d, journalFresh)
-		}
+		// Async API Dream has no arbitrary wall-clock cap; runAPIDream monitors SSE stream
+		// liveness via idle watchdog and sets apiDone on completion or fault.
 		return
 	}
 
@@ -713,6 +726,11 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 	e.routerLaunchAt = time.Time{}
 	archivedRef := d.archivedRef
 	apiErr := d.apiErr
+	apiErrIsAuth := d.apiErrIsAuth
+	stepCount := d.step
+	lastTool := d.lastTool
+	recovered := d.recovered
+	runCtx := e.runCtx
 	e.mu.Unlock()
 
 	switch {
@@ -724,6 +742,35 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 		e.addEvent(ctx, model.MainThread, "Corgi 醒了。记忆整理："+summary, archivedRef, "info")
 	default:
 		e.addEvent(ctx, model.MainThread, "Corgi 醒了，记忆已整理完毕", archivedRef, "info")
+	}
+
+	// Report Dream anomalies to the Brain (Router) so it can decide whether to handle
+	// automatically (schedule retry / note / ignore) or ask the user to intervene.
+	if !ok && !apiErrIsAuth && (runCtx == nil || runCtx.Err() == nil) {
+		canNotifyBrain := d.mode != "api" || e.hasConfiguredRouterAPIKey(ctx, e.Settings())
+		if canNotifyBrain && e.store != nil {
+			errDesc := orStr(apiErr, "未落盘做梦日志")
+			if recovered && apiErr == "" {
+				errDesc = "Hub 重启导致后台做梦中断，未完成落盘"
+			}
+			elapsed := time.Since(d.at).Round(time.Second)
+			if elapsed < 0 {
+				elapsed = 0
+			}
+			progress := fmt.Sprintf("第 %d 步", stepCount)
+			if lastTool != "" {
+				progress += "（最后工具：" + lastTool + "）"
+			}
+			report := fmt.Sprintf(
+				"[做梦异常报告] 后台记忆整理（模式=%s，触发=%s，已运行=%s，进度=%s）未能正常完成。\n"+
+					"异常原因：%s\n"+
+					"请你作为大脑综合判断：\n"+
+					"- 若属临时网络/上游波动且无需打扰主人，可自行决定设提醒延后重跑或直接输出 [SILENT] 忽略；\n"+
+					"- 若需要主人介入（如模型异常、配额/配置问题、记忆文件异常或连续失败），请用 reply_user 简洁向主人说明原因与建议方案（必要时发 attention 决策卡）。",
+				orStr(d.mode, "pty"), orStr(d.reason, "auto"), elapsed, progress, errDesc,
+			)
+			_, _ = e.Ingest(ctx, "system", model.MainThread, "dream", report, "", model.RouterName, d.id)
+		}
 	}
 
 	if skills != "" {

@@ -388,6 +388,12 @@ func doChatCompletionAttempt(
 			idleTimer.Stop()
 			attemptCancel()
 		}()
+	} else if !useStream {
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+			// Guard non-streaming fallback calls against permanently wedged TCP sockets.
+			reqCtx, attemptCancel = context.WithTimeout(ctx, 10*time.Minute)
+			defer attemptCancel()
+		}
 	}
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(payload))

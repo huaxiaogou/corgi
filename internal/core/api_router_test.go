@@ -283,7 +283,7 @@ func TestAPIRouterTokenHubWireFormatAndGuardrailSelfCorrection(t *testing.T) {
 func TestAPIRouterMobileConsentContract(t *testing.T) {
 	eng, st, _, _ := newTestAPIEngine(t, "http://127.0.0.1:9/v1")
 
-	// Create an open prototype work item (simulating Incident 1: e3548).
+	// Create an open prototype work item.
 	wi, err := eng.SetWorkItem(context.Background(), "new", model.MainThread, "会话直聊身份提醒原型", "确认原型交互", "", "")
 	if err != nil {
 		t.Fatalf("create work item: %v", err)
@@ -292,28 +292,22 @@ func TestAPIRouterMobileConsentContract(t *testing.T) {
 		t.Fatalf("set scope: %v", err)
 	}
 
-	// Case 1: Human gives prototype feedback WITHOUT naming work_id -> model tries dispatch_work(mode="implement")
-	// even omitting work_id -> MUST be blocked by Go pre-binding!
-	_, protoTrig, err := eng.Say(context.Background(), SayRequest{
+	// Case 1: Unquoted human prose must NOT be guessed-bound via hardcoded Chinese keywords.
+	_, proseTrig, err := eng.Say(context.Background(), SayRequest{
 		Thread:  model.MainThread,
 		Channel: "wecom",
 		From:    "owner",
 		Text:    "这个提示放在顶部更好",
 	})
 	if err != nil {
-		t.Fatalf("say proto feedback: %v", err)
+		t.Fatalf("say prose: %v", err)
 	}
-	meta := eng.resolveTurnConsentMeta(context.Background(), protoTrig)
-	if meta.prototypeBlockedWorkID != wi.ID {
-		t.Fatalf("expected pre-bound prototype work item %s, got %q", wi.ID, meta.prototypeBlockedWorkID)
-	}
-	turn := &apiRouterTurn{thread: model.MainThread, triggerID: protoTrig.ID}
-	resStr := eng.toolDispatchWork(context.Background(), turn, protoTrig, meta, `{"mode":"implement","goal":"修改 Corgi 顶部栏源码"}`)
-	if !strings.Contains(resStr, `"ok":false`) || !strings.Contains(resStr, "原型/只读阶段") {
-		t.Fatalf("expected prototype transition block, got: %s", resStr)
+	proseMeta := eng.resolveTurnConsentMeta(context.Background(), proseTrig)
+	if proseMeta.boundWorkItem != nil {
+		t.Fatalf("expected no regex/keyword auto-binding on unquoted prose, got %+v", proseMeta.boundWorkItem)
 	}
 
-	// Case 2: Non-human worker report tries to call implement or verify(send_on_fail=true) -> MUST be blocked!
+	// Case 2: Non-human worker report is structurally blocked from implement and allow_release.
 	workerTrig, err := eng.Ingest(context.Background(), "worker", model.MainThread, "worker-1", "测试挂了一个用例", "", model.RouterName, "worker-1")
 	if err != nil {
 		t.Fatalf("ingest worker trig: %v", err)
@@ -323,25 +317,33 @@ func TestAPIRouterMobileConsentContract(t *testing.T) {
 	if !strings.Contains(resWorker, `"ok":false`) || !strings.Contains(resWorker, "非人类直接指令") {
 		t.Fatalf("expected non-human implement block, got: %s", resWorker)
 	}
+	resWorkerRel := eng.toolDispatchWork(context.Background(), &apiRouterTurn{thread: model.MainThread, triggerID: workerTrig.ID}, workerTrig, wMeta, `{"mode":"implement","allow_release":true,"goal":"merge and deploy"}`)
+	if !strings.Contains(resWorkerRel, `"ok":false`) || !strings.Contains(resWorkerRel, "非人类直接指令") {
+		t.Fatalf("expected non-human allow_release block, got: %s", resWorkerRel)
+	}
 
-	// Case 3: Unauthorized merge/push/deploy (Incident 2: e3268) -> MUST be blocked even on fresh human turn!
-	_, mergeTrig, err := eng.Say(context.Background(), SayRequest{
+	// Case 3: Human turn with arbitrary phrasing / English / card click passes allow_release cleanly (zero regex restriction).
+	_, shipTrig, err := eng.Say(context.Background(), SayRequest{
 		Thread:  model.MainThread,
 		Channel: "wecom",
 		From:    "owner",
-		Text:    "看看这个分支情况",
+		Text:    "ship it and roll out to production",
 	})
 	if err != nil {
-		t.Fatalf("say merge check: %v", err)
+		t.Fatalf("say ship: %v", err)
 	}
-	mMeta := eng.resolveTurnConsentMeta(context.Background(), mergeTrig)
-	resMerge := eng.toolDispatchWork(context.Background(), &apiRouterTurn{thread: model.MainThread, triggerID: mergeTrig.ID}, mergeTrig, mMeta, `{"mode":"implement","goal":"执行 git merge main 并推送到远端"}`)
-	if !strings.Contains(resMerge, `"ok":false`) || !strings.Contains(resMerge, "高风险发布操作") {
-		t.Fatalf("expected release op block, got: %s", resMerge)
+	sMeta := eng.resolveTurnConsentMeta(context.Background(), shipTrig)
+	resBadMode := eng.toolDispatchWork(context.Background(), &apiRouterTurn{thread: model.MainThread, triggerID: shipTrig.ID}, shipTrig, sMeta, `{"mode":"readonly","allow_release":true,"goal":"ship it"}`)
+	if !strings.Contains(resBadMode, `"ok":false`) || !strings.Contains(resBadMode, "allow_release") {
+		t.Fatalf("expected allow_release rejected on readonly mode, got: %s", resBadMode)
+	}
+	// With mode=implement + allow_release=true on a human turn, consent gate MUST pass (reaches fleet nil check, not regex rejection).
+	resShip := eng.toolDispatchWork(context.Background(), &apiRouterTurn{thread: model.MainThread, triggerID: shipTrig.ID}, shipTrig, sMeta, `{"mode":"implement","allow_release":true,"goal":"合入并走完构建→部署→健康核验"}`)
+	if !strings.Contains(resShip, "Fleet 暂未连接") {
+		t.Fatalf("expected human allow_release to pass consent gate and hit fleet check, got: %s", resShip)
 	}
 
-	// Case 4: Fresh explicit mobile coding request (unrelated to prototype) passes consent check!
-	// (Note: e.fleet is nil in unit test so Spawn itself fails on fleet check AFTER passing the consent gate.)
+	// Case 4: Fresh explicit mobile coding request passes consent check cleanly.
 	_, freshTrig, err := eng.Say(context.Background(), SayRequest{
 		Thread:  model.MainThread,
 		Channel: "wecom",
@@ -352,11 +354,8 @@ func TestAPIRouterMobileConsentContract(t *testing.T) {
 		t.Fatalf("say fresh coding: %v", err)
 	}
 	fMeta := eng.resolveTurnConsentMeta(context.Background(), freshTrig)
-	if fMeta.prototypeBlockedWorkID != "" {
-		t.Fatalf("fresh unrelated coding request should not bind to prototype work item, got %q", fMeta.prototypeBlockedWorkID)
-	}
 	resFresh := eng.toolDispatchWork(context.Background(), &apiRouterTurn{thread: model.MainThread, triggerID: freshTrig.ID}, freshTrig, fMeta, `{"mode":"implement","goal":"把登录页按钮改成蓝色并跑单测"}`)
-	if strings.Contains(resFresh, "原型/只读阶段") || strings.Contains(resFresh, "非人类直接指令") {
+	if !strings.Contains(resFresh, "Fleet 暂未连接") {
 		t.Fatalf("fresh explicit mobile coding request was wrongly blocked by consent gate: %s", resFresh)
 	}
 }
@@ -876,5 +875,88 @@ func TestAPIModeNoPTYTranscriptLeakAndCleanHistoryAndProgress(t *testing.T) {
 	sink.mu.Unlock()
 	if len(progs) == 0 || !strings.Contains(progs[0].think, "正在整理回复") || progs[0].triggerID != trig.ID {
 		t.Fatalf("expected Chinese API tool progress for %s, got %+v", trig.ID, progs)
+	}
+}
+
+func TestAPIRouterMaxStepsExhaustedNeverSilentlySwallows(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		reqCount int
+		lastMsgs []LLMMessage
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req LLMChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		reqCount++
+		n := reqCount
+		lastMsgs = req.Messages
+		mu.Unlock()
+
+		// Stubbornly keep calling read_detail on every step without calling reply_user.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "cmpl-loop", "model": "kimi-k3",
+			"choices": []map[string]any{{
+				"index": 0, "finish_reason": "tool_calls",
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{{
+						"id": "call_" + string(rune('a'+n)), "type": "function",
+						"function": map[string]any{
+							"name":      "read_detail",
+							"arguments": `{"kind":"work_item","target":"missing"}`,
+						},
+					}},
+				},
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	eng, st, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	ctx := context.Background()
+	_, trig, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "wecom", From: "owner", Text: "帮我合入部署"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.deliverAPIRouter(ctx, []*model.Trigger{trig})
+	waitUntil(t, 5*time.Second, func() bool {
+		return !eng.isRouterWorking(ctx)
+	}, "max steps turn settled")
+
+	mu.Lock()
+	gotSteps := reqCount
+	finalMsgs := lastMsgs
+	mu.Unlock()
+	if gotSteps != maxAPIRouterSteps {
+		t.Fatalf("expected %d steps, got %d", maxAPIRouterSteps, gotSteps)
+	}
+	// Verify wrap-up reminder was injected before the last step.
+	foundNudge := false
+	for _, m := range finalMsgs {
+		if s, ok := m.Content.(string); ok && strings.Contains(s, "最后一步") {
+			foundNudge = true
+			break
+		}
+	}
+	if !foundNudge {
+		t.Fatalf("expected wrap-up nudge before final step, got %+v", finalMsgs)
+	}
+
+	// Verify explicit error event was emitted and stream sealed with "error" (NEVER "silent").
+	ends := sink.ends()
+	if len(ends) == 0 || ends[len(ends)-1].reason != "error" {
+		t.Fatalf("expected error seal on max-step exhaustion, got %+v", ends)
+	}
+	entries, _, _ := st.ListEntries(ctx, model.MainThread, 10)
+	foundErrEv := false
+	for _, en := range entries {
+		if en.Role == "event" && strings.Contains(en.Text, "最大工具步数") {
+			foundErrEv = true
+			break
+		}
+	}
+	if !foundErrEv {
+		t.Fatalf("expected visible error event on max-step exhaustion, entries=%+v", entries)
 	}
 }

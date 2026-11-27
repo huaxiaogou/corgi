@@ -205,7 +205,7 @@ func (m *MemoryManager) SaveFile(relPath, content string) error {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 	normalized := strings.TrimRight(content, "\n") + "\n"
-	return os.WriteFile(target, []byte(normalized), 0o600)
+	return writeFileAtomic(target, []byte(normalized), 0o600)
 }
 
 // WriteRouterDocs writes CORGI.md and mirrors it to CLAUDE.md / AGENTS.md / GEMINI.md / CODEBUDDY.md.

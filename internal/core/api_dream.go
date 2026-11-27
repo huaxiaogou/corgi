@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -15,9 +16,8 @@ import (
 )
 
 const (
-	apiDreamDeadline            = 6 * time.Minute
-	maxAPIDreamSteps            = 8
-	maxAPIDreamToolCalls        = 12
+	maxAPIDreamSteps            = 16
+	maxAPIDreamToolCalls        = 24
 	maxAPIDreamInputRunes       = 36000
 	maxAPIDreamToolOutputBytes  = 8192
 	maxAPIDreamMemoryWriteBytes = 32 << 10
@@ -96,17 +96,30 @@ func (e *Engine) runAPIDream(d *dreamRun, _ model.Settings) {
 	if rootCtx == nil {
 		rootCtx = context.Background()
 	}
-	dreamCtx, cancel := context.WithTimeout(rootCtx, apiDreamDeadline)
+	// API Dream is an async background task: no arbitrary wall-clock deadline.
+	// Stream health is monitored by ChatCompletion's per-chunk SSE idle watchdog (60s)
+	// and step/tool progress tracking; genuine faults are reported back to the Brain.
+	dreamCtx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
+
+	e.mu.Lock()
+	if e.dream == d {
+		d.cancel = cancel
+		d.lastProgressAt = time.Now()
+	}
+	e.mu.Unlock()
 
 	ok := false
 	errMsg := ""
+	errIsAuth := false
 	defer func() {
 		e.mu.Lock()
 		if e.dream == d {
 			d.apiDone = true
 			d.apiOK = ok
 			d.apiErr = errMsg
+			d.apiErrIsAuth = errIsAuth
+			d.cancel = nil
 		}
 		e.mu.Unlock()
 		e.wake()
@@ -115,6 +128,7 @@ func (e *Engine) runAPIDream(d *dreamRun, _ model.Settings) {
 	cfg, modelName, effort, cacheKey, err := e.resolveActiveRouterAPIConfig(dreamCtx)
 	if err != nil {
 		errMsg = oneLineClip(err.Error(), 140)
+		errIsAuth = errors.Is(err, ErrLLMAuth)
 		if e.logger != nil {
 			e.logger.Warn("api dream config failed", "id", d.id, "err", err)
 		}
@@ -149,8 +163,14 @@ func (e *Engine) runAPIDream(d *dreamRun, _ model.Settings) {
 			errMsg = oneLineClip(dreamCtx.Err().Error(), 120)
 			return
 		}
-		stepCtx, stepCancel := context.WithTimeout(dreamCtx, apiRouterStepDeadline)
-		resp, err := ChatCompletion(stepCtx, cfg, LLMChatRequest{
+		e.mu.Lock()
+		if e.dream == d {
+			d.step = step + 1
+			d.lastProgressAt = time.Now()
+		}
+		e.mu.Unlock()
+
+		resp, err := ChatCompletion(dreamCtx, cfg, LLMChatRequest{
 			Model:           modelName,
 			Messages:        messages,
 			Tools:           tools,
@@ -159,29 +179,40 @@ func (e *Engine) runAPIDream(d *dreamRun, _ model.Settings) {
 			Stream:          true,
 			StreamOptions:   &LLMStreamOptions{IncludeUsage: true},
 		})
-		stepCancel()
 		if err != nil {
 			errMsg = oneLineClip(err.Error(), 140)
+			errIsAuth = errors.Is(err, ErrLLMAuth)
 			if e.logger != nil {
-				e.logger.Warn("api dream llm call failed", "id", d.id, "step", step+1, "err", err)
+				e.logger.Warn("api dream llm call failed", "id", d.id, "step", step+1, "model", modelName, "effort", effort, "err", err)
 			}
 			return
 		}
+		choice := resp.Choices[0].Message
 		if e.logger != nil {
 			cached := 0
 			if resp.Usage.PromptTokensDetails != nil {
 				cached = resp.Usage.PromptTokensDetails.CachedTokens
 			}
+			reasoning := 0
+			if resp.Usage.CompletionTokensDetails != nil {
+				reasoning = resp.Usage.CompletionTokensDetails.ReasoningTokens
+			}
+			toolNames := make([]string, 0, len(choice.ToolCalls))
+			for _, tc := range choice.ToolCalls {
+				toolNames = append(toolNames, tc.Function.Name)
+			}
 			e.logger.Info("api dream step",
-				"id", d.id, "step", step+1, "model", modelName,
+				"id", d.id, "step", step+1, "model", modelName, "effort", effort,
+				"ttft_ms", resp.TTFT.Milliseconds(),
 				"latency_ms", resp.Latency.Milliseconds(),
 				"prompt_tokens", resp.Usage.PromptTokens,
 				"cached_tokens", cached,
 				"completion_tokens", resp.Usage.CompletionTokens,
+				"reasoning_tokens", reasoning,
+				"tools", strings.Join(toolNames, ","),
 				"request_id", resp.RequestID)
 		}
 
-		choice := resp.Choices[0].Message
 		if len(choice.ToolCalls) == 0 {
 			if !nudgedFinish && step < maxAPIDreamSteps-1 {
 				nudgedFinish = true
@@ -204,6 +235,13 @@ func (e *Engine) runAPIDream(d *dreamRun, _ model.Settings) {
 		done := false
 		for _, tc := range choice.ToolCalls {
 			totalCalls++
+			e.mu.Lock()
+			if e.dream == d {
+				d.lastTool = tc.Function.Name
+				d.lastProgressAt = time.Now()
+			}
+			e.mu.Unlock()
+
 			var toolOut string
 			if totalCalls > maxAPIDreamToolCalls {
 				if tc.Function.Name == "finish_dream" {
@@ -213,6 +251,10 @@ func (e *Engine) runAPIDream(d *dreamRun, _ model.Settings) {
 				}
 			} else {
 				toolOut, done = e.execAPIDreamTool(d, tc)
+			}
+			if strings.Contains(toolOut, `"ok":false`) && e.logger != nil {
+				e.logger.Warn("api dream tool rejected",
+					"id", d.id, "step", step+1, "tool", tc.Function.Name, "result", oneLineClip(toolOut, 240))
 			}
 			if len(toolOut) > maxAPIDreamToolOutputBytes {
 				toolOut = toolOut[:maxAPIDreamToolOutputBytes] + "...[truncated]"
@@ -228,9 +270,15 @@ func (e *Engine) runAPIDream(d *dreamRun, _ model.Settings) {
 				return
 			}
 		}
+		if step == maxAPIDreamSteps-2 {
+			messages = append(messages, LLMMessage{
+				Role:    "user",
+				Content: "即将达到最大整理步数，请立即调用 finish_dream 落盘本次做梦日志。",
+			})
+		}
 	}
 	if !ok && errMsg == "" {
-		errMsg = "达到最大步数仍未完成做梦落盘"
+		errMsg = fmt.Sprintf("达到最大步数（%d 步）仍未完成做梦落盘", maxAPIDreamSteps)
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -15,21 +14,12 @@ import (
 )
 
 type turnConsentMeta struct {
-	isHuman                 bool
-	sourceEntry             *model.Entry
-	verbatimRequest         string
-	approvedAction          *model.Action
-	boundWorkItem           *model.WorkItem
-	prototypeBlockedWorkID  string
-	explicitReleaseApproved bool
+	isHuman         bool
+	sourceEntry     *model.Entry
+	verbatimRequest string
+	approvedAction  *model.Action
+	boundWorkItem   *model.WorkItem
 }
-
-var (
-	declineChoiceRe  = regexp.MustCompile(`(?i)^(取消|不用|先不用|否|拒绝|放弃|暂不|不改|仅查看|只看|cancel|no|esc|dismiss|reject|stop)$`)
-	affirmReleaseRe  = regexp.MustCompile(`(?i)(确认|同意|批准|合并|合入|推送|发布|部署|执行|继续|approve|confirm|merge|push|deploy|yes)`)
-	releaseOpRe      = regexp.MustCompile(`(?i)(\bgit\s+(merge|push|tag)\b|\bgh\s+release\b|\bdeploy\b|合并到\s*main|合入\s*main|推送到远端|推到远端|发布线上|上线部署|发版部署)`)
-	codeEditHintRe   = regexp.MustCompile(`(?i)(改代码|修改源码|改源码|落入源码|实现代码|重构代码|合入|合并分支|edit\s+source|implement\s+in\s+code)`)
-)
 
 func (e *Engine) resolveTurnConsentMeta(ctx context.Context, trig *model.Trigger) *turnConsentMeta {
 	meta := &turnConsentMeta{}
@@ -54,18 +44,15 @@ func (e *Engine) resolveTurnConsentMeta(ctx context.Context, trig *model.Trigger
 			}
 			if en.ActionID != "" {
 				if act, aErr := e.store.GetAction(ctx, en.ActionID); aErr == nil && act != nil && orStr(act.Thread, model.MainThread) == thread {
-					if isAffirmativeHumanAction(act) {
+					if isHumanResolvedAction(act) {
 						meta.approvedAction = act
-						if releaseOpRe.MatchString(act.Title+"\n"+act.Summary) && affirmReleaseRe.MatchString(act.ChosenLabel) {
-							meta.explicitReleaseApproved = true
-						}
 					}
 				}
 			}
 		}
 	}
 
-	// Pre-bind work item before the model chooses work_id/mode/resume.
+	// Bind work item strictly from explicit structured references (no natural-language keyword guessing).
 	boundID := strings.TrimSpace(trig.WorkItemID)
 	if boundID == "" && meta.approvedAction != nil {
 		boundID = strings.TrimSpace(meta.approvedAction.WorkItemID)
@@ -94,51 +81,10 @@ func (e *Engine) resolveTurnConsentMeta(ctx context.Context, trig *model.Trigger
 			meta.boundWorkItem = wi
 		}
 	}
-
-	// For unquoted human prose in a thread with an active prototype/readonly item, bind it if unambiguous
-	// (either mentions a prototype/the same project, or is the sole open prototype/readonly item and no other project is named).
-	if meta.boundWorkItem == nil && meta.isHuman {
-		if items, err := e.store.ListWorkItems(ctx, false); err == nil {
-			var protoItems []*model.WorkItem
-			for _, wi := range items {
-				if orStr(wi.Thread, model.MainThread) != thread {
-					continue
-				}
-				if isPrototypeOrReadonlyWorkItem(wi) {
-					protoItems = append(protoItems, wi)
-				}
-			}
-			if len(protoItems) == 1 {
-				cand := protoItems[0]
-				if mentionsWorkItemContext(meta.verbatimRequest, cand) {
-					meta.boundWorkItem = cand
-				}
-			} else if len(protoItems) > 1 {
-				var matched []*model.WorkItem
-				for _, cand := range protoItems {
-					if mentionsWorkItemContext(meta.verbatimRequest, cand) {
-						matched = append(matched, cand)
-					}
-				}
-				// Require a unique match before auto-binding from unquoted prose.
-				if len(matched) == 1 {
-					meta.boundWorkItem = matched[0]
-				}
-			}
-		}
-	}
-
-	if meta.boundWorkItem != nil && isPrototypeOrReadonlyWorkItem(meta.boundWorkItem) {
-		unlocked := meta.approvedAction != nil &&
-			(meta.approvedAction.WorkItemID == "" || meta.approvedAction.WorkItemID == meta.boundWorkItem.ID)
-		if !unlocked {
-			meta.prototypeBlockedWorkID = meta.boundWorkItem.ID
-		}
-	}
 	return meta
 }
 
-func isAffirmativeHumanAction(act *model.Action) bool {
+func isHumanResolvedAction(act *model.Action) bool {
 	if act == nil || act.Status != model.ActionResolved {
 		return false
 	}
@@ -152,14 +98,9 @@ func isAffirmativeHumanAction(act *model.Action) bool {
 		}
 	}
 	if strings.EqualFold(strings.TrimSpace(act.ChosenKey), "reply") {
-		return false // free-text quoted replies do not automatically grant elevated consent
-	}
-	label := strings.TrimSpace(act.ChosenLabel)
-	key := strings.TrimSpace(act.ChosenKey)
-	if declineChoiceRe.MatchString(label) || declineChoiceRe.MatchString(key) {
 		return false
 	}
-	return label != "" || key != ""
+	return strings.TrimSpace(act.ChosenLabel) != "" || strings.TrimSpace(act.ChosenKey) != ""
 }
 
 func isPrototypeOrReadonlyWorkItem(wi *model.WorkItem) bool {
@@ -169,45 +110,9 @@ func isPrototypeOrReadonlyWorkItem(wi *model.WorkItem) bool {
 	switch strings.ToLower(strings.TrimSpace(wi.Scope)) {
 	case "prototype", "readonly":
 		return true
-	case "implement":
+	default:
 		return false
 	}
-	// Legacy item without explicit scope: treat HTML-prototype-only deliverables as prototype stage.
-	if len(wi.Artifacts) > 0 && len(wi.Branches) == 0 {
-		for _, a := range wi.Artifacts {
-			low := strings.ToLower(a.Name + " " + a.Path)
-			if strings.HasSuffix(low, ".html") || strings.Contains(low, "prototype") || strings.Contains(low, "原型") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func mentionsWorkItemContext(text string, wi *model.WorkItem) bool {
-	low := strings.ToLower(strings.TrimSpace(text))
-	if low == "" || wi == nil {
-		return false
-	}
-	if strings.Contains(low, strings.ToLower(wi.ID)) {
-		return true
-	}
-	for _, kw := range []string{"原型", "prototype", "这个提示", "这个页面", "这个交互", "上面那个", "刚才那个", "这个方案", "这个草图"} {
-		if strings.Contains(low, kw) {
-			return true
-		}
-	}
-	for _, a := range wi.Artifacts {
-		if a.Name != "" && strings.Contains(low, strings.ToLower(a.Name)) {
-			return true
-		}
-	}
-	for _, w := range wi.Workers {
-		if w != "" && strings.Contains(low, strings.ToLower(w)) {
-			return true
-		}
-	}
-	return false
 }
 
 // apiRouterToolDefs returns the 8 deterministic, strictly ordered native Go tool definitions
@@ -229,9 +134,10 @@ func apiRouterToolDefs() []LLMToolDef {
 						"project":    map[string]any{"type": "string", "description": "已配置的项目 ID 或名称"},
 						"machine":    map[string]any{"type": "string", "description": "运行机器 ID（留空用全局默认）"},
 						"kind":       map[string]any{"type": "string", "enum": []string{"claude", "codex", "agy", "codebuddy"}, "description": "指定 CLI 工具（留空用全局默认）"},
-						"resume":     map[string]any{"type": "string", "description": "续聊已有/已结束 Worker 的名称（可选）"},
-						"constraint": map[string]any{"type": "string", "description": "给 Worker 的额外硬约束（可选）"},
-						"worktree":   map[string]any{"type": "string", "enum": []string{"auto", "on", "off"}, "description": "worktree 隔离策略（implement 默认强制 on）"},
+						"resume":        map[string]any{"type": "string", "description": "续聊已有/已结束 Worker 的名称（可选）"},
+						"constraint":    map[string]any{"type": "string", "description": "给 Worker 的额外硬约束（可选）"},
+						"worktree":      map[string]any{"type": "string", "enum": []string{"auto", "on", "off"}, "description": "worktree 隔离策略（普通 implement 默认 on，allow_release 默认 off）"},
+						"allow_release": map[string]any{"type": "boolean", "description": "仅当用户已明确批准合并主分支、推送远端、发版或部署上线时设为 true（仅人类直接指令回合可用）"},
 					},
 					"required": []string{"mode", "goal"},
 				},
@@ -515,16 +421,17 @@ func (e *Engine) toolReplyUser(ctx context.Context, turn *apiRouterTurn, trig *m
 
 func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, meta *turnConsentMeta, rawArgs string) string {
 	var args struct {
-		Mode       string `json:"mode"`
-		Goal       string `json:"goal"`
-		WorkID     string `json:"work_id"`
-		Title      string `json:"title"`
-		Project    string `json:"project"`
-		Machine    string `json:"machine"`
-		Kind       string `json:"kind"`
-		Resume     string `json:"resume"`
-		Constraint string `json:"constraint"`
-		Worktree   string `json:"worktree"`
+		Mode         string `json:"mode"`
+		Goal         string `json:"goal"`
+		WorkID       string `json:"work_id"`
+		Title        string `json:"title"`
+		Project      string `json:"project"`
+		Machine      string `json:"machine"`
+		Kind         string `json:"kind"`
+		Resume       string `json:"resume"`
+		Constraint   string `json:"constraint"`
+		Worktree     string `json:"worktree"`
+		AllowRelease bool   `json:"allow_release"`
 	}
 	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
 		return toolErr("dispatch_work 参数 JSON 无效：" + err.Error())
@@ -540,16 +447,24 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		return toolErr("goal 不能为空")
 	}
 
-	// Hard guard: merge / push / deploy ALWAYS require dedicated human card approval.
-	if releaseOpRe.MatchString(goal) && (meta == nil || !meta.explicitReleaseApproved) {
-		return toolErr("合并分支、推送远端或线上部署属于高风险发布操作，不可自主派发；请先用 reply_user(purpose=\"attention\") 发独立确认卡由用户批准。")
+	// Deterministic structural boundary (zero natural-language regex):
+	// non-human triggers (worker reports / timers / system / candidate) may never autonomously edit code or release.
+	if args.AllowRelease {
+		if meta == nil || !meta.isHuman {
+			return toolErr("非人类直接指令禁止开启 allow_release 执行合并/推送/部署操作；请先用 reply_user(purpose=\"attention\") 发确认卡请用户拍板。")
+		}
+		if mode != "implement" {
+			return toolErr("allow_release 仅可与 mode=\"implement\" 配合使用")
+		}
+	}
+	if mode == "implement" && (meta == nil || !meta.isHuman) {
+		return toolErr("非人类直接指令（Worker 汇报 / 定时器 / 系统 / candidate 事件）禁止自动启动 implement 写代码；请改用 reply_user(purpose=\"attention\") 发确认卡请用户决定。")
 	}
 
 	targetWorkID := strings.TrimSpace(args.WorkID)
 	if targetWorkID == "" && meta != nil && meta.boundWorkItem != nil {
 		targetWorkID = meta.boundWorkItem.ID
 	}
-	var targetWI *model.WorkItem
 	if targetWorkID != "" {
 		wi, err := e.store.GetWorkItem(ctx, targetWorkID)
 		if err != nil {
@@ -561,27 +476,11 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		if wi.ClosedAt != nil {
 			return toolErr("work_id 已关闭，如需重新开启请先提示用户或创建新工作项")
 		}
-		targetWI = wi
 	}
 
-	// Mobile consent contract for mode=="implement":
-	if mode == "implement" {
-		if meta == nil || !meta.isHuman {
-			return toolErr("非人类直接指令（Worker 汇报 / 定时器 / 系统 / candidate 事件）禁止自动启动 implement 写代码；请改用 reply_user(purpose=\"attention\") 发确认卡请用户决定。")
-		}
-		if meta.prototypeBlockedWorkID != "" {
-			return toolErr(fmt.Sprintf("当前对话关联的工作项 %s 仍处于原型/只读阶段；从原型转入修改产品源码前，请先调用 reply_user(purpose=\"attention\", work_id=%q) 发 1 张过渡确认卡请用户拍板。", meta.prototypeBlockedWorkID, meta.prototypeBlockedWorkID))
-		}
-		if targetWI != nil && isPrototypeOrReadonlyWorkItem(targetWI) {
-			unlocked := meta.approvedAction != nil && (meta.approvedAction.WorkItemID == "" || meta.approvedAction.WorkItemID == targetWI.ID)
-			if !unlocked {
-				return toolErr(fmt.Sprintf("工作项 %s 处于原型/只读阶段，不可直接升级为 implement；请先发 1 张 attention 过渡确认卡请用户确认。", targetWI.ID))
-			}
-		}
-	}
-
-	// Build scope constraint for readonly/prototype workers.
-	constraint := strings.TrimSpace(args.Constraint)
+	// Build scope constraint for newly spawned workers.
+	rawConstraint := strings.TrimSpace(args.Constraint)
+	constraint := rawConstraint
 	switch mode {
 	case "readonly":
 		prefix := "【只读范围】仅允许阅读、分析、调研和输出报告，严禁修改仓库源码、严禁 git commit/merge/push。"
@@ -599,6 +498,9 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		}
 	case "implement":
 		prefix := "【源码实现范围】仅在当前隔离分支完成本次改动与所请求的测试；严禁擅自 git merge 到主分支、git push 或部署上线。"
+		if args.AllowRelease {
+			prefix = "【已获用户发布授权】按本次明确目标执行合入、构建、部署与核验，严格遵守任务说明中的范围与检查步骤。"
+		}
 		if constraint == "" {
 			constraint = prefix
 		} else {
@@ -612,18 +514,11 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		if gErr == nil && prevWk != nil && orStr(prevWk.Thread, model.MainThread) != turn.thread {
 			return toolErr("目标 Worker 不属于当前会话线程")
 		}
-		if prevWk != nil && prevWk.WorkItemID != "" && mode == "implement" {
-			if pwi, pErr := e.store.GetWorkItem(ctx, prevWk.WorkItemID); pErr == nil && isPrototypeOrReadonlyWorkItem(pwi) {
-				if meta == nil || meta.approvedAction == nil {
-					return toolErr(fmt.Sprintf("Worker #%s 关联的原工作项 %s 处于原型/只读阶段，不可通过 resume 静默升级为改源码，请先发确认卡。", resumeName, pwi.ID))
-				}
-			}
-		}
 		e.recordAPIRouterInflight(context.Background(), trig, "resume_worker", resumeName)
 		wk, resumed, err := e.ResumeWorkerSession(ctx, ResumeWorkerRequest{
 			Name:       resumeName,
 			WorkItemID: targetWorkID,
-			Constraint: constraint,
+			Constraint: rawConstraint,
 		})
 		if err != nil {
 			return toolErr("续聊 Worker 失败：" + err.Error())
@@ -658,7 +553,11 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 
 	wtMode := strings.TrimSpace(args.Worktree)
 	if mode == "implement" && wtMode == "" {
-		wtMode = "on"
+		if args.AllowRelease {
+			wtMode = "off"
+		} else {
+			wtMode = "on"
+		}
 	}
 	origReq := ""
 	if meta != nil {
@@ -751,16 +650,6 @@ func (e *Engine) toolSteerWorker(ctx context.Context, turn *apiRouterTurn, trig 
 	if wk.Ended {
 		return toolErr("Worker #" + name + " 已结束，请改用 dispatch_work(resume=" + name + ") 续聊")
 	}
-	if releaseOpRe.MatchString(msg) && (meta == nil || !meta.explicitReleaseApproved) {
-		return toolErr("禁止通过 steer_worker 指示 Worker 合并/推送/部署；请先发 attention 确认卡请用户审批。")
-	}
-	if wk.WorkItemID != "" {
-		if wi, wErr := e.store.GetWorkItem(ctx, wk.WorkItemID); wErr == nil && isPrototypeOrReadonlyWorkItem(wi) {
-			if codeEditHintRe.MatchString(msg) && (meta == nil || meta.approvedAction == nil) {
-				return toolErr(fmt.Sprintf("Worker #%s 绑定在原型/只读工作项 %s 上，禁止通过 steer_worker 静默升级为修改源码；请先发 1 张 attention 过渡确认卡。", name, wi.ID))
-			}
-		}
-	}
 
 	e.recordAPIRouterInflight(context.Background(), trig, "steer_worker", name)
 	if _, _, err := e.SendToWorkerWithWork(ctx, name, turn.thread, msg, strings.TrimSpace(args.WorkID)); err != nil {
@@ -796,11 +685,6 @@ func (e *Engine) toolVerifyWorker(ctx context.Context, turn *apiRouterTurn, trig
 	if args.SendOnFail {
 		if meta == nil || !meta.isHuman {
 			return toolErr("非人类直接指令禁止开启 send_on_fail 自动派发修复；请先不带 send_on_fail 执行验收，再视结果汇报或发确认卡。")
-		}
-		if wk.WorkItemID != "" {
-			if wi, wErr := e.store.GetWorkItem(ctx, wk.WorkItemID); wErr == nil && isPrototypeOrReadonlyWorkItem(wi) && meta.approvedAction == nil {
-				return toolErr("只读/原型工作项禁止开启 send_on_fail 自动改源码。")
-			}
 		}
 		e.recordAPIRouterInflight(context.Background(), trig, "verify_worker", name)
 	}

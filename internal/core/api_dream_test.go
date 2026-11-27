@@ -216,8 +216,29 @@ func TestAPIDreamNoFleetFullLoopAndSkillCards(t *testing.T) {
 	}
 }
 
-func TestAPIDreamFailureConvergesAndNightlyDoesNotSpin(t *testing.T) {
+func TestAPIDreamFailureConvergesReportsToBrainAndNightlyDoesNotSpin(t *testing.T) {
+	var (
+		mu           sync.Mutex
+		brainReports []string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req LLMChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Messages) > 0 {
+			if last, ok := req.Messages[len(req.Messages)-1].Content.(string); ok && strings.Contains(last, "做梦异常报告") {
+				mu.Lock()
+				brainReports = append(brainReports, last)
+				mu.Unlock()
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id": "cmpl-brain", "model": "kimi-k3",
+					"choices": []map[string]any{{
+						"index": 0, "finish_reason": "stop",
+						"message": map[string]any{"role": "assistant", "content": "[SILENT]"},
+					}},
+				})
+				return
+			}
+		}
 		http.Error(w, "upstream overloaded", http.StatusBadRequest)
 	}))
 	defer srv.Close()
@@ -248,6 +269,20 @@ func TestAPIDreamFailureConvergesAndNightlyDoesNotSpin(t *testing.T) {
 	}
 	if _, hasMarker, _ := st.GetKV(ctx, activeDreamKVKey); hasMarker {
 		t.Fatal("expected active_dream marker removed after failure")
+	}
+
+	// Verify Brain received the Dream anomaly report to decide auto vs human intervention.
+	waitUntil(t, 5*time.Second, func() bool {
+		mu.Lock()
+		n := len(brainReports)
+		mu.Unlock()
+		return n > 0 && !eng.isRouterWorking(ctx)
+	}, "brain handled dream anomaly report")
+	mu.Lock()
+	rep := brainReports[0]
+	mu.Unlock()
+	if !strings.Contains(rep, "upstream overloaded") {
+		t.Fatalf("expected dream failure cause in Brain report, got: %s", rep)
 	}
 }
 
@@ -330,26 +365,48 @@ func TestAPIDreamRestartRecovery(t *testing.T) {
 	}
 }
 
-func TestAPIDreamMutexWithAPITurnAndModeSwitch(t *testing.T) {
-	startedCh := make(chan struct{})
-	releaseCh := make(chan struct{})
+func TestAPIDreamAsyncNonBlockingAndModeSwitchMutex(t *testing.T) {
+	dreamStarted := make(chan struct{})
+	dreamRelease := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-startedCh:
-		default:
-			close(startedCh)
+		var req LLMChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		isDream := strings.HasSuffix(req.PromptCacheKey, ":dream")
+		if isDream {
+			select {
+			case <-dreamStarted:
+			default:
+				close(dreamStarted)
+			}
+			<-dreamRelease
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "cmpl-dream", "model": "kimi-k3",
+				"choices": []map[string]any{{
+					"index": 0, "finish_reason": "tool_calls",
+					"message": map[string]any{
+						"role": "assistant",
+						"tool_calls": []map[string]any{
+							{"id": "c1", "type": "function", "function": map[string]any{
+								"name":      "finish_dream",
+								"arguments": `{"summary":"异步做梦完成","journal":"- ok"}`,
+							}},
+						},
+					},
+				}},
+			})
+			return
 		}
-		<-releaseCh
+		// User chat request while API Dream is still running asynchronously.
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id": "cmpl-mutex", "model": "hy4",
+			"id": "cmpl-chat", "model": "kimi-k3",
 			"choices": []map[string]any{{
 				"index": 0, "finish_reason": "tool_calls",
 				"message": map[string]any{
 					"role": "assistant",
 					"tool_calls": []map[string]any{
-						{"id": "c1", "type": "function", "function": map[string]any{
-							"name":      "finish_dream",
-							"arguments": `{"summary":"互斥测试完成","journal":"- ok"}`,
+						{"id": "r1", "type": "function", "function": map[string]any{
+							"name":      "reply_user",
+							"arguments": `{"purpose":"answer","text":"做梦中也能秒回"}`,
 						}},
 					},
 				},
@@ -358,46 +415,44 @@ func TestAPIDreamMutexWithAPITurnAndModeSwitch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	eng, _, _, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	eng, _, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
 	ctx := context.Background()
 
-	// 1. Active apiTurn blocks StartDream.
-	eng.mu.Lock()
-	eng.apiTurn = &apiRouterTurn{thread: model.MainThread, triggerID: "t1"}
-	eng.mu.Unlock()
-	if err := eng.StartDream(ctx, "manual"); err == nil {
-		t.Fatal("expected StartDream to fail while apiTurn is active")
-	}
-	eng.mu.Lock()
-	eng.apiTurn = nil
-	eng.mu.Unlock()
-
-	// 2. Active API dream blocks mode switch (api -> pty) and blocks new API router turns.
+	// 1. Start async API dream.
 	if err := eng.StartDream(ctx, "manual"); err != nil {
 		t.Fatalf("StartDream: %v", err)
 	}
-	<-startedCh
+	<-dreamStarted
 
+	// Duplicate StartDream and api->pty mode switch must still be rejected while dreaming.
+	if err := eng.StartDream(ctx, "manual"); err == nil {
+		t.Fatal("expected duplicate StartDream rejected while API dream is running")
+	}
 	st := eng.Settings()
 	st.RouterMode = "pty"
 	if err := eng.SaveConfig(ctx, &st, nil); err == nil || !strings.Contains(err.Error(), "做梦") {
 		t.Fatalf("expected mode switch rejected during active API dream, got %v", err)
 	}
 
-	// Queue a chat trigger during dream; tick must not start an apiTurn.
-	if _, _, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "hello"}); err != nil {
+	// 2. Concurrent user chat MUST NOT be blocked by async API Dream!
+	if _, _, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "hello during dream"}); err != nil {
 		t.Fatal(err)
 	}
 	eng.tick(ctx)
-	eng.mu.Lock()
-	busyTurn := eng.apiTurn != nil
-	eng.mu.Unlock()
-	if busyTurn {
-		t.Fatal("expected deliverAPIRouter blocked while API dream is running")
+	waitUntil(t, 5*time.Second, func() bool {
+		sink.mu.Lock()
+		defer sink.mu.Unlock()
+		return len(sink.replies) >= 1
+	}, "user chat replied while API dream still running")
+	waitUntil(t, 3*time.Second, func() bool {
+		return !eng.isRouterWorking(ctx)
+	}, "chat turn settled")
+	if !eng.Dreaming() {
+		t.Fatal("expected API dream still running in background while chat finished")
 	}
 
-	// Release dream, finalize on tick, verify cleanly woken.
-	close(releaseCh)
+	// 3. Release dream, finalize on tick, verify cleanly woken.
+	close(dreamRelease)
 	waitUntil(t, 5*time.Second, func() bool {
 		eng.mu.Lock()
 		defer eng.mu.Unlock()

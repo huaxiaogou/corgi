@@ -558,7 +558,7 @@ func (e *Engine) deliverAPIRouter(ctx context.Context, list []*model.Trigger) {
 	}
 	now := time.Now()
 	e.mu.Lock()
-	if e.apiTurn != nil || e.hubUpdating || e.dream != nil || e.routerDispatching || e.settings.Paused {
+	if e.apiTurn != nil || e.hubUpdating || (e.dream != nil && e.dream.mode != "api") || e.routerDispatching || e.settings.Paused {
 		e.mu.Unlock()
 		return
 	}
@@ -687,6 +687,7 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		sink.OnAPIRouterProgress(bg, turn.thread, trig.ID, strings.Join(progressLines, "\n"))
 	}
 
+	exhaustedSteps := false
 	for step := 0; step < maxAPIRouterSteps; step++ {
 		if ctx.Err() != nil {
 			if turn.isStopped() {
@@ -747,15 +748,20 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		if resp.Usage.CompletionTokensDetails != nil {
 			reasoning = resp.Usage.CompletionTokensDetails.ReasoningTokens
 		}
+		choice := resp.Choices[0].Message
+		toolNames := make([]string, 0, len(choice.ToolCalls))
+		for _, tc := range choice.ToolCalls {
+			toolNames = append(toolNames, tc.Function.Name)
+		}
 		e.logger.Info("api router step",
 			"trigger", trig.ID, "thread", turn.thread, "step", step+1,
 			"model", modelName, "effort", effort,
 			"ttft_ms", resp.TTFT.Milliseconds(), "latency_ms", resp.Latency.Milliseconds(),
 			"prompt_tokens", resp.Usage.PromptTokens, "cached_tokens", cached,
 			"completion_tokens", resp.Usage.CompletionTokens, "reasoning_tokens", reasoning,
+			"tools", strings.Join(toolNames, ","),
 			"request_id", resp.RequestID)
 
-		choice := resp.Choices[0].Message
 		if len(choice.ToolCalls) == 0 {
 			plain := strings.TrimSpace(choice.Content)
 			if plain != "" && !turn.hasReplied() && !isDeliberateSilenceText(trig, plain) {
@@ -809,6 +815,9 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 				toolOut, doneTurn = e.execAPIRouterTool(ctx, turn, trig, turnMeta, tc)
 				if strings.Contains(toolOut, `"ok":false`) {
 					stepHadErr = true
+					e.logger.Warn("api router tool rejected",
+						"trigger", trig.ID, "thread", turn.thread, "step", step+1,
+						"tool", tc.Function.Name, "result", oneLineClip(toolOut, 240))
 				}
 				if doneTurn {
 					earlyExit = true
@@ -830,6 +839,15 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		if earlyExit {
 			break
 		}
+		if step == maxAPIRouterSteps-2 && !turn.hasReplied() && ctx.Err() == nil {
+			messages = append(messages, LLMMessage{
+				Role:    "user",
+				Content: "已进入本轮最后一步，请立即调用 reply_user 向用户给出明确答复或当前进展，勿再继续拉取详情。",
+			})
+		}
+		if step == maxAPIRouterSteps-1 {
+			exhaustedSteps = true
+		}
 	}
 
 	e.ackAPITriggerOnce(bg, turn, trig)
@@ -837,6 +855,16 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		sealReason = ""
 	} else if turn.hasDispatched() {
 		sealReason = "dispatched"
+	} else if exhaustedSteps && !turn.isStopped() && sealReason != "error" && trig.Policy == "respond" {
+		e.logger.Warn("api router max steps exhausted without reply",
+			"trigger", trig.ID, "thread", turn.thread, "model", modelName, "effort", effort,
+			"mutated", turn.hasMutated(), "ops", turn.opsText())
+		notice := fmt.Sprintf("本轮已达最大工具步数（%d 步）仍未发出最终回复，已结束本轮，请重试或补充说明", maxAPIRouterSteps)
+		if turn.hasMutated() {
+			notice = fmt.Sprintf("已完成部分操作（%s），但达到最大步数（%d 步）仍未发出最终回复，请确认后续安排", orStr(turn.opsText(), "已执行变更"), maxAPIRouterSteps)
+		}
+		e.addEvent(bg, turn.thread, notice, trig.ID, "error")
+		sealReason = "error"
 	} else if sealReason != "error" {
 		sealReason = "silent"
 	}

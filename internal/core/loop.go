@@ -185,7 +185,7 @@ func (e *Engine) tick(parent context.Context) {
 		e.checkHandover(ctx, live, hasRouterQueued)
 	}
 
-	if e.Settings().Paused || e.Dreaming() || e.handingOver() || e.isHubUpdating() {
+	if e.Settings().Paused || e.isBlockingDream() || e.handingOver() || e.isHubUpdating() {
 		return
 	}
 
