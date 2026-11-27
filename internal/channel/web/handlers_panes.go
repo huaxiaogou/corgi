@@ -544,20 +544,16 @@ func (s *Server) handleLastMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if tr, _ := s.readerForPane(ctx, id); tr != nil {
 		tr.OpenTail()
-		afterText, hasAfter := tr.LastAssistantAfterLastUser(maxRunes)
-		if hasAfter {
+		st := tr.InspectLastTurn(maxRunes)
+		if st.Text != "" || st.LastUserAt > 0 {
 			writeJSON(w, http.StatusOK, map[string]any{
-				"text":            afterText,
+				"text":            st.Text,
 				"from_transcript": true,
-				"after_last_user": true,
-			})
-			return
-		}
-		if last := tr.LastAssistant(maxRunes); last != "" {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"text":            last,
-				"from_transcript": true,
-				"after_last_user": false,
+				"after_last_user": st.AfterLastUser,
+				"assistant_at":    st.AssistantAt,
+				"last_user_at":    st.LastUserAt,
+				"last_user_tid":   st.LastUserTID,
+				"last_user_seq":   st.LastUserSeq,
 			})
 			return
 		}

@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -146,5 +147,48 @@ func TestCodexToolErrorParsingAndBoundedTurnToolStats(t *testing.T) {
 	cleanStats := ComputeTurnToolStats(p, &CodeBuddyAdapter{}, 1<<20)
 	if cleanStats == nil || cleanStats.N != 1 || cleanStats.Failed != 0 || cleanStats.LastUserAt <= stats.LastUserAt {
 		t.Fatalf("expected clean turn isolated from prior failures, got %+v", cleanStats)
+	}
+}
+
+func TestInspectLastTurnAndCorgiHeaderTriggerExtraction(t *testing.T) {
+	// Only real Corgi deliverBatch event header lines (`#tID · ...`) should match — NOT prose mentions like #t9999.
+	userPrompt := "[corgi] 2 new events (batched)\n\n#t3323 · chat:main · router · from corgi · 16:59\n  不要重复报告 #t9999 或旧版\n\n#t3327 · chat:main · router · from corgi · 17:00\n  去掉折叠把手"
+	tid, seq := ExtractCorgiHeaderMaxTrigger(userPrompt)
+	if tid != "t3327" || seq != 3327 {
+		t.Fatalf("expected max header trigger (t3327, 3327), got (%q, %d)", tid, seq)
+	}
+
+	// Replay the 16:47 -> 16:59 #t3323 -> 17:03 tool-only fake idle sequence.
+	p := filepath.Join(t.TempDir(), "turn.jsonl")
+	raw := `{"type":"message","role":"user","content":[{"type":"input_text","text":"#t3313 · chat:main · router · 16:39\n  做多方案原型"}]}` + "\n" +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"16:47 旧版 4 套折叠原型"}]}` + "\n" +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"[corgi] 1 new event\n\n#t3323 · chat:main · router · 16:59\n  加入无限上下滑滚牌"}]}` + "\n" +
+		`{"type":"reasoning","content":[],"rawContent":[{"type":"reasoning_text","text":"正在检查原型代码"}]}` + "\n" +
+		`{"type":"function_call","name":"Read","arguments":{"file_path":"a.html"}}` + "\n"
+	if err := os.WriteFile(p, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewTranscriptReader(p, &CodeBuddyAdapter{}, "")
+	tr.OpenTail()
+	st := tr.InspectLastTurn(128000)
+	if st.AfterLastUser {
+		t.Fatalf("expected AfterLastUser=false on tool-only turn, got %+v", st)
+	}
+	if st.LastUserTID != "t3323" || st.LastUserSeq != 3323 || st.LastUserAt <= 0 {
+		t.Fatalf("expected LastUserTID=t3323 and LastUserAt>0, got %+v", st)
+	}
+	if !strings.Contains(st.Text, "16:47 旧版") {
+		t.Fatalf("expected fallback display text preserved when AfterLastUser=false, got %+v", st)
+	}
+
+	// Once the worker actually writes a post-user assistant message, InspectLastTurn reports AfterLastUser=true.
+	raw += `{"type":"message","role":"assistant","content":[{"type":"output_text","text":"已完成无限上下滑滚牌原型"}]}` + "\n"
+	if err := os.WriteFile(p, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tr.Poll()
+	st2 := tr.InspectLastTurn(128000)
+	if !st2.AfterLastUser || st2.Text != "已完成无限上下滑滚牌原型" || st2.AssistantAt <= st2.LastUserAt || st2.LastUserTID != "t3323" {
+		t.Fatalf("unexpected fresh TurnState: %+v", st2)
 	}
 }

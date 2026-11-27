@@ -92,20 +92,39 @@ func (e *Engine) answerWorkerTrust(ctx context.Context, w *model.Worker, ap mode
 	return true
 }
 
+// workerTurnSnapshot carries structured latest-turn evidence read from a worker's transcript
+// (or terminal screen fallback when no structured transcript is available).
+type workerTurnSnapshot struct {
+	Text           string
+	FromTranscript bool
+	AfterLastUser  bool
+	AssistantAt    int64
+	LastUserAt     int64
+	LastUserTID    string
+	LastUserSeq    int64
+}
+
 // lastWorkerFullMessage fetches the worker's latest untruncated assistant message from its machine's
 // transcript (via /api/panes/{id}/last?full=1 for remote nodes), returning fromTranscript=true when
 // read from structured transcript logs rather than raw terminal screen fallback.
 func (e *Engine) lastWorkerFullMessage(ctx context.Context, w *model.Worker) (string, bool) {
-	full, fromTr, _ := e.lastWorkerFullMessageDetailed(ctx, w)
-	return full, fromTr
+	snap := e.lastWorkerTurnSnapshot(ctx, w)
+	return snap.Text, snap.FromTranscript
 }
 
 // lastWorkerFullMessageDetailed additionally reports afterLastUser=true when the transcript contains
 // an assistant reply written strictly after the most recent user message (false when the transcript
 // still ends on the user prompt and no fresh answer has been written yet).
 func (e *Engine) lastWorkerFullMessageDetailed(ctx context.Context, w *model.Worker) (string, bool, bool) {
+	snap := e.lastWorkerTurnSnapshot(ctx, w)
+	return snap.Text, snap.FromTranscript, snap.AfterLastUser
+}
+
+// lastWorkerTurnSnapshot reads structured turn evidence (assistant text, post-user freshness,
+// transcript byte offsets, and highest observed Corgi event header trigger ID) locally or from a remote Node.
+func (e *Engine) lastWorkerTurnSnapshot(ctx context.Context, w *model.Worker) workerTurnSnapshot {
 	if w == nil || w.PaneID == "" || e.fleet == nil {
-		return "(no output captured)", false, false
+		return workerTurnSnapshot{Text: "(no output captured)"}
 	}
 	localPane, machine := fleet.SplitID(w.PaneID)
 	if machine != "" {
@@ -119,16 +138,32 @@ func (e *Engine) lastWorkerFullMessageDetailed(ctx context.Context, w *model.Wor
 					Text           string `json:"text"`
 					FromTranscript bool   `json:"from_transcript"`
 					AfterLastUser  *bool  `json:"after_last_user"`
+					AssistantAt    int64  `json:"assistant_at"`
+					LastUserAt     int64  `json:"last_user_at"`
+					LastUserTID    string `json:"last_user_tid"`
+					LastUserSeq    int64  `json:"last_user_seq"`
 				}
 				_ = json.NewDecoder(resp.Body).Decode(&out)
 				_ = resp.Body.Close()
-				if t := strings.TrimSpace(out.Text); t != "" {
+				t := strings.TrimSpace(out.Text)
+				if out.FromTranscript || t != "" {
 					fromTr := out.FromTranscript || len([]rune(t)) > 900
 					afterUser := true
 					if out.AfterLastUser != nil {
 						afterUser = *out.AfterLastUser
 					}
-					return t, fromTr, afterUser
+					if t == "" {
+						t = "(no output captured)"
+					}
+					return workerTurnSnapshot{
+						Text:           t,
+						FromTranscript: fromTr,
+						AfterLastUser:  afterUser,
+						AssistantAt:    out.AssistantAt,
+						LastUserAt:     out.LastUserAt,
+						LastUserTID:    strings.TrimSpace(out.LastUserTID),
+						LastUserSeq:    out.LastUserSeq,
+					}
 				}
 			}
 		}
@@ -136,20 +171,30 @@ func (e *Engine) lastWorkerFullMessageDetailed(ctx context.Context, w *model.Wor
 		if p := ad.LocateTranscript(e.home, w.Cwd, w.Session, w.CreatedAt); p != "" {
 			tr := agent.NewTranscriptReader(p, ad, "")
 			tr.OpenTail()
-			if after, ok := tr.LastAssistantAfterLastUser(128000); ok {
-				return after, true, true
-			}
-			if last := strings.TrimSpace(tr.LastAssistant(128000)); last != "" {
-				return last, true, false
+			st := tr.InspectLastTurn(128000)
+			if st.Text != "" || st.LastUserAt > 0 {
+				txt := strings.TrimSpace(st.Text)
+				if txt == "" {
+					txt = "(no output captured)"
+				}
+				return workerTurnSnapshot{
+					Text:           txt,
+					FromTranscript: true,
+					AfterLastUser:  st.AfterLastUser,
+					AssistantAt:    st.AssistantAt,
+					LastUserAt:     st.LastUserAt,
+					LastUserTID:    st.LastUserTID,
+					LastUserSeq:    st.LastUserSeq,
+				}
 			}
 		}
 	}
 	if rr, err := e.fleet.Read(ctx, w.PaneID, "detection", "text", 0); err == nil {
 		if tail := agent.TailLines(rr.Text, 14); tail != "" {
-			return tail, false, true
+			return workerTurnSnapshot{Text: tail, FromTranscript: false, AfterLastUser: true}
 		}
 	}
-	return "(no output captured)", false, false
+	return workerTurnSnapshot{Text: "(no output captured)"}
 }
 
 // workerTurnToolStats returns bounded current-turn tool result statistics for thrash detection,

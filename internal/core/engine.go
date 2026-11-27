@@ -165,6 +165,7 @@ type Engine struct {
 	directBgNotes      []string
 	watchdogMarks      map[string]*watchdogMark
 	constraintRemindAt map[string]time.Time
+	workerTurns        map[string]*workerTurnWatermark
 }
 
 // NewEngine constructs a Super-Agent Engine initialized from SQLite.
@@ -220,6 +221,7 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		directTurns:        map[string][]*pendingDirectTurn{},
 		watchdogMarks:      map[string]*watchdogMark{},
 		constraintRemindAt: map[string]time.Time{},
+		workerTurns:        map[string]*workerTurnWatermark{},
 	}
 	eng.loadActiveDreamMarker(ctx)
 	return eng, nil
@@ -763,6 +765,7 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 	var (
 		quote       *model.Quote
 		quoteWorker string
+		reTrigger   *model.Trigger
 	)
 	if req.ReID != "" {
 		if prev, err := e.store.GetEntry(ctx, req.ReID); err == nil {
@@ -775,6 +778,7 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 				quoteWorker = prev.Ref
 			}
 		} else if tr, err := e.store.GetTrigger(ctx, req.ReID); err == nil {
+			reTrigger = tr
 			quote = &model.Quote{Who: tr.From, Text: oneLineClip(tr.Text, 120)}
 			if tr.Source == "worker" && tr.From != "" {
 				quoteWorker = tr.From
@@ -832,13 +836,20 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 		return nil, fmt.Errorf("stage reply artifacts: %w", err)
 	}
 
-	// Auto-attach a freshly captured full worker report snapshot once when Router replies about
-	// that worker without explicit --file attachments.
+	// Chain of Recall: auto-attach a captured report snapshot ONLY when `--re <report_trigger_id>`
+	// explicitly references a same-thread worker report trigger carrying an ArtifactID (and no
+	// explicit `--file` was provided). Plain `--worker W` binds WorkerRef / card metadata only so
+	// routine status confirmations never leak an older report snapshot into file-delivery flows.
 	var autoAttachedReportID string
-	if len(fetchedFiles) == 0 && relatedWorker != nil &&
-		relatedWorker.LastReportArtifactID != "" &&
-		relatedWorker.LastReportArtifactID != relatedWorker.LastReportAttachedID {
-		if art, data, rErr := e.ReadArtifactForConsole(ctx, relatedWorker.LastReportArtifactID); rErr == nil {
+	var targetReportArtifactID string
+	if len(fetchedFiles) == 0 && reTrigger != nil && reTrigger.Source == "worker" &&
+		strings.TrimSpace(reTrigger.ArtifactID) != "" &&
+		(reTrigger.Thread == "" || reTrigger.Thread == thread) &&
+		(strings.TrimSpace(req.Worker) == "" || strings.EqualFold(strings.TrimSpace(req.Worker), strings.TrimSpace(reTrigger.From))) {
+		targetReportArtifactID = strings.TrimSpace(reTrigger.ArtifactID)
+	}
+	if targetReportArtifactID != "" {
+		if art, data, rErr := e.ReadArtifactForConsole(ctx, targetReportArtifactID); rErr == nil {
 			autoAttachedReportID = art.ID
 			artifactSummaries = append(artifactSummaries, model.ArtifactSummary{
 				ID:   art.ID,

@@ -787,6 +787,9 @@ func (e *Engine) SendToWorkerWithWork(ctx context.Context, workerName, thread, t
 	if err != nil {
 		return nil, "", err
 	}
+	if trig != nil {
+		e.recordWorkerIssued(wk, trig.ID, trig.Seq)
+	}
 	return trig, wk.WorkItemID, nil
 }
 
@@ -864,19 +867,30 @@ func (e *Engine) Report(ctx context.Context, workerName, paneID, text string) (*
 	}
 	thread := model.MainThread
 	from := orStr(workerName, "worker")
+	artID := ""
 	artNote := ""
+	turnNote := ""
 	if wk != nil {
 		from = wk.Name
 		thread = wk.Thread
 		wk.LastReport = text
 		wk.ReportAt = time.Now()
 		_ = e.store.UpsertWorker(ctx, wk)
-		if artID := e.captureWorkerReportSnapshot(ctx, wk, text, 500); artID != "" {
-			artNote = fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --worker %s on `corgi reply` to attach it on the delivery card]", artID, wk.Name)
+		if id := e.captureWorkerReportSnapshot(ctx, wk, text, 500); id != "" {
+			artID = id
+			artNote = fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --re <this event #tID> --worker %s on `corgi reply` (when not using --file) to attach this exact snapshot]", id, wk.Name)
 		}
+		snap := e.lastWorkerTurnSnapshot(ctx, wk)
+		turnNote = e.formatWorkerTurnStatusNote(ctx, wk, snap)
+		e.markWorkerAssistantNotified(wk, snap)
 	}
 	e.addEvent(ctx, thread, fmt.Sprintf("%s 汇报：%s", from, oneLineClip(text, 120)), from, "done")
-	return e.Ingest(ctx, "worker", thread, from, fmt.Sprintf("report from %s:\n%s%s", from, text, artNote), "", model.RouterName, from)
+	trig, err := e.Ingest(ctx, "worker", thread, from, fmt.Sprintf("report from %s:\n%s%s%s", from, text, artNote, turnNote), "", model.RouterName, from)
+	if err == nil && trig != nil && artID != "" {
+		trig.ArtifactID = artID
+		_ = e.store.UpdateTrigger(ctx, trig)
+	}
+	return trig, err
 }
 
 // Subscribe subscribes or unsubscribes a worker to a thread's incoming events.
@@ -943,6 +957,7 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 		e.setQueuePaused(wk.PaneID, false)
 		e.clearConstraintDelivered(wk.PaneID)
 	}
+	e.clearWorkerTurnState(wk.Name)
 	wtNote := ""
 	if wk.WorktreePath != "" && wk.RepoRoot != "" {
 		if clRes, clErr := e.cleanupWorktreeOnMachine(ctx, wk.Machine, wk.RepoRoot, wk.WorktreePath, wk.WorktreeBranch, wk.WorktreeBase); clErr != nil {

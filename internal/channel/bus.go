@@ -16,20 +16,26 @@ import (
 )
 
 type outboxItem struct {
-	text     string
-	at       time.Time
-	attempts int
+	text          string
+	at            time.Time
+	attempts      int
+	immediate     bool
+	useACK        bool
+	hasFiles      bool
+	entry         *model.Entry
+	attachments   []core.AttachmentFile
+	allowLongFile bool
 }
 
 // Bus implements core.ChannelSink, fanning out state changes to Web SSE subscribers
 // and pacing outbound notifications, report files, and cards to the WeCom Smart Bot connection.
 type Bus struct {
-	engine     *core.Engine
-	wecom      *wecom.Client
-	logger     *slog.Logger
-	flushDelay time.Duration
-	uploadDir        string
-	home             string
+	engine          *core.Engine
+	wecom           *wecom.Client
+	logger          *slog.Logger
+	flushDelay      time.Duration
+	uploadDir       string
+	home            string
 	sendFn          func(ctx context.Context, chatID, markdown string) error
 	sendMarkdownACK func(ctx context.Context, chatID, markdown string) error
 	sendFileFn      func(ctx context.Context, chatID, filename string, data []byte) error
@@ -37,6 +43,7 @@ type Bus struct {
 
 	mu              sync.Mutex
 	flushMu         sync.Mutex
+	chatSendMu      map[string]*sync.Mutex
 	subs            map[chan struct{}]struct{}
 	outbox          map[string][]outboxItem
 	routerStreams   map[string]*activeWeComStream
@@ -56,6 +63,7 @@ func NewBus(eng *core.Engine, wc *wecom.Client, logger *slog.Logger) *Bus {
 		wecom:           wc,
 		logger:          logger,
 		flushDelay:      20 * time.Second,
+		chatSendMu:      map[string]*sync.Mutex{},
 		subs:            map[chan struct{}]struct{}{},
 		outbox:          map[string][]outboxItem{},
 		routerStreams:   map[string]*activeWeComStream{},
@@ -141,6 +149,70 @@ func (b *Bus) canSendMarkdown() bool {
 		return false
 	}
 	return true
+}
+
+func (b *Bus) wecomTransportOnline() bool {
+	if b.wecom != nil {
+		return b.wecom.Online()
+	}
+	return b.sendFn != nil || b.sendStreamFn != nil
+}
+
+func (b *Bus) chatSendLock(chatID string) *sync.Mutex {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.chatSendMu == nil {
+		b.chatSendMu = map[string]*sync.Mutex{}
+	}
+	mu := b.chatSendMu[chatID]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		b.chatSendMu[chatID] = mu
+	}
+	return mu
+}
+
+func (b *Bus) canonicalWeComChat(thread, streamChatID string) string {
+	chatID := threadToWeComChat(thread)
+	if chatID == "" && strings.TrimSpace(streamChatID) != "" {
+		chatID = strings.TrimSpace(streamChatID)
+	}
+	if resolved := b.resolveWeComChat(chatID); resolved != "" {
+		return resolved
+	}
+	return chatID
+}
+
+func (b *Bus) hasOutboxFor(chatID string) bool {
+	b.mu.Lock()
+	n := len(b.outbox[chatID])
+	b.mu.Unlock()
+	return n > 0
+}
+
+func (b *Bus) enqueueOutboxTail(chatID string, item outboxItem) {
+	b.mu.Lock()
+	if b.outbox == nil {
+		b.outbox = map[string][]outboxItem{}
+	}
+	b.outbox[chatID] = append(b.outbox[chatID], item)
+	b.mu.Unlock()
+}
+
+func (b *Bus) enqueueOutboxHead(chatID string, items ...outboxItem) {
+	if len(items) == 0 {
+		return
+	}
+	b.mu.Lock()
+	if b.outbox == nil {
+		b.outbox = map[string][]outboxItem{}
+	}
+	b.outbox[chatID] = append(items, b.outbox[chatID]...)
+	b.mu.Unlock()
+}
+
+func isUnknownDeliveryErr(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 // OnUserMessage bridges messages typed in Web back to WeCom:
@@ -400,85 +472,179 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 
 	webQuote := b.takePendingWebQuote(entry.Thread)
 
-	// Ordinary reply with explicit files: seal active passive stream (body + links) when open,
-	// else immediately send 1 Markdown message via ACK-capable RPC, then send original source files.
-	if hasExplicitFiles {
-		var del core.ReplyDelivery
-		body := prependWebQuoteHeader(webQuote, formatWeComReply(entry))
-		combined := body
-		if linksBlock != "" {
-			if combined != "" {
-				combined = combined + "\n\n" + linksBlock
+	// Per-recipient causal FIFO Delivery Gate:
+	// Take any open Router stream up front so canonical recipient chatID is unified across
+	// streams, immediate replies, file deliveries, and outbox retries.
+	st := b.takeRouterStream(entry.Thread)
+	streamChatID := ""
+	if st != nil {
+		streamChatID = st.chatID
+	}
+	chatID = b.canonicalWeComChat(entry.Thread, streamChatID)
+
+	body := prependWebQuoteHeader(webQuote, formatWeComReply(entry))
+	combined := body
+	if hasExplicitFiles && linksBlock != "" {
+		if combined != "" {
+			combined = combined + "\n\n" + linksBlock
+		} else {
+			combined = linksBlock
+		}
+	}
+
+	item := outboxItem{
+		text:          combined,
+		at:            now,
+		immediate:     hasExplicitFiles || st != nil || wecomRecent || webQuote != "",
+		useACK:        hasExplicitFiles && linksBlock != "",
+		hasFiles:      hasExplicitFiles,
+		entry:         entry,
+		attachments:   attachments,
+		allowLongFile: !hasExplicitFiles,
+	}
+
+	// Non-immediate background replies (no active stream, not recent WeCom, no Web quote, no explicit files)
+	// enqueue into the paced 20s batching outbox even during a brief WS reconnect so they are never dropped.
+	if !item.immediate {
+		if b.sendFn != nil || b.wecom != nil {
+			b.enqueueOutboxTail(chatID, item)
+		}
+		return core.ReplyDelivery{
+			Files: b.sendReplyAttachments(ctx, chatID, entry, attachments, true),
+		}
+	}
+
+	// Serialize all immediate deliveries for the same WeCom recipient so an older reply queued during
+	// a transient WS disconnect ALWAYS lands before a newer reply can seal or send.
+	cLock := b.chatSendLock(chatID)
+	cLock.Lock()
+	defer cLock.Unlock()
+
+	// If older replies are already queued for this recipient and WS is online now, drain them FIRST
+	// so this reply can still cleanly seal its own passive stream in strict causal order.
+	if b.hasOutboxFor(chatID) && b.canSendMarkdown() {
+		_ = b.drainChatOutboxLocked(ctx, chatID, true)
+	}
+
+	// If older unsent replies remain ahead of us OR transport is currently offline, preserve strict
+	// FIFO order by queuing behind them (never sealing a newer stream out of order and never dropping).
+	if b.hasOutboxFor(chatID) || !b.wecomTransportOnline() {
+		if st != nil {
+			st.abort()
+		}
+		if b.sendFn != nil || b.wecom != nil {
+			b.enqueueOutboxTail(chatID, item)
+		}
+		return queuedReplyDelivery(entry, attachments, linksBlock)
+	}
+
+	// Fast path: recipient FIFO is empty and transport is online.
+	var del core.ReplyDelivery
+	streamSealed := false
+	if st != nil {
+		if ok, err := st.seal(ctx, "", combined); err != nil {
+			b.logger.Warn("seal wecom router stream failed", "thread", entry.Thread, "has_files", hasExplicitFiles, "err", err)
+		} else if ok {
+			streamSealed = true
+		}
+	}
+
+	if streamSealed {
+		if hasExplicitFiles && len(attachments) > 0 {
+			if linksBlock != "" {
+				del.LinkStatus = "delivered"
 			} else {
-				combined = linksBlock
+				del.LinkStatus = "skipped"
+				del.LinkError = "preview link skipped: configure public_url or --url"
 			}
 		}
-		streamSealed := false
-		if st := b.takeRouterStream(entry.Thread); st != nil {
-			if st.chatID != "" && chatID == "" {
-				chatID = st.chatID
-			}
-			if ok, err := st.seal(ctx, "", combined); err != nil {
-				b.logger.Warn("seal wecom router stream with files failed", "thread", entry.Thread, "err", err)
-			} else if ok {
-				streamSealed = true
-			}
+		del.Files = b.sendReplyAttachments(ctx, chatID, entry, attachments, !hasExplicitFiles)
+		return del
+	}
+
+	// Stream was absent or seal failed (e.g. WS dropped right before write).
+	if !b.canSendMarkdown() {
+		if b.sendFn != nil || b.wecom != nil {
+			b.enqueueOutboxHead(chatID, item)
 		}
-		if streamSealed {
-			if len(attachments) > 0 {
-				if linksBlock != "" {
-					del.LinkStatus = "delivered"
-				} else {
-					del.LinkStatus = "skipped"
-					del.LinkError = "preview link skipped: configure public_url or --url"
-				}
+		return queuedReplyDelivery(entry, attachments, linksBlock)
+	}
+
+	if hasExplicitFiles {
+		if linksBlock != "" {
+			status, errMsg := b.sendACKMarkdown(ctx, chatID, combined)
+			del.LinkStatus, del.LinkError = status, errMsg
+			if status == "failed" || status == "skipped" {
+				// Pre-write / disconnect failure: hold whole item at head of FIFO for reconnect retry.
+				b.enqueueOutboxHead(chatID, item)
+				del.Files = queuedAttachmentResults(attachments, "queued for retry after wecom reconnect")
+				return del
 			}
-		} else if linksBlock != "" {
-			del.LinkStatus, del.LinkError = b.sendACKMarkdown(ctx, chatID, combined)
+			// status == "delivered" or "unknown": do NOT replay body; send attachments once.
 		} else {
 			if len(attachments) > 0 {
 				del.LinkStatus = "skipped"
 				del.LinkError = "preview link skipped: configure public_url or --url"
 			}
-			if b.canSendMarkdown() && body != "" {
-				_, _ = b.sendACKMarkdown(ctx, chatID, body)
+			if body != "" {
+				status, _ := b.sendACKMarkdown(ctx, chatID, body)
+				if status == "failed" || status == "skipped" {
+					b.enqueueOutboxHead(chatID, item)
+					del.Files = queuedAttachmentResults(attachments, "queued for retry after wecom reconnect")
+					return del
+				}
 			}
 		}
 		del.Files = b.sendReplyAttachments(ctx, chatID, entry, attachments, false)
 		return del
 	}
 
-	body := prependWebQuoteHeader(webQuote, formatWeComReply(entry))
-	streamSealed := false
-	if st := b.takeRouterStream(entry.Thread); st != nil {
-		if st.chatID != "" && chatID == "" {
-			chatID = st.chatID
-		}
-		if ok, err := st.seal(ctx, "", body); err != nil {
-			b.logger.Warn("seal wecom router stream failed", "thread", entry.Thread, "err", err)
-		} else if ok {
-			streamSealed = true
-		}
-	}
-	if !streamSealed && b.canSendMarkdown() {
-		b.mu.Lock()
-		if wecomRecent || webQuote != "" {
-			// Active WeCom conversation or first reply to a Web prompt: deliver immediately instead of holding 20s in Outbox.
-			send := b.sendFn
-			b.mu.Unlock()
-			if err := send(ctx, chatID, body); err != nil {
-				b.logger.Warn("immediate wecom reply failed", "chat_id", chatID, "err", err)
+	if body != "" {
+		if err := b.sendFn(ctx, chatID, body); err != nil {
+			b.logger.Warn("immediate wecom reply failed", "chat_id", chatID, "err", err)
+			if !isUnknownDeliveryErr(err) {
+				b.enqueueOutboxHead(chatID, item)
+				return del
 			}
-		} else {
-			b.outbox[chatID] = append(b.outbox[chatID], outboxItem{text: body, at: now})
-			b.mu.Unlock()
 		}
 	}
+	del.Files = b.sendReplyAttachments(ctx, chatID, entry, attachments, true)
+	return del
+}
 
-	// Offline-readable .md fallback for very long plain replies without explicit files.
-	return core.ReplyDelivery{
-		Files: b.sendReplyAttachments(ctx, chatID, entry, attachments, true),
+func queuedReplyDelivery(entry *model.Entry, attachments []core.AttachmentFile, linksBlock string) core.ReplyDelivery {
+	var del core.ReplyDelivery
+	if len(attachments) > 0 {
+		if linksBlock != "" {
+			del.LinkStatus = "queued"
+			del.LinkError = "wecom reconnecting; queued in FIFO outbox"
+		} else {
+			del.LinkStatus = "skipped"
+			del.LinkError = "preview link skipped: configure public_url or --url"
+		}
+		del.Files = queuedAttachmentResults(attachments, "wecom reconnecting; queued in FIFO outbox")
 	}
+	return del
+}
+
+func queuedAttachmentResults(attachments []core.AttachmentFile, reason string) []core.AttachmentDelivery {
+	if len(attachments) == 0 {
+		return nil
+	}
+	out := make([]core.AttachmentDelivery, 0, len(attachments))
+	for _, att := range attachments {
+		out = append(out, core.AttachmentDelivery{
+			ArtifactID: att.ArtifactID,
+			Path:       att.Path,
+			Machine:    att.Machine,
+			Name:       att.Name,
+			Kind:       att.Kind,
+			PreviewURL: att.ShareURL,
+			Status:     "queued",
+			Error:      reason,
+		})
+	}
+	return out
 }
 
 func formatWeComReply(entry *model.Entry) string {
@@ -607,62 +773,139 @@ func (b *Bus) flushInternal(ctx context.Context, force bool) error {
 	if !b.canSendMarkdown() {
 		return nil
 	}
-	now := time.Now()
-	type pendingBatch struct {
-		body  string
-		items []outboxItem
-	}
-	ready := map[string]pendingBatch{}
 
 	b.mu.Lock()
+	chatIDs := make([]string, 0, len(b.outbox))
 	for chatID, items := range b.outbox {
 		if len(items) == 0 {
 			delete(b.outbox, chatID)
 			continue
 		}
-		if !force && now.Sub(items[0].at) < b.flushDelay {
+		chatIDs = append(chatIDs, chatID)
+	}
+	b.mu.Unlock()
+
+	var firstErr error
+	for _, chatID := range chatIDs {
+		cLock := b.chatSendLock(chatID)
+		cLock.Lock()
+		err := b.drainChatOutboxLocked(ctx, chatID, force)
+		cLock.Unlock()
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// drainChatOutboxLocked drains due FIFO outbox entries for a single recipient.
+// Caller must hold b.chatSendLock(chatID) and MUST NOT hold b.mu.
+func (b *Bus) drainChatOutboxLocked(ctx context.Context, chatID string, force bool) error {
+	now := time.Now()
+	for {
+		if !b.canSendMarkdown() {
+			return nil
+		}
+		b.mu.Lock()
+		items := b.outbox[chatID]
+		if len(items) == 0 {
+			delete(b.outbox, chatID)
+			b.mu.Unlock()
+			return nil
+		}
+		head := items[0]
+		if !force && !head.immediate && now.Sub(head.at) < b.flushDelay {
+			b.mu.Unlock()
+			return nil
+		}
+
+		// Coalesce consecutive plain paced items into a single markdown batch (legacy behavior);
+		// send immediate / file / recovered-stream items strictly one-by-one in FIFO order.
+		var batch []outboxItem
+		if !head.immediate && !head.hasFiles && !head.useACK {
+			cut := 1
+			for cut < len(items) && !items[cut].immediate && !items[cut].hasFiles && !items[cut].useACK {
+				cut++
+			}
+			batch = append([]outboxItem(nil), items[:cut]...)
+			items = items[cut:]
+		} else {
+			batch = []outboxItem{head}
+			items = items[1:]
+		}
+		if len(items) == 0 {
+			delete(b.outbox, chatID)
+		} else {
+			b.outbox[chatID] = items
+		}
+		send := b.sendFn
+		b.mu.Unlock()
+
+		if len(batch) == 1 && (batch[0].immediate || batch[0].hasFiles || batch[0].useACK) {
+			it := batch[0]
+			var sendErr error
+			if strings.TrimSpace(it.text) != "" {
+				if it.useACK || it.hasFiles {
+					status, errMsg := b.sendACKMarkdown(ctx, chatID, it.text)
+					if status == "failed" || status == "skipped" {
+						sendErr = errors.New(errMsg)
+					}
+					// status == "delivered" or "unknown": never replay already-written body.
+				} else {
+					sendErr = send(ctx, chatID, it.text)
+				}
+			}
+			if sendErr != nil {
+				b.logger.Warn("flush immediate wecom reply failed", "chat_id", chatID, "err", sendErr)
+				if !isUnknownDeliveryErr(sendErr) {
+					if !b.canSendMarkdown() {
+						// Offline mid-flush: keep at head without burning retry budget.
+						b.enqueueOutboxHead(chatID, it)
+						return sendErr
+					}
+					if it.attempts < 3 {
+						it.attempts++
+						b.enqueueOutboxHead(chatID, it)
+					}
+				}
+				return sendErr
+			}
+			if it.entry != nil && (it.hasFiles || it.allowLongFile) {
+				_ = b.sendReplyAttachments(ctx, chatID, it.entry, it.attachments, it.allowLongFile)
+			}
 			continue
 		}
-		parts := make([]string, 0, len(items))
-		for _, it := range items {
+
+		parts := make([]string, 0, len(batch))
+		for _, it := range batch {
 			if t := strings.TrimSpace(it.text); t != "" {
 				parts = append(parts, t)
 			}
 		}
-		delete(b.outbox, chatID)
-		if len(parts) > 0 {
-			ready[chatID] = pendingBatch{
-				body:  strings.Join(parts, "\n\n---\n\n"),
-				items: items,
-			}
+		if len(parts) == 0 {
+			continue
 		}
-	}
-	send := b.sendFn
-	b.mu.Unlock()
-
-	var firstErr error
-	for chatID, batch := range ready {
-		if err := send(ctx, chatID, batch.body); err != nil {
+		if err := send(ctx, chatID, strings.Join(parts, "\n\n---\n\n")); err != nil {
 			b.logger.Warn("flush outbox markdown failed", "chat_id", chatID, "err", err)
-			if firstErr == nil {
-				firstErr = err
-			}
-			// Preserve batches that haven't been retried yet so a transient error or canceled flush doesn't drop them.
-			var retryable []outboxItem
-			for _, it := range batch.items {
-				if it.attempts < 1 {
-					it.attempts++
-					retryable = append(retryable, it)
+			if !isUnknownDeliveryErr(err) {
+				if !b.canSendMarkdown() {
+					b.enqueueOutboxHead(chatID, batch...)
+					return err
+				}
+				var retryable []outboxItem
+				for _, it := range batch {
+					if it.attempts < 1 {
+						it.attempts++
+						retryable = append(retryable, it)
+					}
+				}
+				if len(retryable) > 0 {
+					b.enqueueOutboxHead(chatID, retryable...)
 				}
 			}
-			if len(retryable) > 0 {
-				b.mu.Lock()
-				b.outbox[chatID] = append(retryable, b.outbox[chatID]...)
-				b.mu.Unlock()
-			}
+			return err
 		}
 	}
-	return firstErr
 }
 
 func (b *Bus) OnActionCreated(ctx context.Context, action *model.Action) {

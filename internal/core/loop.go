@@ -350,12 +350,15 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, scan
 			if idleChanged || sessionChanged {
 				_ = e.store.UpsertWorker(ctx, w)
 			}
-			// Also check if a pending direct turn has now written a fresh assistant reply while
-			// the worker remained idle/done (e.g. fast reply or after skipping an early flicker).
-			if (li.status == "done" || li.status == "idle") && e.hasDirectTurn(w.Name) {
+			// Re-check steady idle/done workers when waiting for a delayed transcript flush
+			// (direct WeCom turns OR Router-managed turns that went idle with empty interim text).
+			if (li.status == "done" || li.status == "idle") && (e.hasDirectTurn(w.Name) || e.hasWorkerPendingCheck(w.Name, now)) {
 				e.handleWorkerTurnDone(ctx, w)
 			}
 			continue
+		}
+		if li.status == "working" {
+			e.clearWorkerPendingCheck(w.Name)
 		}
 		w.PaneID = li.pane
 		w.Status = li.status
@@ -451,7 +454,8 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 }
 
 func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
-	fullText, fromTranscript, afterLastUser := e.lastWorkerFullMessageDetailed(ctx, w)
+	snap := e.lastWorkerTurnSnapshot(ctx, w)
+	fullText, fromTranscript, afterLastUser := snap.Text, snap.FromTranscript, snap.AfterLastUser
 	summary := fullText
 	if summary != "(no output captured)" {
 		summary = clipMultiline(fullText, 1200)
@@ -477,6 +481,7 @@ func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
 	}
 	dt := e.popDirectTurn(w.Name)
 	if qErr != "" {
+		e.clearWorkerPendingCheck(w.Name)
 		if dt != nil && dt.callback != nil {
 			res := DirectTurnResult{
 				WorkerName:   w.Name,
@@ -494,12 +499,21 @@ func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
 		e.addEvent(ctx, w.Thread, w.Name+" 出错了："+qErr, w.Name, "error")
 		return
 	}
+	if dt == nil {
+		// Global causal turn gate for Router-managed workers: suppress empty/pre-user flickers
+		// (retaining pendingCheck for delayed flushes) and already-notified assistant offsets.
+		if !e.shouldEmitWorkerTurnSummary(w, snap, time.Now()) {
+			return
+		}
+	} else {
+		e.markWorkerAssistantNotified(w, snap)
+	}
 	artID := ""
 	artNote := ""
 	if fromTranscript {
 		if id := e.captureWorkerReportSnapshot(ctx, w, fullText, 800); id != "" {
 			artID = id
-			artNote = fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --worker %s on `corgi reply` to attach it on the delivery card]", id, w.Name)
+			artNote = fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --re <this event #tID> --worker %s on `corgi reply` (when not using --file) to attach this exact snapshot]", id, w.Name)
 		}
 	}
 	if dt != nil {
@@ -525,8 +539,13 @@ func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
 		e.notifyChanged()
 		return
 	}
-	_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name,
-		fmt.Sprintf("worker %s finished a turn. Last message:\n%s%s", w.Name, summary, artNote), "", model.RouterName, w.Name)
+	turnNote := e.formatWorkerTurnStatusNote(ctx, w, snap)
+	trig, err := e.Ingest(ctx, "worker", w.Thread, w.Name,
+		fmt.Sprintf("worker %s produced a new update (verify before treating as final acceptance). Last message:\n%s%s%s", w.Name, summary, artNote, turnNote), "", model.RouterName, w.Name)
+	if err == nil && trig != nil && artID != "" {
+		trig.ArtifactID = artID
+		_ = e.store.UpdateTrigger(ctx, trig)
+	}
 	e.addEvent(ctx, w.Thread, w.Name+" 完成了一轮", w.Name, "done")
 }
 
@@ -607,9 +626,12 @@ func filterHumanTriggers(list []*model.Trigger) []*model.Trigger {
 }
 
 func filterWorkerSteeringTriggers(list []*model.Trigger) []*model.Trigger {
+	// While a Worker is busy, queue routine Router instructions on Hub so multiple rapid
+	// follow-ups coalesce cleanly by Seq on the next idle boundary (instead of sitting unseen
+	// in a CLI PTY input buffer). Only explicit Steer triggers bypass the busy queue.
 	var out []*model.Trigger
 	for _, t := range list {
-		if t.Source == "router" || t.Source == "wecom" {
+		if t.Steer {
 			out = append(out, t)
 		}
 	}
@@ -748,6 +770,9 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 	e.mu.Unlock()
 	if workerConstraint != "" && paneID != "" {
 		e.markConstraintDelivered(paneID)
+	}
+	if target != model.RouterName {
+		e.recordWorkerDelivered(target, paneID, list)
 	}
 
 	for _, t := range list {

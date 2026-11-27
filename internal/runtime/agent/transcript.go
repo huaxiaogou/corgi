@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/kiperjing/corgi/internal/model"
@@ -14,6 +16,45 @@ const (
 	maxViewMessages = 60
 	earlierPageSize = 100
 )
+
+// corgiHeaderTriggerRe matches ONLY Corgi's own deliverBatch event header lines (`#t1234 · thread · source`),
+// avoiding false matches against arbitrary #tID mentions inside quoted prose or reports.
+var corgiHeaderTriggerRe = regexp.MustCompile(`(?m)^[ \t]*#(t(\d+))[ \t]*·`)
+
+// TurnState summarizes the structured latest-turn boundary observed in a JSONL transcript.
+type TurnState struct {
+	Text          string
+	AfterLastUser bool
+	AssistantAt   int64
+	LastUserAt    int64
+	LastUserTID   string
+	LastUserSeq   int64
+}
+
+// ExtractCorgiHeaderMaxTrigger parses the highest Corgi event header trigger ID (e.g. "t3323", 3323)
+// embedded inside a structured user prompt delivered by Engine.deliverBatch.
+func ExtractCorgiHeaderMaxTrigger(userText string) (string, int64) {
+	if strings.TrimSpace(userText) == "" {
+		return "", 0
+	}
+	matches := corgiHeaderTriggerRe.FindAllStringSubmatch(userText, -1)
+	var bestID string
+	var bestSeq int64
+	for _, m := range matches {
+		if len(m) < 3 {
+			continue
+		}
+		seq, err := strconv.ParseInt(m[2], 10, 64)
+		if err != nil || seq <= 0 {
+			continue
+		}
+		if seq > bestSeq {
+			bestSeq = seq
+			bestID = m[1]
+		}
+	}
+	return bestID, bestSeq
+}
 
 // TranscriptReader incrementally tails a JSONL session file with tail-window fast open and pagination.
 type TranscriptReader struct {
@@ -144,6 +185,20 @@ func (tr *TranscriptReader) LastAssistant(maxRunes int) string {
 // recent user message in the transcript. If the transcript currently ends on a user turn (or
 // interim thinking/tool steps) with no assistant reply yet, it returns ("", false).
 func (tr *TranscriptReader) LastAssistantAfterLastUser(maxRunes int) (string, bool) {
+	st := tr.InspectLastTurn(maxRunes)
+	if !st.AfterLastUser {
+		return "", false
+	}
+	return st.Text, true
+}
+
+// InspectLastTurn scans buffered messages backward to report whether a non-empty assistant reply
+// exists strictly after the latest user turn, along with exact byte offsets and the highest Corgi
+// event header trigger ID consumed in that user turn. When no post-user assistant text exists yet,
+// Text/AssistantAt fall back to the latest earlier assistant for display while AfterLastUser is false.
+func (tr *TranscriptReader) InspectLastTurn(maxRunes int) TurnState {
+	var st TurnState
+	seenUser := false
 	for i := len(tr.msgs) - 1; i >= 0; i-- {
 		m := tr.msgs[i]
 		if m == nil {
@@ -151,14 +206,29 @@ func (tr *TranscriptReader) LastAssistantAfterLastUser(maxRunes int) (string, bo
 		}
 		switch m.Kind {
 		case "assistant":
-			if strings.TrimSpace(m.Text) != "" {
-				return clipText(m.Text, maxRunes), true
+			if strings.TrimSpace(m.Text) == "" {
+				continue
+			}
+			if !seenUser && !st.AfterLastUser {
+				st.Text = clipText(m.Text, maxRunes)
+				st.AssistantAt = m.At
+				st.AfterLastUser = true
+			} else if seenUser && st.Text == "" {
+				st.Text = clipText(m.Text, maxRunes)
+				st.AssistantAt = m.At
 			}
 		case "user":
-			return "", false
+			if !seenUser {
+				seenUser = true
+				st.LastUserAt = m.At
+				st.LastUserTID, st.LastUserSeq = ExtractCorgiHeaderMaxTrigger(m.Text)
+			}
+		}
+		if seenUser && st.Text != "" {
+			break
 		}
 	}
-	return "", false
+	return st
 }
 
 // ComputeTurnToolStats reads at most the trailing maxTailBytes (default 1 MiB) of a JSONL

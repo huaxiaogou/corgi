@@ -231,6 +231,17 @@ func (st *activeWeComStream) idleSinceChange() time.Duration {
 	return time.Since(st.lastChangeAt)
 }
 
+// abort cancels background transcript polling without transmitting a finish frame
+// (used when a newer reply must queue behind an older unsent FIFO outbox item).
+func (st *activeWeComStream) abort() {
+	if st == nil {
+		return
+	}
+	if st.cancel != nil {
+		st.cancel()
+	}
+}
+
 func (st *activeWeComStream) seal(ctx context.Context, think, body string) (bool, error) {
 	if st == nil {
 		return false, nil

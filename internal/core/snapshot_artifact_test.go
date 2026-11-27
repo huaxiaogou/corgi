@@ -35,25 +35,51 @@ func TestMultipleStandaloneWorkerReportSnapshotsSucceed(t *testing.T) {
 	}
 
 	// Capture multiple distinct standalone report snapshots across workers — must never collide on UNIQUE(entry_id, ordinal).
-	id1 := eng.captureWorkerReportSnapshot(ctx, w1, strings.Repeat("第一份完整分析报告内容。", 30), 100)
-	id2 := eng.captureWorkerReportSnapshot(ctx, w1, strings.Repeat("第二份更新后的完整报告。", 30), 100)
-	id3 := eng.captureWorkerReportSnapshot(ctx, w2, strings.Repeat("另一个任务的长调研报告。", 30), 100)
-	if id1 == "" || id2 == "" || id3 == "" || id1 == id2 || id2 == id3 {
-		t.Fatalf("expected 3 distinct standalone artifact IDs, got id1=%q id2=%q id3=%q", id1, id2, id3)
+	rep1, err := eng.Report(ctx, w1.Name, "", strings.Repeat("第一份完整分析报告内容。", 60))
+	if err != nil || rep1 == nil || rep1.ArtifactID == "" {
+		t.Fatalf("first report failed: trig=%+v err=%v", rep1, err)
+	}
+	rep2, err := eng.Report(ctx, w1.Name, "", strings.Repeat("第二份更新后的完整报告。", 60))
+	if err != nil || rep2 == nil || rep2.ArtifactID == "" {
+		t.Fatalf("second report failed: trig=%+v err=%v", rep2, err)
+	}
+	rep3, err := eng.Report(ctx, w2.Name, "", strings.Repeat("另一个任务的长调研报告。", 60))
+	if err != nil || rep3 == nil || rep3.ArtifactID == "" {
+		t.Fatalf("third report failed: trig=%+v err=%v", rep3, err)
+	}
+	if rep1.ArtifactID == rep2.ArtifactID || rep2.ArtifactID == rep3.ArtifactID {
+		t.Fatalf("expected 3 distinct artifact IDs, got %q %q %q", rep1.ArtifactID, rep2.ArtifactID, rep3.ArtifactID)
 	}
 
-	// Auto-attaching the latest standalone snapshot to a Router reply should relink its EntryID to the reply entry.
-	res, err := eng.ReplyDetailed(ctx, ReplyRequest{
+	// Plain confirmation with ONLY `--worker` (no `--re <report_tID>`) MUST attach 0 artifacts!
+	confirmRes, err := eng.ReplyDetailed(ctx, ReplyRequest{
 		Thread: model.MainThread,
-		Text:   "worker-alpha 报告已完成。",
+		Text:   "收到，我已让 worker-alpha 继续处理下一轮。",
 		Worker: w1.Name,
 	})
 	if err != nil {
-		t.Fatalf("ReplyDetailed failed: %v", err)
+		t.Fatalf("confirmation ReplyDetailed failed: %v", err)
 	}
-	art, err := st.GetArtifact(ctx, id2)
+	if len(confirmRes.Entry.Artifacts) != 0 {
+		t.Fatalf("plain --worker confirmation must NOT attach stale report snapshots, got %+v", confirmRes.Entry.Artifacts)
+	}
+
+	// Explicit `--re <rep1.ID>` attaches EXACTLY rep1's snapshot (not newer rep2!) and relinks EntryID cleanly.
+	res, err := eng.ReplyDetailed(ctx, ReplyRequest{
+		Thread: model.MainThread,
+		Text:   "第一份报告已整理，请审阅。",
+		Worker: w1.Name,
+		ReID:   rep1.ID,
+	})
 	if err != nil {
-		t.Fatalf("GetArtifact(%s) failed: %v", id2, err)
+		t.Fatalf("ReplyDetailed with --re failed: %v", err)
+	}
+	if len(res.Entry.Artifacts) != 1 || res.Entry.Artifacts[0].ID != rep1.ArtifactID {
+		t.Fatalf("expected exact snapshot %s for --re %s, got %+v", rep1.ArtifactID, rep1.ID, res.Entry.Artifacts)
+	}
+	art, err := st.GetArtifact(ctx, rep1.ArtifactID)
+	if err != nil {
+		t.Fatalf("GetArtifact(%s) failed: %v", rep1.ArtifactID, err)
 	}
 	if art.EntryID != res.Entry.ID {
 		t.Fatalf("expected standalone artifact relinked to reply entry %q, got %q", res.Entry.ID, art.EntryID)

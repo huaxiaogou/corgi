@@ -144,9 +144,10 @@ type Trigger struct {
 	Policy  string    `json:"policy"` // respond | candidate | ignore
 	Status  string    `json:"status"` // queued | delivered | ignored
 	Targets []string  `json:"targets,omitempty"`
-	IdemKey string    `json:"idem_key,omitempty"`
-	Ref     string    `json:"ref,omitempty"`
-	Steer   bool      `json:"steer,omitempty"`
+	IdemKey    string    `json:"idem_key,omitempty"`
+	Ref        string    `json:"ref,omitempty"`
+	Steer      bool      `json:"steer,omitempty"`
+	ArtifactID string    `json:"artifact_id,omitempty"`
 }
 
 // Thread groups triggers and worker subscriptions for a conversation or WeCom group topic.
