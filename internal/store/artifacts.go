@@ -102,6 +102,72 @@ func (s *Store) CommitReplyTx(
 		}
 	}
 
+	// When inserting a new causal review reminder (--check) bound to a WorkItem or Worker,
+	// atomically supersede older pending router_check reminders for that same deliverable source.
+	// Real decision cards (router_choice / worker_dialog) are never auto-expired here.
+	if action != nil && action.Kind == model.ActionKindRouterCheck &&
+		(strings.TrimSpace(action.WorkItemID) != "" || strings.TrimSpace(action.TargetWorker) != "") {
+		rows, err := tx.QueryContext(ctx,
+			`SELECT id, data FROM actions WHERE thread = ? AND kind = ? AND status = ?`,
+			entry.Thread, model.ActionKindRouterCheck, model.ActionPending,
+		)
+		if err != nil {
+			return fmt.Errorf("query prior router_check actions: %w", err)
+		}
+		type expCheck struct {
+			id   string
+			data string
+		}
+		var checks []expCheck
+		for rows.Next() {
+			var it expCheck
+			if err := rows.Scan(&it.id, &it.data); err != nil {
+				rows.Close()
+				return err
+			}
+			checks = append(checks, it)
+		}
+		rows.Close()
+
+		newWI := strings.TrimSpace(action.WorkItemID)
+		newWk := strings.TrimSpace(action.TargetWorker)
+		now := time.Now()
+		for _, it := range checks {
+			if it.id == action.ID {
+				continue
+			}
+			var old model.Action
+			if json.Unmarshal([]byte(it.data), &old) != nil {
+				continue
+			}
+			oldWI := strings.TrimSpace(old.WorkItemID)
+			oldWk := strings.TrimSpace(old.TargetWorker)
+			sameSource := false
+			if newWI != "" {
+				sameSource = oldWI == newWI && (newWk == "" || oldWk == "" || oldWk == newWk)
+			} else if newWk != "" {
+				sameSource = oldWI == "" && oldWk == newWk
+			}
+			if !sameSource {
+				continue
+			}
+			old.Status = model.ActionExpired
+			old.ResolvedBy = "expired"
+			old.ExpiredReason = "superseded"
+			old.ResolvedAt = &now
+			updated, mErr := mustJSON(&old)
+			if mErr != nil {
+				return mErr
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE actions SET status = ?, data = ?, resolved_at = ? WHERE id = ? AND status = ?`,
+				model.ActionExpired, updated, now.Unix(), old.ID, model.ActionPending,
+			); err != nil {
+				return fmt.Errorf("expire superseded check %s: %w", old.ID, err)
+			}
+		}
+	}
+
 	if action != nil {
 		actData, err := mustJSON(action)
 		if err != nil {

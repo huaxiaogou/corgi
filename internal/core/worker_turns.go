@@ -477,7 +477,7 @@ func (e *Engine) checkWorkerStartupHealth(ctx context.Context, w *model.Worker, 
 				idemKey := fmt.Sprintf("worker-startup-fault:%s:%s:%d", w.Name, paneID, deliveredSeq)
 				msg := fmt.Sprintf("worker %s failed immediately after dispatch (%s)%s: %s\nThis worker instance is now PAUSED from accepting new sends. Run `%s stop %s` and dispatch to a healthy worker/model/computer, then inform the human in one line.",
 					w.Name, orStr(batchDesc, marker), wiTag, errMsg, orStr(e.binPath, "corgi"), w.Name)
-				_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name, msg, idemKey, model.RouterName, w.Name)
+				_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name, msg, idemKey, model.RouterName, w.Name, TriggerMeta{WorkItemID: w.WorkItemID})
 				e.addEvent(ctx, w.Thread, w.Name+" 启动失败（已暂停接活）："+oneLineClip(errMsg, 100), w.Name, "error")
 				e.notifyChanged()
 				return
@@ -511,7 +511,7 @@ func (e *Engine) checkWorkerStartupHealth(ctx context.Context, w *model.Worker, 
 	idemKey := fmt.Sprintf("worker-startup-unconfirmed:%s:%s:%d", w.Name, paneID, deliveredSeq)
 	msg := fmt.Sprintf("worker %s has not confirmed starting batch (%s)%s after %ds (pane remains %s with no transcript or error output). Inspect with `%s show %s` or stop and re-dispatch; avoid blindly resending to the same pane.",
 		w.Name, orStr(batchDesc, marker), wiTag, int(checkWindow.Seconds()), orStr(li.status, "idle"), orStr(e.binPath, "corgi"), w.Name)
-	_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name, msg, idemKey, model.RouterName, w.Name)
+	_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name, msg, idemKey, model.RouterName, w.Name, TriggerMeta{WorkItemID: w.WorkItemID})
 	e.addEvent(ctx, w.Thread, w.Name+" 派发后未确认启动，已通知大脑核查", w.Name, "error")
 	e.notifyChanged()
 }
@@ -543,6 +543,6 @@ func (e *Engine) rerouteFaultedWorkerTriggers(ctx context.Context, w *model.Work
 	idemKey := fmt.Sprintf("worker-fault-paused:%s:%s:%d", w.Name, w.FaultPaneID, maxSeq)
 	msg := fmt.Sprintf("worker %s is PAUSED due to prior fatal error (%s); skipped delivering queued batch (%s)%s. Run `%s stop %s` and re-dispatch to a healthy worker/model.",
 		w.Name, oneLineClip(w.FaultError, 160), strings.Join(ids, ", "), wiTag, orStr(e.binPath, "corgi"), w.Name)
-	_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name, msg, idemKey, model.RouterName, w.Name)
+	_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name, msg, idemKey, model.RouterName, w.Name, TriggerMeta{WorkItemID: w.WorkItemID})
 	e.notifyChanged()
 }

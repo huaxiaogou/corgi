@@ -597,7 +597,10 @@ func (e *Engine) autoResolvePendingOnUserReply(ctx context.Context, thread, reEn
 		if reID != "" {
 			matched = a.EntryID != "" && a.EntryID == reID
 		} else {
-			matched = !hasLaterCorgiEntry(entries, a)
+			// Guard unquoted follow-ups: only auto-resolve a recent latest card (<=30m) so a
+			// fresh unrelated message hours later never silently closes an older decision.
+			recent := a.CreatedAt.IsZero() || time.Since(a.CreatedAt) <= 30*time.Minute
+			matched = recent && !hasLaterCorgiEntry(entries, a)
 		}
 		if !matched {
 			continue
@@ -768,10 +771,12 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 	var (
 		quote       *model.Quote
 		quoteWorker string
+		reEntry     *model.Entry
 		reTrigger   *model.Trigger
 	)
 	if req.ReID != "" {
 		if prev, err := e.store.GetEntry(ctx, req.ReID); err == nil {
+			reEntry = prev
 			who := "你"
 			if prev.Role != "user" {
 				who = prev.Role
@@ -785,6 +790,20 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 			quote = &model.Quote{Who: tr.From, Text: oneLineClip(tr.Text, 120)}
 			if tr.Source == "worker" && tr.From != "" {
 				quoteWorker = tr.From
+			}
+		}
+	}
+	// Resolve WorkItem provenance in strict order: explicit --work -> referenced Entry/Trigger -> related worker.
+	if workID == "" {
+		candidateWI := ""
+		if reEntry != nil && strings.TrimSpace(reEntry.WorkItemID) != "" {
+			candidateWI = strings.TrimSpace(reEntry.WorkItemID)
+		} else if reTrigger != nil && strings.TrimSpace(reTrigger.WorkItemID) != "" {
+			candidateWI = strings.TrimSpace(reTrigger.WorkItemID)
+		}
+		if candidateWI != "" {
+			if wi, wErr := e.store.GetWorkItem(ctx, candidateWI); wErr == nil && wi.ClosedAt == nil && (wi.Thread == "" || wi.Thread == thread) {
+				workID = wi.ID
 			}
 		}
 	}
@@ -944,6 +963,7 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 			Kind:         kind,
 			Thread:       thread,
 			EntryID:      entry.ID,
+			WorkItemID:   workID,
 			TargetWorker: strings.TrimSpace(req.Worker),
 			Category:     cat,
 			Title:        oneLineClip(text, 64),
@@ -1035,8 +1055,20 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 	}, nil
 }
 
+// TriggerMeta carries durable provenance fields persisted atomically on the initial Trigger insert.
+type TriggerMeta struct {
+	WorkItemID string
+	ArtifactID string
+}
+
 // Ingest stores a Trigger after applying deterministic fast-path policies.
 func (e *Engine) Ingest(ctx context.Context, source, thread, from, text, idemKey, target, ref string) (*model.Trigger, error) {
+	return e.IngestWithMeta(ctx, source, thread, from, text, idemKey, target, ref, TriggerMeta{})
+}
+
+// IngestWithMeta atomically persists a Trigger together with its WorkItemID and ArtifactID on first
+// insert so Router never observes a partially populated event before a follow-up update runs.
+func (e *Engine) IngestWithMeta(ctx context.Context, source, thread, from, text, idemKey, target, ref string, meta TriggerMeta) (*model.Trigger, error) {
 	if thread == "" {
 		thread = model.MainThread
 	}
@@ -1050,17 +1082,19 @@ func (e *Engine) Ingest(ctx context.Context, source, thread, from, text, idemKey
 		return nil, err
 	}
 	t := &model.Trigger{
-		ID:      tid,
-		Seq:     seq,
-		Source:  source,
-		Thread:  thread,
-		From:    from,
-		Text:    text,
-		At:      time.Now(),
-		Policy:  decision,
-		Status:  "queued",
-		IdemKey: idemKey,
-		Ref:     ref,
+		ID:         tid,
+		Seq:        seq,
+		Source:     source,
+		Thread:     thread,
+		From:       from,
+		Text:       text,
+		At:         time.Now(),
+		Policy:     decision,
+		Status:     "queued",
+		IdemKey:    idemKey,
+		Ref:        ref,
+		WorkItemID: strings.TrimSpace(meta.WorkItemID),
+		ArtifactID: strings.TrimSpace(meta.ArtifactID),
 	}
 	if decision == "ignore" {
 		t.Status = "ignored"

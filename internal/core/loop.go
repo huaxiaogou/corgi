@@ -447,6 +447,7 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 		Kind:         model.ActionKindWorkerDialog,
 		Category:     "blocked",
 		Thread:       w.Thread,
+		WorkItemID:   w.WorkItemID,
 		TargetWorker: w.Name,
 		PaneID:       w.PaneID,
 		Title:        ap.Title,
@@ -462,10 +463,10 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 	summary := e.lastWorkerSummary(ctx, w)
 	choices := formatChoicesText(ap)
 	e.addEvent(ctx, w.Thread, w.Name+" 等你确认："+ap.Title, w.Name, "blocked")
-	_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name,
+	_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name,
 		fmt.Sprintf("worker %s is BLOCKED on a terminal dialog (also shown as a card in chat).\nScreen:\n%s%s\nIf the answer follows from the task or is routine, answer it yourself: `%s answer %s <choice>`. Leave high-risk choices to the human.",
 			w.Name, summary, choices, e.binPath, w.Name),
-		"", model.RouterName, w.Name)
+		"", model.RouterName, w.Name, TriggerMeta{WorkItemID: w.WorkItemID})
 
 	e.mu.Lock()
 	sink := e.sink
@@ -565,12 +566,9 @@ func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
 		return
 	}
 	turnNote := e.formatWorkerTurnStatusNote(ctx, w, snap)
-	trig, err := e.Ingest(ctx, "worker", w.Thread, w.Name,
-		fmt.Sprintf("worker %s produced a new update (verify before treating as final acceptance). Last message:\n%s%s%s", w.Name, summary, artNote, turnNote), "", model.RouterName, w.Name)
-	if err == nil && trig != nil && artID != "" {
-		trig.ArtifactID = artID
-		_ = e.store.UpdateTrigger(ctx, trig)
-	}
+	_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name,
+		fmt.Sprintf("worker %s produced a new update (verify before treating as final acceptance). Last message:\n%s%s%s", w.Name, summary, artNote, turnNote),
+		"", model.RouterName, w.Name, TriggerMeta{WorkItemID: w.WorkItemID, ArtifactID: artID})
 	e.addEvent(ctx, w.Thread, w.Name+" 完成了一轮", w.Name, "done")
 }
 

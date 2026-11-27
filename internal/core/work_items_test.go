@@ -335,3 +335,147 @@ func TestCheckProtectionOptionsCapAndSayIdempotency(t *testing.T) {
 		t.Fatalf("duplicate queued SubmitChatSay should return same item %s, got %+v err=%v", item1.ID, item2, err)
 	}
 }
+
+func TestCausalWorkItemActionProvenanceAndAtomicExpiry(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	eng, err := NewEngine(context.Background(), st, nil, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	wiA, err := eng.SetWorkItem(ctx, "new", model.MainThread, "太湖接入方案", "等待评审", "wk-a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wiB, err := eng.SetWorkItem(ctx, "new", model.MainThread, "物言可视化方案", "等待评审", "wk-b", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wkA := &model.Worker{Name: "wk-a", Kind: "agy", Thread: model.MainThread, WorkItemID: wiA.ID, Status: "idle"}
+	wkB := &model.Worker{Name: "wk-b", Kind: "agy", Thread: model.MainThread, WorkItemID: wiB.ID, Status: "idle"}
+	_ = st.UpsertWorker(ctx, wkA)
+	_ = st.UpsertWorker(ctx, wkB)
+
+	// 1. Report atomically writes BOTH WorkItemID and ArtifactID on initial trigger insert.
+	longReport := strings.Repeat("太湖接入详细可行性报告段落。", 45)
+	repTrig, err := eng.Report(ctx, wkA.Name, "", longReport)
+	if err != nil || repTrig == nil {
+		t.Fatalf("Report failed: %v", err)
+	}
+	persistedTrig, err := st.GetTrigger(ctx, repTrig.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistedTrig.WorkItemID != wiA.ID || persistedTrig.ArtifactID == "" {
+		t.Fatalf("expected atomic WorkItemID=%s & non-empty ArtifactID on report trigger, got %+v", wiA.ID, persistedTrig)
+	}
+
+	// 2. Reply referencing report trigger (without explicit --work) inherits WorkItemID onto Action.
+	resA, err := eng.ReplyDetailed(ctx, ReplyRequest{
+		Thread:  model.MainThread,
+		ReID:    repTrig.ID,
+		Text:    "太湖接入方案是否继续推进？",
+		Options: []string{"继续推进", "暂停"},
+	})
+	if err != nil || resA.Action == nil || resA.Action.WorkItemID != wiA.ID {
+		t.Fatalf("expected Action to inherit WorkItemID=%s from referenced trigger, got %+v err=%v", wiA.ID, resA, err)
+	}
+
+	// Also create a snoozed choice + live worker_dialog on wiA, and independent choice + 2 checks on wiB.
+	resASnooze, err := eng.ReplyDetailed(ctx, ReplyRequest{
+		Thread:  model.MainThread,
+		WorkID:  wiA.ID,
+		Text:    "太湖域名申请审批",
+		Options: []string{"批准", "拒绝"},
+	})
+	if err != nil || resASnooze.Action == nil {
+		t.Fatalf("create snoozed action failed: %v", err)
+	}
+	if _, err := st.SnoozeAction(ctx, resASnooze.Action.ID, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	dlgA := &model.Action{
+		ID: "a_dlg_wiA", Kind: model.ActionKindWorkerDialog, Thread: model.MainThread,
+		WorkItemID: wiA.ID, TargetWorker: wkA.Name, Title: "Allow bash?", Status: model.ActionPending, CreatedAt: time.Now(),
+	}
+	if err := st.InsertAction(ctx, dlgA); err != nil {
+		t.Fatal(err)
+	}
+
+	resBChoice, err := eng.ReplyDetailed(ctx, ReplyRequest{
+		Thread:  model.MainThread,
+		WorkID:  wiB.ID,
+		Worker:  wkB.Name,
+		Text:    "物言可视化是否进入 MVP？",
+		Options: []string{"开始 MVP", "先等等"},
+	})
+	if err != nil || resBChoice.Action == nil {
+		t.Fatalf("create wiB choice failed: %v", err)
+	}
+	resBChk1, err := eng.ReplyDetailed(ctx, ReplyRequest{
+		Thread: model.MainThread,
+		WorkID: wiB.ID,
+		Worker: wkB.Name,
+		Text:   "物言原型 v1 已交付",
+		Check:  true,
+	})
+	if err != nil || resBChk1.Action == nil {
+		t.Fatalf("create wiB check v1 failed: %v", err)
+	}
+	resBChk2, err := eng.ReplyDetailed(ctx, ReplyRequest{
+		Thread: model.MainThread,
+		WorkID: wiB.ID,
+		Worker: wkB.Name,
+		Text:   "物言原型 v2 已交付",
+		Check:  true,
+	})
+	if err != nil || resBChk2.Action == nil {
+		t.Fatalf("create wiB check v2 failed: %v", err)
+	}
+
+	// Newer router_check on wiB atomically supersedes older router_check, WITHOUT touching wiB's router_choice.
+	gotChk1, _ := st.GetAction(ctx, resBChk1.Action.ID)
+	gotChk2, _ := st.GetAction(ctx, resBChk2.Action.ID)
+	gotBChoice, _ := st.GetAction(ctx, resBChoice.Action.ID)
+	if gotChk1.Status != model.ActionExpired || gotChk1.ExpiredReason != "superseded" {
+		t.Fatalf("expected older router_check superseded, got %+v", gotChk1)
+	}
+	if gotChk2.Status != model.ActionPending || gotBChoice.Status != model.ActionPending {
+		t.Fatalf("expected latest check and router_choice still pending, got chk2=%+v choice=%+v", gotChk2, gotBChoice)
+	}
+
+	// 3. Closing wiA atomically expires wiA's pending + snoozed cards, leaves live worker_dialog & sibling wiB untouched.
+	if _, err := eng.CloseWorkItem(ctx, wiA.ID, "用户已取消太湖接入"); err != nil {
+		t.Fatalf("CloseWorkItem(wiA): %v", err)
+	}
+	gotA, _ := st.GetAction(ctx, resA.Action.ID)
+	gotASnooze, _ := st.GetAction(ctx, resASnooze.Action.ID)
+	gotDlgA, _ := st.GetAction(ctx, dlgA.ID)
+	gotBChoiceAfter, _ := st.GetAction(ctx, resBChoice.Action.ID)
+
+	if gotA.Status != model.ActionExpired || gotA.ResolvedBy != "expired" || gotA.ExpiredReason != "work_item_closed" {
+		t.Fatalf("expected wiA pending action expired, got %+v", gotA)
+	}
+	if gotASnooze.Status != model.ActionExpired || gotASnooze.SnoozeUntil != nil || gotASnooze.ExpiredReason != "work_item_closed" {
+		t.Fatalf("expected wiA snoozed action expired with cleared SnoozeUntil, got %+v", gotASnooze)
+	}
+	if woken, err := st.WakeDueSnoozedActions(ctx, time.Now().Add(time.Hour)); err != nil || len(woken) != 0 {
+		t.Fatalf("closed WorkItem snoozed action must NEVER resurrect, woken=%+v err=%v", woken, err)
+	}
+	if _, err := eng.ResolveAction(ctx, resA.Action.ID, "web", "1"); err == nil {
+		t.Fatal("expected resolving expired action of closed WorkItem to be rejected")
+	}
+	if gotDlgA.Status != model.ActionPending {
+		t.Fatalf("live worker_dialog must NOT be implicitly expired on WorkItem close, got %+v", gotDlgA)
+	}
+	if gotBChoiceAfter.Status != model.ActionPending {
+		t.Fatalf("sibling wiB decision card in same thread must stay pending, got %+v", gotBChoiceAfter)
+	}
+}

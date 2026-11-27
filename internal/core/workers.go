@@ -311,7 +311,7 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		}
 		brief := fmt.Sprintf("[corgi task · worker=%s · thread=%s]\n%s%s\n\nHow this works:\n- Report completion with `%s report \"outcome summary & file paths\"`.\n- If blocked on a decision only the human can make or repeated failures, report `BLOCKED: <need> · tried: <attempts> · recommendation: <choice>`.%s",
 			name, thread, strings.TrimSpace(req.Task), extraCtx.String(), workerBin, worktreePromptNote(wtPrep))
-		_, _ = e.Ingest(lctx, "router", thread, model.RouterName, brief, "", name, name)
+		_, _ = e.IngestWithMeta(lctx, "router", thread, model.RouterName, brief, "", name, name, TriggerMeta{WorkItemID: wk.WorkItemID})
 	}()
 
 	select {
@@ -786,7 +786,7 @@ func (e *Engine) SendToWorkerWithWork(ctx context.Context, workerName, thread, t
 	if prevBranch != "" && wi != nil {
 		_ = e.store.RecordWorkItemBranch(ctx, wi.ID, prevBranch)
 	}
-	trig, err := e.Ingest(ctx, "router", thread, model.RouterName, text, "", wk.Name, wk.Name)
+	trig, err := e.IngestWithMeta(ctx, "router", thread, model.RouterName, text, "", wk.Name, wk.Name, TriggerMeta{WorkItemID: wk.WorkItemID})
 	if err != nil {
 		return nil, "", err
 	}
@@ -890,12 +890,15 @@ func (e *Engine) Report(ctx context.Context, workerName, paneID, text string) (*
 		turnNote = e.formatWorkerTurnStatusNote(ctx, wk, snap)
 		e.markWorkerAssistantNotified(wk, snap)
 	}
-	e.addEvent(ctx, thread, fmt.Sprintf("%s 汇报：%s", from, oneLineClip(text, 120)), from, "done")
-	trig, err := e.Ingest(ctx, "worker", thread, from, fmt.Sprintf("report from %s:\n%s%s%s", from, text, artNote, turnNote), "", model.RouterName, from)
-	if err == nil && trig != nil && artID != "" {
-		trig.ArtifactID = artID
-		_ = e.store.UpdateTrigger(ctx, trig)
+	workID := ""
+	if wk != nil {
+		workID = wk.WorkItemID
 	}
+	e.addEvent(ctx, thread, fmt.Sprintf("%s 汇报：%s", from, oneLineClip(text, 120)), from, "done")
+	trig, err := e.IngestWithMeta(ctx, "worker", thread, from, fmt.Sprintf("report from %s:\n%s%s%s", from, text, artNote, turnNote), "", model.RouterName, from, TriggerMeta{
+		WorkItemID: workID,
+		ArtifactID: artID,
+	})
 	return trig, err
 }
 

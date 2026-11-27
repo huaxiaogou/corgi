@@ -62,6 +62,7 @@ export interface Action {
   kind: "router_choice" | "router_check" | "worker_dialog" | "patrol_digest";
   thread: string;
   entry_id?: string;
+  work_item_id?: string;
   target_worker?: string;
   pane_id?: string;
   title: string;

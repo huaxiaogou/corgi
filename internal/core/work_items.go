@@ -89,7 +89,7 @@ func (e *Engine) SetWorkItem(ctx context.Context, id, thread, title, nextStep, w
 	return wi, nil
 }
 
-// CloseWorkItem closes an open work item with an explicit closing note.
+// CloseWorkItem closes an open work item with an explicit closing note and expires its owned actions.
 func (e *Engine) CloseWorkItem(ctx context.Context, id, note string) (*model.WorkItem, error) {
 	id = strings.TrimSpace(id)
 	note = strings.TrimSpace(note)
@@ -99,9 +99,17 @@ func (e *Engine) CloseWorkItem(ctx context.Context, id, note string) (*model.Wor
 	if note == "" {
 		return nil, fmt.Errorf("closing reason is required")
 	}
-	wi, err := e.store.CloseWorkItem(ctx, id, note)
+	wi, expired, err := e.store.CloseWorkItemWithActions(ctx, id, note)
 	if err != nil {
 		return nil, err
+	}
+	if len(expired) > 0 {
+		e.mu.Lock()
+		sink := e.sink
+		e.mu.Unlock()
+		for _, act := range expired {
+			sink.OnActionResolved(ctx, act)
+		}
 	}
 	e.notifyChanged()
 	return wi, nil

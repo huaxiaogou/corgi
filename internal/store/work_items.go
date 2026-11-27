@@ -249,32 +249,99 @@ func (s *Store) ReopenWorkItem(ctx context.Context, id string) (*model.WorkItem,
 	return wi, nil
 }
 
-// CloseWorkItem marks an open work item closed with an explicit closing note.
+// CloseWorkItem closes an open work item with an explicit closing note and atomically expires
+// any pending or snoozed non-dialog actions owned by that work item in the same transaction.
 func (s *Store) CloseWorkItem(ctx context.Context, id, note string) (*model.WorkItem, error) {
+	wi, _, err := s.CloseWorkItemWithActions(ctx, id, note)
+	return wi, err
+}
+
+// CloseWorkItemWithActions closes an open work item and atomically expires its owned pending and
+// snoozed actions (excluding live worker_dialog prompts) within a single SQLite transaction.
+func (s *Store) CloseWorkItemWithActions(ctx context.Context, id, note string) (*model.WorkItem, []*model.Action, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("begin close work item: %w", err)
+		return nil, nil, fmt.Errorf("begin close work item: %w", err)
 	}
 	defer tx.Rollback()
 
 	wi, err := getWorkItemTx(ctx, tx, id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if wi.ClosedAt != nil {
-		return nil, ErrWorkItemClosed
+		return nil, nil, ErrWorkItemClosed
 	}
 	now := time.Now()
 	wi.ClosedAt = &now
 	wi.UpdatedAt = now
 	wi.CloseNote = strings.TrimSpace(note)
 	if err := saveWorkItemTx(ctx, tx, wi); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
+	// Atomically expire pending/snoozed non-dialog actions explicitly owned by this WorkItem.
+	// Clearing SnoozeUntil prevents WakeDueSnoozedActions from resurrecting cancelled cards across restarts.
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id, data FROM actions WHERE status IN (?, ?) ORDER BY created_at ASC`,
+		model.ActionPending, model.ActionSnoozed,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query work item actions %s: %w", id, err)
+	}
+	type rawAct struct {
+		id   string
+		data string
+	}
+	var candidates []rawAct
+	for rows.Next() {
+		var ra rawAct
+		if sErr := rows.Scan(&ra.id, &ra.data); sErr != nil {
+			rows.Close()
+			return nil, nil, sErr
+		}
+		candidates = append(candidates, ra)
+	}
+	rows.Close()
+
+	var expired []*model.Action
+	for _, ra := range candidates {
+		var a model.Action
+		if json.Unmarshal([]byte(ra.data), &a) != nil {
+			continue
+		}
+		if a.Kind == model.ActionKindWorkerDialog {
+			continue
+		}
+		if strings.TrimSpace(a.WorkItemID) != wi.ID {
+			continue
+		}
+		a.Status = model.ActionExpired
+		a.ResolvedBy = "expired"
+		a.ExpiredReason = "work_item_closed"
+		a.ResolvedAt = &now
+		a.SnoozeUntil = nil
+		updated, mErr := mustJSON(&a)
+		if mErr != nil {
+			return nil, nil, mErr
+		}
+		res, uErr := tx.ExecContext(ctx, `
+			UPDATE actions SET status = ?, data = ?, resolved_at = ?
+			WHERE id = ? AND status IN (?, ?)
+		`, model.ActionExpired, updated, now.Unix(), a.ID, model.ActionPending, model.ActionSnoozed)
+		if uErr != nil {
+			return nil, nil, fmt.Errorf("expire action %s for closed work item %s: %w", a.ID, wi.ID, uErr)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			cp := a
+			expired = append(expired, &cp)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit close work item %s: %w", id, err)
+		return nil, nil, fmt.Errorf("commit close work item %s: %w", id, err)
 	}
-	return wi, nil
+	return wi, expired, nil
 }
 
 // RecordWorkItemBranch transactionally merges branch into a work item's branches list (if open).

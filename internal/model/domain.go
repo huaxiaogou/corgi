@@ -148,6 +148,7 @@ type Trigger struct {
 	Ref        string    `json:"ref,omitempty"`
 	Steer      bool      `json:"steer,omitempty"`
 	ArtifactID string    `json:"artifact_id,omitempty"`
+	WorkItemID string    `json:"work_item_id,omitempty"`
 }
 
 // Thread groups triggers and worker subscriptions for a conversation or WeCom group topic.
@@ -230,6 +231,7 @@ type Action struct {
 	Kind          string         `json:"kind"`
 	Thread        string         `json:"thread"`
 	EntryID       string         `json:"entry_id,omitempty"`
+	WorkItemID    string         `json:"work_item_id,omitempty"`
 	TargetWorker  string         `json:"target_worker,omitempty"`
 	PaneID        string         `json:"pane_id,omitempty"`
 	Title         string         `json:"title"`
@@ -239,6 +241,7 @@ type Action struct {
 	Status        string         `json:"status"`                // pending | resolved | expired | snoozed
 	Category      string         `json:"category,omitempty"`    // blocked | worktree | decision | stale
 	ResolvedBy    string         `json:"resolved_by,omitempty"` // web | wecom | router | cli
+	ExpiredReason string         `json:"expired_reason,omitempty"`
 	ChosenKey     string         `json:"chosen_key,omitempty"`
 	ChosenLabel   string         `json:"chosen_label,omitempty"`
 	WeComRespCode string         `json:"wecom_resp_code,omitempty"`

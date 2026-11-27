@@ -65,9 +65,13 @@ export function deriveWorkItems(
     }
   }
 
+  const pendingWorkIds = new Set<string>();
   const pendingWorkers = new Set<string>();
   for (const act of pendingActions) {
-    if (isDecisionAction(act) && act.target_worker) {
+    if (!isDecisionAction(act)) continue;
+    if (act.work_item_id) {
+      pendingWorkIds.add(act.work_item_id);
+    } else if (act.target_worker) {
       pendingWorkers.add(act.target_worker);
     }
   }
@@ -85,7 +89,7 @@ export function deriveWorkItems(
       nameSet.add(w.name);
     }
 
-    let hasBlocked = false;
+    let hasBlocked = pendingWorkIds.has(item.id);
     let hasWorking = false;
     const linkedWorkers: LinkedWorkerBadge[] = [];
     for (const name of nameSet) {

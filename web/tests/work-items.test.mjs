@@ -43,6 +43,8 @@ test("deriveWorkItems prioritizes blocked -> working -> idle, sorts by updated_a
     { id: "act1", kind: "worker_dialog", thread: "chat:main", target_worker: "w-blk", title: "确认建索引", status: "pending", created_at: isoAgo(30_000) },
     // Lightweight router_check must NOT mark a running/idle WorkItem as blocked.
     { id: "act2", kind: "router_check", thread: "chat:main", target_worker: "w-run", title: "进度汇报", status: "pending", created_at: isoAgo(20_000) },
+    // Action with explicit work_item_id binds ONLY to that exact WorkItem (even if worker is shared or omitted).
+    { id: "act3", kind: "router_choice", thread: "chat:main", work_item_id: "wi4", target_worker: "w-run", title: "是否合入", status: "pending", choices: [{ key: "1", label: "合入" }], created_at: isoAgo(10_000) },
   ];
 
   const derived = deriveWorkItems(items, workers, actions, "chat:main", now);
