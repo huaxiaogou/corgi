@@ -1,4 +1,5 @@
 import type { Action, WorkItem, Worker } from "../types/api";
+import { isDecisionAction } from "./chatFilter";
 
 export type DerivedWorkStatus = "blocked" | "working" | "idle";
 export type NotebookMode = "mini" | "expanded" | "hidden";
@@ -66,7 +67,7 @@ export function deriveWorkItems(
 
   const pendingWorkers = new Set<string>();
   for (const act of pendingActions) {
-    if (act.status === "pending" && act.target_worker) {
+    if (isDecisionAction(act) && act.target_worker) {
       pendingWorkers.add(act.target_worker);
     }
   }

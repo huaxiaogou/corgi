@@ -978,3 +978,20 @@ func TestCardClickUpdateAndNonFatalCommandError(t *testing.T) {
 		t.Fatal("per-command errcode should not disconnect live websocket")
 	}
 }
+
+func TestBuildActionCardRouterCheckNeverShowsDecisionCopy(t *testing.T) {
+	card := BuildActionCard(&model.Action{
+		ID:           "a404",
+		Kind:         model.ActionKindRouterCheck,
+		TargetWorker: "repo-state-check",
+		Title:        "只读报告已整理",
+		Summary:      "只读报告已整理，请抽空查收。",
+	})
+	if src := card["source"].(map[string]any)["desc"]; src != "Corgi · 审阅提醒" {
+		t.Fatalf("router_check source must not claim 待拍板, got %v", src)
+	}
+	mt := card["main_title"].(map[string]any)
+	if desc, _ := mt["desc"].(string); strings.Contains(desc, "拍板") || !strings.Contains(desc, "待你查收") {
+		t.Fatalf("router_check main_title.desc must not say 拍板, got %q", desc)
+	}
+}

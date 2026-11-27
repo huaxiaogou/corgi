@@ -131,7 +131,7 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 	pendingActions, _ := e.store.ListPendingActions(ctx)
 	pendingByWorker := map[string]bool{}
 	for _, a := range pendingActions {
-		if a.TargetWorker != "" {
+		if a.IsDecision() && a.TargetWorker != "" {
 			pendingByWorker[a.TargetWorker] = true
 		}
 	}

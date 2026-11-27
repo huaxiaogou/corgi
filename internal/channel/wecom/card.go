@@ -76,9 +76,13 @@ func BuildActionCard(a *model.Action) map[string]any {
 	}
 
 	title, desc, body, overflow := shapeCardCopy(a, len(choices))
+	sourceDesc := "Corgi · 待拍板"
+	if a.Kind == model.ActionKindRouterCheck {
+		sourceDesc = "Corgi · 审阅提醒"
+	}
 	card := map[string]any{
 		"card_type": "button_interaction",
-		"source":    map[string]any{"desc": "Corgi · 待拍板"},
+		"source":    map[string]any{"desc": sourceDesc},
 		"main_title": map[string]any{
 			"title": title,
 			"desc":  desc,

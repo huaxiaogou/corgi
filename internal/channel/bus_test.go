@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -837,26 +838,60 @@ func TestWeComWebActiveSuppressionAndPreciseReceipts(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	// 2. User recently messaged via WeCom (wecomRecent) -> cards push immediately even while Web is open!
+	// 2. User recently messaged via WeCom (wecomRecent):
+	//    - Lightweight --check delivers as plain Markdown text in WeCom (NEVER a template card,
+	//      NEVER PushedToWeCom=true, NEVER "请在下方卡片选择 👇"), while remaining a lightweight Web reminder.
+	//    - Even with 18 existing pending router_check reminders, a real --opt decision card pushes immediately!
 	bus.mu.Lock()
 	bus.wecomActiveAt = time.Now()
 	bus.mu.Unlock()
-	_, chk2, _, err := eng.Reply(ctx, model.MainThread, "企微会话中的待看提醒", "", nil, true)
-	if err != nil || chk2 == nil {
-		t.Fatalf("Reply(--check wecomRecent): %v", err)
+	for i := 0; i < 18; i++ {
+		if _, _, _, err := eng.Reply(ctx, model.MainThread, fmt.Sprintf("进度汇报 #%d", i+1), "", nil, true); err != nil {
+			t.Fatalf("Reply(--check #%d): %v", i+1, err)
+		}
+		select {
+		case m := <-mdCh:
+			md, _ := m.Body["markdown"].(map[string]any)
+			content, _ := md["content"].(string)
+			if strings.Contains(content, "请在下方卡片选择") || !strings.Contains(content, fmt.Sprintf("进度汇报 #%d", i+1)) {
+				t.Fatalf("router_check must deliver plain markdown text without decision prompt, got %q", content)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("expected plain markdown delivery for router_check #%d", i+1)
+		}
+	}
+	select {
+	case unexpected := <-cardCh:
+		t.Fatalf("router_check must NEVER push a WeCom template_card, got %+v", unexpected)
+	case <-time.After(100 * time.Millisecond):
+	}
+	pendingAll, _ := st.ListPendingActions(ctx)
+	for _, p := range pendingAll {
+		if p.Kind == model.ActionKindRouterCheck && p.PushedToWeCom {
+			t.Fatalf("router_check must keep PushedToWeCom=false, got %+v", p)
+		}
+		if p.Kind == model.ActionKindRouterCheck && p.IsDecision() {
+			t.Fatalf("router_check must NOT be treated as a decision, got %+v", p)
+		}
+	}
+
+	// Now send a real --opt decision -> MUST push WeCom card immediately without being blocked by the 18 checks!
+	_, opt2, _, err := eng.Reply(ctx, model.MainThread, "是否发布 v0.1.60？", "", []string{"立即发布", "暂缓"}, false)
+	if err != nil || opt2 == nil {
+		t.Fatalf("Reply(--opt wecomRecent): %v", err)
 	}
 	select {
 	case f := <-cardCh:
 		tc, _ := f.Body["template_card"].(map[string]any)
 		btns, _ := tc["button_list"].([]any)
-		if len(btns) != 1 || btns[0].(map[string]any)["text"] != "已看" {
-			t.Fatalf("expected single 已看 button for router_check card, got %+v", btns)
+		if len(btns) != 2 {
+			t.Fatalf("expected 2 decision buttons, got %+v", btns)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("expected check card pushed to WeCom when wecomRecent is active")
+		t.Fatal("expected real --opt decision card pushed immediately even with 18 pending router_check reminders")
 	}
-	persisted, _ := st.GetAction(ctx, chk2.ID)
-	if !persisted.PushedToWeCom {
-		t.Fatalf("expected PushedToWeCom persisted=true, got %+v", persisted)
+	persisted, _ := st.GetAction(ctx, opt2.ID)
+	if !persisted.PushedToWeCom || !persisted.IsDecision() {
+		t.Fatalf("expected real decision PushedToWeCom=true & IsDecision=true, got %+v", persisted)
 	}
 }

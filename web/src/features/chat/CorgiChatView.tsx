@@ -9,6 +9,7 @@ import { QuoteBlock } from "../../components/QuoteBlock";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { api } from "../../lib/api";
 import {
+  isDecisionAction,
   isInlineBubbleAction,
   isRoutineChatterEvent,
   shouldHideRedundantQuote,
@@ -64,7 +65,7 @@ function actionCategoryTag(a: Action): { key: string; label: string } {
     if (cat === "stale") return { key: "digest", label: "会话归档" };
     return { key: "digest", label: "待办提醒" };
   }
-  if (a.kind === "router_check") return { key: "check", label: "待确认" };
+  if (a.kind === "router_check") return { key: "check", label: "审阅提醒" };
   return { key: "decision", label: "待拍板" };
 }
 
@@ -201,6 +202,8 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const pendingActions = (data?.actions ?? [])
     .filter((a) => a.status === "pending" && (!thread || a.thread === thread))
     .sort((a, b) => actionPriority(a) - actionPriority(b));
+  const pendingDecisions = pendingActions.filter(isDecisionAction);
+  const pendingChecks = pendingActions.filter((a) => !isDecisionAction(a));
   const visibleEntries = entries.filter((e) => !isRoutineChatterEvent(e, resolvedActions));
   const visibleEntryIds = new Set(visibleEntries.map((e) => e.id));
   const pendingByEntryId = new Map<string, Action>();
@@ -209,10 +212,10 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
       pendingByEntryId.set(act.entry_id, act);
     }
   }
-  const floatingActions = pendingActions.filter(
+  const floatingActions = pendingDecisions.filter(
     (a) => !(isInlineBubbleAction(a) && a.entry_id && visibleEntryIds.has(a.entry_id))
   );
-  const topAction = pendingActions[0] ?? null;
+  const topAction = pendingDecisions[0] ?? pendingChecks[0] ?? null;
   const topFloatingAction = floatingActions[0] ?? null;
   const snoozedCount = thread === "chat:main" ? (data?.snoozed_actions ?? 0) : 0;
   const filteredInbox = pendingActions.filter((a) => {
@@ -470,10 +473,16 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
             >
               <span
                 className="w-2 h-2 rounded-full shrink-0"
-                style={{ background: pendingActions.length > 0 ? "var(--attn)" : "var(--fg-3)" }}
+                style={{ background: pendingDecisions.length > 0 ? "var(--attn)" : "var(--fg-3)" }}
               />
               <span className="font-medium text-primary shrink-0">
-                {pendingActions.length > 0 ? `待你确认 (${pendingActions.length})` : `已暂缓 (${snoozedCount})`}
+                {pendingDecisions.length > 0
+                  ? pendingChecks.length > 0
+                    ? `待你拍板 (${pendingDecisions.length}) · 审阅提醒 (${pendingChecks.length})`
+                    : `待你拍板 (${pendingDecisions.length})`
+                  : pendingChecks.length > 0
+                    ? `审阅提醒 (${pendingChecks.length})`
+                    : `已暂缓 (${snoozedCount})`}
               </span>
               {topAction ? (
                 <>
@@ -504,7 +513,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                     { key: "worktree", label: "未合分支", count: pendingActions.filter((a) => actionCategoryTag(a).key === "worktree").length },
                     { key: "digest", label: "巡检简报", count: pendingActions.filter((a) => actionCategoryTag(a).key === "digest").length },
                     { key: "decision", label: "待拍板", count: pendingActions.filter((a) => actionCategoryTag(a).key === "decision").length },
-                    { key: "check", label: "待确认", count: pendingActions.filter((a) => actionCategoryTag(a).key === "check").length },
+                    { key: "check", label: "审阅提醒", count: pendingActions.filter((a) => actionCategoryTag(a).key === "check").length },
                   ]
                     .filter((f) => f.key === "all" || f.count > 0)
                     .map((f) => (

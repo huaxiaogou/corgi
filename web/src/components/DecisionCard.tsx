@@ -94,8 +94,8 @@ export function DecisionCard({ action, workerNames, onResolve, onDismiss, onSnoo
           : "待办巡检提醒"
     : isRouterCheck
       ? action.target_worker
-        ? `${action.target_worker} 待你确认`
-        : "待你确认"
+        ? `${action.target_worker} · 审阅提醒`
+        : "审阅提醒"
       : action.target_worker
         ? `${action.target_worker} 需要你确认`
         : "需要你拍板";

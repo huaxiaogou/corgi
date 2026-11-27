@@ -20,6 +20,18 @@ export function isRoutineChatterEvent(
 }
 
 /**
+ * Returns true only for pending Actions that require an actual human decision or terminal approval
+ * (selectable choices or blocking worker_dialog). Lightweight `--check` review reminders return
+ * false so they never inflate decision badges, block WorkItems, or trigger floating decision overlays.
+ */
+export function isDecisionAction(action: Action | undefined | null): boolean {
+  if (!action || action.status !== "pending") return false;
+  if (action.kind === "worker_dialog") return true;
+  if (action.kind === "router_check") return false;
+  return (action.choices?.length ?? 0) > 0;
+}
+
+/**
  * Router quick-choice (--opt) and review reminder (--check) actions render inline right under
  * their originating Corgi reply bubble instead of floating as a heavy blocking bottom card.
  */

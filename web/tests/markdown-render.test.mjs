@@ -161,6 +161,7 @@ test("MarkdownText renders ordered lists (1. / 1) / 1）) as <ol> and keeps unor
 
 test("chatFilter folds routine worker chatter, hides redundant quotes, and routes inline bubble actions", async () => {
   const {
+    isDecisionAction,
     isRoutineChatterEvent,
     isInlineBubbleAction,
     shouldHideRedundantQuote,
@@ -192,6 +193,11 @@ test("chatFilter folds routine worker chatter, hides redundant quotes, and route
   assert.equal(isInlineBubbleAction({ id: "a2", kind: "router_check", thread: "chat:main", title: "q", status: "pending", created_at: "" }), true);
   assert.equal(isInlineBubbleAction({ id: "a3", kind: "worker_dialog", thread: "chat:main", title: "q", status: "pending", created_at: "" }), false);
   assert.equal(isInlineBubbleAction({ id: "a4", kind: "patrol_digest", thread: "chat:main", title: "q", status: "pending", created_at: "" }), false);
+
+  assert.equal(isDecisionAction({ id: "d1", kind: "router_choice", thread: "chat:main", title: "q", status: "pending", choices: [{ key: "1", label: "继续" }], created_at: "" }), true);
+  assert.equal(isDecisionAction({ id: "d2", kind: "router_check", thread: "chat:main", title: "q", status: "pending", created_at: "" }), false);
+  assert.equal(isDecisionAction({ id: "d3", kind: "worker_dialog", thread: "chat:main", title: "q", status: "pending", created_at: "" }), true);
+  assert.equal(isDecisionAction({ id: "d4", kind: "router_choice", thread: "chat:main", title: "q", status: "pending", choices: [], created_at: "" }), false);
 
   assert.equal(
     shouldHideRedundantQuote(

@@ -218,10 +218,11 @@ func isUnknownDeliveryErr(err error) bool {
 }
 
 // OnUserMessage bridges messages typed in Web back to WeCom:
-// - WeCom group threads (`wecom:*`) mirror immediately as `**[Web]** ...` to that group.
-// - Main single-chat thread (`chat:main`) does NOT send a standalone left-side bubble; instead it
-//   records a compact summary so Corgi's first WeCom reply prepends a native grey `> 来自 Web：...`
-//   blockquote line (zero extra bubbles or duplicate notifications).
+//   - WeCom group threads (`wecom:*`) mirror immediately as `**[Web]** ...` to that group.
+//   - Main single-chat thread (`chat:main`) does NOT send a standalone left-side bubble; instead it
+//     records a compact summary so Corgi's first WeCom reply prepends a native grey `> 来自 Web：...`
+//     blockquote line (zero extra bubbles or duplicate notifications).
+//
 // Action-linked decision entries are skipped here because OnActionResolved pushes a structured sync receipt.
 func (b *Bus) OnUserMessage(ctx context.Context, entry *model.Entry) {
 	if entry == nil || entry.Channel != "web" || entry.ActionID != "" {
@@ -438,23 +439,33 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 		return del
 	}
 
-	// Decision cards (--opt / --check) bypass Outbox batching and push immediately when not suppressed.
-	if action != nil && (len(action.Choices) > 0 || action.Kind == model.ActionKindRouterCheck) {
+	// Real decision cards (--opt / worker_dialog) bypass Outbox batching and push immediately when not suppressed.
+	// Lightweight `--check` review reminders (router_check) are Web-only reminders and flow through
+	// normal plain-text WeCom delivery below (never cardified and never sealed with "请在下方卡片选择 👇").
+	if action != nil && action.IsDecision() {
 		b.clearPendingWebQuote(entry.Thread)
-		if st := b.takeRouterStream(entry.Thread); st != nil {
-			if st.chatID != "" && chatID == "" {
-				chatID = st.chatID
-			}
-			_, _ = st.seal(ctx, "", "请在下方卡片选择 👇")
+		st := b.takeRouterStream(entry.Thread)
+		if st != nil && st.chatID != "" && chatID == "" {
+			chatID = st.chatID
 		}
+		cardPushed := false
 		if b.wecom != nil && b.wecom.Online() {
 			if err := b.wecom.SendActionCard(ctx, chatID, action); err != nil {
 				b.logger.Warn("push action card to wecom failed", "action", action.ID, "err", err)
 			} else {
+				cardPushed = true
 				action.PushedToWeCom = true
 				if b.engine != nil {
 					_ = b.engine.MarkActionPushedToWeCom(ctx, action.ID)
 				}
+			}
+		}
+		if st != nil {
+			if cardPushed {
+				_, _ = st.seal(ctx, "", "请在下方卡片选择 👇")
+			} else {
+				// Fall back to readable reply prose if card push failed or WeCom went offline.
+				_, _ = st.seal(ctx, "", formatWeComReply(entry))
 			}
 		}
 		if hasExplicitFiles {

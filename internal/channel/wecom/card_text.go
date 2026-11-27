@@ -38,9 +38,15 @@ func shapeCardCopy(a *model.Action, choiceCount int) (title, desc, body, overflo
 	}
 
 	switch {
+	case a.Kind == model.ActionKindRouterCheck:
+		if w := strings.TrimSpace(a.TargetWorker); w != "" {
+			desc = clipRunes("会话："+w+" · 待你查收", cardMainDescMaxRunes)
+		} else {
+			desc = "轻量审阅提醒"
+		}
 	case strings.TrimSpace(a.TargetWorker) != "":
 		desc = clipRunes("会话："+strings.TrimSpace(a.TargetWorker)+" · 请拍板", cardMainDescMaxRunes)
-	case a.Kind == model.ActionKindRouterCheck || choiceCount == 1:
+	case choiceCount == 1:
 		desc = "确认后将继续推进"
 	case choiceCount > 1:
 		desc = fmt.Sprintf("共 %d 个选项 · 请点击拍板", choiceCount)

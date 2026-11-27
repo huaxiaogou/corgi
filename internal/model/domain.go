@@ -248,6 +248,23 @@ type Action struct {
 	SnoozeUntil   *time.Time     `json:"snooze_until,omitempty"`
 }
 
+// IsDecision reports whether this Action represents an actual human decision or blocking terminal
+// approval (has selectable choices or is a worker_dialog). Lightweight `--check` review reminders
+// (ActionKindRouterCheck) return false so they deliver as plain text in WeCom and never inflate
+// decision counters or block real decision queues.
+func (a *Action) IsDecision() bool {
+	if a == nil {
+		return false
+	}
+	if a.Kind == ActionKindWorkerDialog {
+		return true
+	}
+	if a.Kind == ActionKindRouterCheck {
+		return false
+	}
+	return len(a.Choices) > 0
+}
+
 // Timer schedules a one-shot or recurring event into a thread or directly to a worker.
 type Timer struct {
 	ID      string     `json:"id"`

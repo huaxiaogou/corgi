@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Hash, Moon, Pin, Plus, Settings as SettingsIcon, Sun, X } from "lucide-react";
 import { api } from "../lib/api";
+import { isDecisionAction } from "../lib/chatFilter";
 import type { AgentView, Machine, SuperView } from "../types/api";
 import { AgentGlyph, CorgiMark, StatusDot } from "./CorgiMark";
 import { HistorySection } from "./HistorySection";
@@ -80,8 +81,8 @@ export function Sidebar({
   const runningWorkers = activeWorkers.filter(
     (w) => w.status === "working" || w.status === "starting" || w.status === "waiting"
   );
-  const pendingActions = (superView?.actions ?? []).filter((a) => a.status === "pending");
-  const mainPending = pendingActions.filter((a) => a.thread === "chat:main").length;
+  const pendingDecisions = (superView?.actions ?? []).filter(isDecisionAction);
+  const mainPending = pendingDecisions.filter((a) => a.thread === "chat:main").length;
   const wecomGroups = (superView?.threads ?? []).filter((t) => t.id.startsWith("wecom:"));
 
   const isKept = (a: AgentView) => (a.name in keepOverride ? keepOverride[a.name] : Boolean(a.keep));
@@ -179,7 +180,7 @@ export function Sidebar({
           <div className="space-y-1">
             <div className="px-2.5 text-[11px] font-medium text-muted">企微群聊 {wecomGroups.length}</div>
             {wecomGroups.map((th) => {
-              const groupPending = pendingActions.filter((a) => a.thread === th.id).length;
+              const groupPending = pendingDecisions.filter((a) => a.thread === th.id).length;
               const label = th.title || th.id.replace(/^wecom:/, "");
               return (
                 <button
