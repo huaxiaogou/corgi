@@ -290,11 +290,11 @@ func RunNodeSession(ctx context.Context, opts NodeSessionOpts) error {
 		if err != nil {
 			return err
 		}
-		go handleNodeStream(st, opts.HerdrSocket, httpCh)
+		go handleNodeStream(ctx, st, opts.HerdrSocket, opts.Home, opts.Logger, httpCh)
 	}
 }
 
-func handleNodeStream(st net.Conn, herdrSocket string, httpCh chan<- net.Conn) {
+func handleNodeStream(ctx context.Context, st net.Conn, herdrSocket, home string, logger *slog.Logger, httpCh chan<- net.Conn) {
 	br := bufio.NewReader(st)
 	kind, err := br.ReadString('\n')
 	if err != nil {
@@ -311,7 +311,9 @@ func handleNodeStream(st net.Conn, herdrSocket string, httpCh chan<- net.Conn) {
 		}
 	case "herdr":
 		defer wrapped.Close()
-		uconn, err := net.DialTimeout("unix", herdrSocket, 5*time.Second)
+		dialCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		uconn, err := herdr.DialUnix(dialCtx, herdrSocket, home, logger)
+		cancel()
 		if err != nil {
 			return
 		}

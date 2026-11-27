@@ -138,8 +138,16 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 
 	var activeWorkers []*model.Worker
 	for _, w := range workers {
-		if !w.Ended || time.Since(w.CreatedAt) < 12*time.Hour {
+		if !w.Ended {
 			activeWorkers = append(activeWorkers, w)
+			continue
+		}
+		if time.Since(w.CreatedAt) < 12*time.Hour {
+			// Slim ended workers in Snapshot/SSE while preserving lossless store records & show/{id}.
+			slim := *w
+			slim.Task = clipMultiline(slim.Task, 400)
+			slim.LastReport = clipMultiline(slim.LastReport, 240)
+			activeWorkers = append(activeWorkers, &slim)
 		}
 	}
 	sort.Slice(activeWorkers, func(i, j int) bool { return activeWorkers[i].CreatedAt.After(activeWorkers[j].CreatedAt) })

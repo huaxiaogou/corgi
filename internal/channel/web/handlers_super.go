@@ -389,6 +389,19 @@ func (s *Server) handleSuperSend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, res)
 }
 
+func (s *Server) handleSuperVerify(w http.ResponseWriter, r *http.Request) {
+	var req core.VerifyWorkerRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	out, err := s.Engine.VerifyWorker(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "result": out})
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) handleSuperReport(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Worker string `json:"worker"`

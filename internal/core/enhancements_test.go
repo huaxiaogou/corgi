@@ -77,7 +77,7 @@ func TestNaturalReplyAutoResolveSilentAckAndSevenDayExpiry(t *testing.T) {
 		t.Fatalf("silent ack must not add a user message entry: before=%d after=%d", len(beforeEntries), len(afterEntries))
 	}
 
-	// 2. Unquoted human reply auto-resolves latest pending router_choice, but NOT worker_dialog.
+	// 2. Unquoted human reply MUST NOT auto-resolve pending router_choice OR worker_dialog.
 	_, choiceAct, _, err := eng.Reply(ctx, model.MainThread, "要现在发布吗？", "", []string{"发布", "稍后"}, false)
 	if err != nil || choiceAct == nil {
 		t.Fatalf("Reply(--opt): %v", err)
@@ -89,28 +89,29 @@ func TestNaturalReplyAutoResolveSilentAckAndSevenDayExpiry(t *testing.T) {
 	if err := st.InsertAction(ctx, dlgAct); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "先等我跑完回归再发"}); err != nil {
+	if _, _, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "顺便问下另一个项目的进展"}); err != nil {
 		t.Fatal(err)
 	}
 	gotChoice, _ := st.GetAction(ctx, choiceAct.ID)
-	if gotChoice.Status != model.ActionResolved || gotChoice.ChosenKey != "reply" {
-		t.Fatalf("expected unquoted reply to auto-resolve router_choice, got %+v", gotChoice)
+	if gotChoice.Status != model.ActionPending {
+		t.Fatalf("expected unquoted unrelated chat to preserve pending router_choice, got %+v", gotChoice)
 	}
 	gotDlg, _ := st.GetAction(ctx, dlgAct.ID)
 	if gotDlg.Status != model.ActionPending {
 		t.Fatalf("worker_dialog must stay pending on normal chat, got %+v", gotDlg)
 	}
 
-	// 3. Explicit quoted reply resolves ONLY the quoted action, leaving newer ones intact.
+	// 3. Explicit quoted reply (direct OR via reply-chain) resolves ONLY the quoted action, leaving newer ones intact.
 	eOld, actOld, _, _ := eng.Reply(ctx, model.MainThread, "问题 A", "", []string{"A1", "A2"}, false)
+	eChain, _, _, _ := eng.Reply(ctx, model.MainThread, "补充说明 A 的上下文", eOld.ID, nil, false)
 	_, actNew, _, _ := eng.Reply(ctx, model.MainThread, "问题 B", "", []string{"B1", "B2"}, false)
-	if _, _, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "按 A1 办", ReEntryID: eOld.ID}); err != nil {
+	if _, _, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "按 A1 办", ReEntryID: eChain.ID}); err != nil {
 		t.Fatal(err)
 	}
 	gotOld, _ := st.GetAction(ctx, actOld.ID)
 	gotNew, _ := st.GetAction(ctx, actNew.ID)
-	if gotOld.Status != model.ActionResolved {
-		t.Fatalf("quoted action should resolve: %+v", gotOld)
+	if gotOld.Status != model.ActionResolved || gotOld.ChosenKey != "reply" {
+		t.Fatalf("reply-chain quoted action should resolve: %+v", gotOld)
 	}
 	if gotNew.Status != model.ActionPending {
 		t.Fatalf("unquoted sibling action should stay pending: %+v", gotNew)

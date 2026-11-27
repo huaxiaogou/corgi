@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -51,67 +52,174 @@ func NewClient(dial DialFunc) *Client {
 	return &Client{dial: dial}
 }
 
+var (
+	herdrBootWait          = 10 * time.Second
+	herdrReconnectWait     = 4 * time.Second
+	herdrStartCooldown     = 30 * time.Second
+	herdrPollInterval      = 150 * time.Millisecond
+	herdrReadRetryDelay    = 150 * time.Millisecond
+	herdrStartDaemonFn     = startHerdrDaemon
+	unixSocketStatesMu     sync.Mutex
+	unixSocketStates       = map[string]*unixSocketState{}
+)
+
+type unixSocketState struct {
+	mu            sync.Mutex
+	everConnected bool
+	bootUntil     time.Time
+	lastStartAt   time.Time
+}
+
+func getUnixSocketState(socketPath string) *unixSocketState {
+	key := filepath.Clean(socketPath)
+	unixSocketStatesMu.Lock()
+	defer unixSocketStatesMu.Unlock()
+	st, ok := unixSocketStates[key]
+	if !ok {
+		st = &unixSocketState{}
+		unixSocketStates[key] = st
+	}
+	return st
+}
+
 // NewUnixClient connects to a local herdr Unix socket and automatically starts
 // `herdr server` in the background if the socket is unavailable.
 func NewUnixClient(socketPath, home string, logger *slog.Logger) *Client {
-	starter := &serverStarter{home: home, logger: logger}
 	return &Client{
 		home: home,
 		dial: func(ctx context.Context) (net.Conn, error) {
-			var d net.Dialer
-			c, err := d.DialContext(ctx, "unix", socketPath)
-			if err == nil {
-				return c, nil
-			}
-			if !starter.tryStart() {
-				return nil, fmt.Errorf("herdr socket unavailable (%s): %w", socketPath, err)
-			}
-			for i := 0; i < 40; i++ {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(250 * time.Millisecond):
-				}
-				if c2, err2 := d.DialContext(ctx, "unix", socketPath); err2 == nil {
-					return c2, nil
-				}
-			}
-			return nil, fmt.Errorf("herdr server did not become ready at %s: %w", socketPath, err)
+			return DialUnix(ctx, socketPath, home, logger)
 		},
 	}
 }
 
-type serverStarter struct {
-	home   string
-	logger *slog.Logger
-	mu     sync.Mutex
-	lastAt time.Time
+// DialUnix connects to a local herdr Unix socket with shared per-socket boot-wait
+// coordination, brief reconnect waiting across daemon restarts, and auto-start fallback.
+func DialUnix(ctx context.Context, socketPath, home string, logger *slog.Logger) (net.Conn, error) {
+	st := getUnixSocketState(socketPath)
+	var d net.Dialer
+
+	if c, err := d.DialContext(ctx, "unix", socketPath); err == nil {
+		st.markConnected()
+		return c, nil
+	} else {
+		firstErr := err
+		// If this socket was previously connected, allow a short grace window for an in-flight
+		// daemon restart before attempting to spawn a new herdr server.
+		if st.wasConnected() {
+			if c2, ok := pollUnixDial(ctx, &d, socketPath, time.Now().Add(herdrReconnectWait)); ok {
+				st.markConnected()
+				return c2, nil
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		}
+
+		// Share any active boot-wait window across concurrent callers, or initiate a fresh start.
+		bootUntil, started := st.ensureBootWindow(home, logger)
+		if !bootUntil.IsZero() && time.Now().Before(bootUntil) {
+			if c2, ok := pollUnixDial(ctx, &d, socketPath, bootUntil); ok {
+				st.markConnected()
+				return c2, nil
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if started {
+				return nil, fmt.Errorf("herdr server did not become ready at %s: %w", socketPath, firstErr)
+			}
+		}
+		return nil, fmt.Errorf("herdr socket unavailable (%s): %w", socketPath, firstErr)
+	}
 }
 
-func (s *serverStarter) tryStart() bool {
-	s.mu.Lock()
-	if time.Since(s.lastAt) < 30*time.Second {
-		s.mu.Unlock()
-		return false
+func pollUnixDial(ctx context.Context, d *net.Dialer, socketPath string, until time.Time) (net.Conn, bool) {
+	poll := herdrPollInterval
+	if poll <= 0 {
+		poll = 50 * time.Millisecond
 	}
-	s.lastAt = time.Now()
+	for {
+		if c, err := d.DialContext(ctx, "unix", socketPath); err == nil {
+			return c, true
+		}
+		rem := time.Until(until)
+		if rem <= 0 {
+			return nil, false
+		}
+		wait := poll
+		if rem < wait {
+			wait = rem
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, false
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *unixSocketState) markConnected() {
+	s.mu.Lock()
+	s.everConnected = true
+	s.bootUntil = time.Time{}
+	s.lastStartAt = time.Time{} // reset cooldown once healthy so a later restart recovers immediately
+	s.mu.Unlock()
+}
+
+func (s *unixSocketState) wasConnected() bool {
+	s.mu.Lock()
+	ok := s.everConnected
+	s.mu.Unlock()
+	return ok
+}
+
+func (s *unixSocketState) ensureBootWindow(home string, logger *slog.Logger) (bootUntil time.Time, started bool) {
+	now := time.Now()
+	s.mu.Lock()
+	if !s.bootUntil.IsZero() && now.Before(s.bootUntil) {
+		u := s.bootUntil
+		s.mu.Unlock()
+		return u, false
+	}
+	if !s.lastStartAt.IsZero() && now.Sub(s.lastStartAt) < herdrStartCooldown {
+		s.mu.Unlock()
+		return time.Time{}, false
+	}
+	s.lastStartAt = now
+	s.bootUntil = now.Add(herdrBootWait)
+	u := s.bootUntil
 	s.mu.Unlock()
 
-	bin := FindBin("herdr", s.home)
+	if !herdrStartDaemonFn(home, logger) {
+		s.mu.Lock()
+		if s.bootUntil.Equal(u) {
+			s.bootUntil = time.Time{}
+		}
+		s.mu.Unlock()
+		return time.Time{}, false
+	}
+	return u, true
+}
+
+func startHerdrDaemon(home string, logger *slog.Logger) bool {
+	bin := FindBin("herdr", home)
 	if bin == "" {
 		return false
 	}
 	cmd := exec.Command(bin, "server")
-	cmd.Dir = s.home
+	cmd.Dir = home
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		if s.logger != nil {
-			s.logger.Warn("failed to auto-start herdr server", "err", err)
+		if logger != nil {
+			logger.Warn("failed to auto-start herdr server", "err", err)
 		}
 		return false
 	}
-	if s.logger != nil {
-		s.logger.Info("auto-started herdr server", "pid", cmd.Process.Pid)
+	if logger != nil {
+		logger.Info("auto-started herdr server", "pid", cmd.Process.Pid)
 	}
 	go func() { _ = cmd.Wait() }()
 	return true
@@ -166,6 +274,8 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 }
 
 // CallRaw executes one NDJSON RPC method and returns the raw JSON result.
+// Idempotent read RPCs retry once on mid-flight transport disconnects (EOF/reset);
+// mutating RPCs never retry automatically.
 func (c *Client) CallRaw(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	if c == nil || c.dial == nil {
 		return nil, fmt.Errorf("herdr client unavailable")
@@ -173,6 +283,56 @@ func (c *Client) CallRaw(ctx context.Context, method string, params any) (json.R
 	if params == nil {
 		params = map[string]any{}
 	}
+	raw, err := c.callRawOnce(ctx, method, params)
+	if err == nil || !isIdempotentReadMethod(method) || !isRetryableTransportErr(err) || ctx.Err() != nil {
+		return raw, err
+	}
+	delay := herdrReadRetryDelay
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, err
+		case <-timer.C:
+		}
+	}
+	return c.callRawOnce(ctx, method, params)
+}
+
+func isIdempotentReadMethod(method string) bool {
+	switch method {
+	case "workspace.list", "pane.list", "agent.list", "agent.get", "pane.get", "pane.read", "pane.layout":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRetryableTransportErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var he *Error
+	if errors.As(err, &he) {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && !ne.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "eof") || strings.Contains(msg, "connection reset") || strings.Contains(msg, "broken pipe")
+}
+
+func (c *Client) callRawOnce(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {
 		return nil, err

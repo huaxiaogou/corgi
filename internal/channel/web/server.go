@@ -140,6 +140,7 @@ func (s *Server) registerMachineRoutes(mux *http.ServeMux, wrap func(http.Handle
 	mux.Handle("POST /api/git/inspect", wrap(s.handleGitInspect))
 	mux.Handle("POST /api/git/worktree/create", wrap(s.handleGitWorktreeCreate))
 	mux.Handle("POST /api/git/worktree/cleanup", wrap(s.handleGitWorktreeCleanup))
+	mux.Handle("POST /api/git/verify", wrap(s.handleGitVerify))
 	mux.Handle("POST /api/codex/interrupt", wrap(s.handleCodexInterrupt))
 	mux.Handle("GET /api/dirs", wrap(s.handleListDirs))
 	mux.Handle("GET /api/file", wrap(s.handleReadFile))
@@ -174,6 +175,7 @@ func (s *Server) registerSuperRoutes(mux *http.ServeMux, api func(string, http.H
 	api("GET /api/super/search", s.handleSuperSearch)
 	api("POST /api/super/spawn", s.handleSuperSpawn)
 	api("POST /api/super/send", s.handleSuperSend)
+	api("POST /api/super/verify", s.handleSuperVerify)
 	api("POST /api/super/report", s.handleSuperReport)
 	api("POST /api/super/subscribe", s.handleSuperSubscribe)
 	api("POST /api/super/stop", s.handleSuperStop)
@@ -226,7 +228,9 @@ func (s *Server) identity(r *http.Request) (bool, *model.Device) {
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		master, dev := s.identity(r)
-		allowed := master || (dev != nil && (dev.Kind == "browser" || strings.HasPrefix(r.URL.Path, "/api/super/")))
+		machineUpdate := dev != nil && dev.Kind == "machine" &&
+			(r.URL.Path == "/api/version" || r.URL.Path == "/api/update" || r.URL.Path == "/api/update/fleet")
+		allowed := master || (dev != nil && (dev.Kind == "browser" || strings.HasPrefix(r.URL.Path, "/api/super/"))) || machineUpdate
 		if !allowed {
 			writeReadFileError(w, r, http.StatusUnauthorized, "unauthorized")
 			return

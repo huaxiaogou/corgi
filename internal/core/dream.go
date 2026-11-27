@@ -855,8 +855,8 @@ const dreamPromptTemplate = `[corgi] Dream. You are Corgi's memory keeper runnin
 - dreams/: earlier dream journals, if any.
 Run ` + "`{{BIN}} list`" + ` to check which workers and timers are still active.
 
-Consolidate memory/ and keep up-front files (instructions.md, notes/index.md, open tasks) under ~{{BUDGET}} KB combined:
-1. Positive archive rule for task notes: ONLY move a note from tasks/private/ or tasks/groups/ to tasks/done/ if its Hub work_item is explicitly CLOSED (absent from "Authoritative Open Work Items" in dream/input.md and ` + "`{{BIN}} list`" + `) AND no active worker, unmerged branch, or pending user action remains. Moving a .md file NEVER closes a Hub SQLite work_item; never treat a local prototype/build without confirmed delivery as done.
+Consolidate memory/ and keep up-front files (instructions.md, notes/index.md) under ~{{BUDGET}} KB combined:
+1. Single-source open-task ledger: Hub SQLite work_items is the sole open-task ledger. Do NOT create or maintain open task checklists under tasks/private/ or tasks/groups/. If legacy notes still exist under tasks/private/ or tasks/groups/ whose Hub work_item is explicitly CLOSED (absent from "Authoritative Open Work Items" in dream/input.md and ` + "`{{BIN}} list`" + `) AND no active worker, unmerged branch, or pending user action remains, move them to tasks/done/ (distilling any reusable knowledge into notes/). Moving a .md file NEVER closes a Hub SQLite work_item; never treat a local prototype/build without confirmed delivery as done.
 2. Rewrite instructions.md cleanly: one standing preference/rule per line (≤80 Chinese chars); move procedures/history into notes/ with a pointer ("见 notes/x.md"). Remove recurring schedules already backed by an active timer + notes/ workflow; merge duplicates.
 3. Capture cross-session patterns seen more than once (repeated corrections, implicit preferences, recurring mistakes) into instructions.md or notes/, marked "(inferred)".
 4. File reusable engineering findings (data paths, working commands, pitfalls, agent/model track records in notes/agents.md) into notes/<topic>.md and keep notes/index.md accurate. Store pointers, not copies.

@@ -61,7 +61,7 @@ func runHub(dir string) {
 	token := flag.String("token", os.Getenv("CORGI_TOKEN"), "master access token (default: auto-generated in ~/.corgi/token)")
 	publicURL := flag.String("url", os.Getenv("CORGI_URL"), "public/LAN URL shown in pairing QR codes")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: corgi [serve] [flags]                     run the hub\n       corgi node --hub <url> --code <c>         join this computer to a hub\n       corgi pair [--computer]                   new pairing code\n       corgi reply|say|spawn|send|report|subscribe|stop|answer|show|list|timer|hook …\n\n")
+		fmt.Fprintf(os.Stderr, "usage: corgi [serve] [flags]                     run the hub\n       corgi node --hub <url> --code <c>         join this computer to a hub\n       corgi pair [--computer]                   new pairing code\n       corgi update [--check] [--all]            check or rolling-update hub & nodes\n       corgi reply|say|spawn|send|verify|report|subscribe|stop|answer|show|list|task|timer|hook …\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()

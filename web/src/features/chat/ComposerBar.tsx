@@ -3,6 +3,7 @@ import { ArrowUp, ChevronDown, FolderGit2, Paperclip, Square, X } from "lucide-r
 import { useAutoResizeTextarea } from "../../hooks/useAutoResizeTextarea";
 import { api, uploadFile } from "../../lib/api";
 import { createIMETracker, classifyEnterKey } from "../../lib/composerInput";
+import { capturePasteSnapshot, resolvePastedFiles } from "../../lib/pasteImage";
 import { formatDispatchSummary, resolveEffectiveDispatch } from "../../lib/dispatchDefaults";
 import { getSupportedEfforts } from "../../lib/models";
 import type { Entry, Machine, ModelCatalog, WorkItem, WorkerDispatchDefaults } from "../../types/api";
@@ -462,10 +463,16 @@ export function ComposerBar({
             imeRef.current.lastCompositionEndAt = e.timeStamp;
           }}
           onPaste={(e) => {
-            if (e.clipboardData?.files?.length) {
-              e.preventDefault();
-              void handleFiles(e.clipboardData.files);
-            }
+            const snap = capturePasteSnapshot(e.clipboardData);
+            if (!snap.hasMediaHint) return;
+            e.preventDefault();
+            void resolvePastedFiles(snap, navigator.clipboard).then((res) => {
+              if (res.files.length > 0) {
+                void handleFiles(res.files);
+              } else if (res.error) {
+                onToast(res.error);
+              }
+            });
           }}
           onKeyDown={(e) => {
             const action = classifyEnterKey(

@@ -36,6 +36,7 @@ type Fleet struct {
 	runs     map[string][2]string // pane ID -> [model, effort]
 	seenAt   map[string]time.Time
 	doneAt   map[string]time.Time
+	herdrOK  map[string]bool      // machine ID -> whether last herdr list succeeded
 	onChange func()
 	subs     map[chan struct{}]struct{}
 }
@@ -60,8 +61,29 @@ func NewFleet(localHerdr *herdr.Client, hostname, home, version string, localAge
 		runs:    map[string][2]string{},
 		seenAt:  map[string]time.Time{},
 		doneAt:  map[string]time.Time{},
+		herdrOK: map[string]bool{},
 		subs:    map[chan struct{}]struct{}{},
 	}
+}
+
+// MachineHerdrOK reports whether machine's herdr answered its most recent list call
+// (default true until proven unreachable so transient restarts don't wipe metadata).
+func (f *Fleet) MachineHerdrOK(machine string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if ok, seen := f.herdrOK[machine]; seen {
+		return ok
+	}
+	return true
+}
+
+func (f *Fleet) setMachineHerdrOK(machine string, ok bool) {
+	f.mu.Lock()
+	if f.herdrOK == nil {
+		f.herdrOK = map[string]bool{}
+	}
+	f.herdrOK[machine] = ok
+	f.mu.Unlock()
 }
 
 // SetCorgiDir configures on-disk custom-agent persistence for both local and remote herdr clients.
@@ -384,6 +406,7 @@ func (f *Fleet) AgentsWithScanned(ctx context.Context) ([]model.Agent, map[strin
 		go func(tc targetClient) {
 			defer wg.Done()
 			ags, err := tc.client.Agents(ctx)
+			f.setMachineHerdrOK(tc.machine, err == nil)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {

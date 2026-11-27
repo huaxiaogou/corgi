@@ -5,6 +5,7 @@ import { TerminalScreen } from "../../components/TerminalScreen";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { api, uploadFile } from "../../lib/api";
 import { createIMETracker, isPostCompositionSafariEnter } from "../../lib/composerInput";
+import { capturePasteSnapshot, resolvePastedFiles } from "../../lib/pasteImage";
 import type { AgentView, Approval, ChatMessage, MsgPatch, QueuedPrompt } from "../../types/api";
 import { AgentChatThread, type PendingPrompt } from "./AgentChatThread";
 
@@ -607,10 +608,16 @@ export function AgentPaneView({ pane, focusSeq = 0, queuedPrompts = [], queuePau
                 }
               }}
               onPaste={(e: ClipboardEvent<HTMLInputElement>) => {
-                if (e.clipboardData?.files?.length) {
-                  e.preventDefault();
-                  void addFiles(e.clipboardData.files);
-                }
+                const snap = capturePasteSnapshot(e.clipboardData);
+                if (!snap.hasMediaHint) return;
+                e.preventDefault();
+                void resolvePastedFiles(snap, navigator.clipboard).then((res) => {
+                  if (res.files.length > 0) {
+                    void addFiles(res.files);
+                  } else if (res.error) {
+                    onToast(res.error);
+                  }
+                });
               }}
               onChange={(e) => setInput(e.target.value)}
               placeholder={

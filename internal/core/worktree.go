@@ -265,7 +265,7 @@ func worktreePromptNote(prep *worktreePrep) string {
 	if prep == nil || prep.WorktreeBranch == "" {
 		return ""
 	}
-	return fmt.Sprintf("\n- Git Worktree Isolation: you are working in an isolated git worktree on branch `%s` (branched from `%s`). Commit your changes on this branch and include the branch name in your report; do not modify the primary checkout.",
+	return fmt.Sprintf("\n- Git Worktree Isolation: you are working in an isolated git worktree on branch `%s` (branched from `%s`). Before reporting completion, run the repository's build/test checks, commit your verified changes on this branch, and include the branch name and verification result in your report; do not modify the primary checkout.",
 		prep.WorktreeBranch, prep.RepoRoot)
 }
 

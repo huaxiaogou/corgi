@@ -559,13 +559,12 @@ func (e *Engine) MarkActionPushedToWeCom(ctx context.Context, actionID string) e
 	return e.store.MarkActionPushedToWeCom(ctx, actionID)
 }
 
-// autoResolvePendingOnUserReply resolves pending actions in thread when the human replies in chat:
-// - Explicit quoted entry (reEntryID != "") resolves only the matching action (including router_check).
-// - WeCom quoted text with unknown entry ID (reEntryID == "" && quoteText != "") never guesses.
-// - Unquoted follow-up replies only auto-resolve router_choice / patrol_digest (never router_check or worker_dialog).
-func (e *Engine) autoResolvePendingOnUserReply(ctx context.Context, thread, reEntryID, quoteText, channel, text string) {
+// autoResolvePendingOnUserReply resolves a pending non-dialog action ONLY when the human
+// explicitly quotes that action's entry (or another entry in its reply chain).
+// Plain unquoted chat messages never auto-resolve unanswered pending decision cards.
+func (e *Engine) autoResolvePendingOnUserReply(ctx context.Context, thread, reEntryID, _ string, channel, text string) {
 	reID := strings.TrimSpace(reEntryID)
-	if reID == "" && strings.TrimSpace(quoteText) != "" {
+	if reID == "" {
 		return
 	}
 	pending, err := e.store.ListPendingActions(ctx)
@@ -574,10 +573,7 @@ func (e *Engine) autoResolvePendingOnUserReply(ctx context.Context, thread, reEn
 	}
 	var candidates []*model.Action
 	for _, a := range pending {
-		if a.Thread != thread || a.Kind == model.ActionKindWorkerDialog {
-			continue
-		}
-		if reID == "" && a.Kind == model.ActionKindRouterCheck {
+		if a.Thread != thread || a.Kind == model.ActionKindWorkerDialog || strings.TrimSpace(a.EntryID) == "" {
 			continue
 		}
 		candidates = append(candidates, a)
@@ -586,23 +582,13 @@ func (e *Engine) autoResolvePendingOnUserReply(ctx context.Context, thread, reEn
 		return
 	}
 
-	entries, _, _ := e.store.ListEntries(ctx, thread, 60)
 	e.mu.Lock()
 	sink := e.sink
 	e.mu.Unlock()
 	label := oneLineClip(text, 120)
 
 	for _, a := range candidates {
-		matched := false
-		if reID != "" {
-			matched = a.EntryID != "" && a.EntryID == reID
-		} else {
-			// Guard unquoted follow-ups: only auto-resolve a recent latest card (<=30m) so a
-			// fresh unrelated message hours later never silently closes an older decision.
-			recent := a.CreatedAt.IsZero() || time.Since(a.CreatedAt) <= 30*time.Minute
-			matched = recent && !hasLaterCorgiEntry(entries, a)
-		}
-		if !matched {
+		if !e.entryInReplyChain(ctx, reID, a.EntryID) {
 			continue
 		}
 		if resolved, err := e.store.ResolveAction(ctx, a.ID, channel, "reply", label); err == nil {
@@ -611,26 +597,28 @@ func (e *Engine) autoResolvePendingOnUserReply(ctx context.Context, thread, reEn
 	}
 }
 
-func hasLaterCorgiEntry(entries []*model.Entry, a *model.Action) bool {
-	if a.EntryID != "" {
-		found := false
-		for _, en := range entries {
-			if en.ID == a.EntryID {
-				found = true
-				continue
-			}
-			if found && en.Role == "corgi" {
-				return true
-			}
-		}
-		if found {
-			return false
-		}
+// entryInReplyChain reports whether fromID equals targetID or reaches targetID by following
+// Entry.Re.Entry parent pointers (bounded to 16 hops to prevent cycles).
+func (e *Engine) entryInReplyChain(ctx context.Context, fromID, targetID string) bool {
+	cur := strings.TrimSpace(fromID)
+	target := strings.TrimSpace(targetID)
+	if cur == "" || target == "" {
+		return false
 	}
-	for _, en := range entries {
-		if en.Role == "corgi" && en.At.After(a.CreatedAt) {
+	seen := make(map[string]bool, 4)
+	for hops := 0; cur != "" && hops < 16; hops++ {
+		if cur == target {
 			return true
 		}
+		if seen[cur] {
+			return false
+		}
+		seen[cur] = true
+		en, err := e.store.GetEntry(ctx, cur)
+		if err != nil || en == nil || en.Re == nil {
+			return false
+		}
+		cur = strings.TrimSpace(en.Re.Entry)
 	}
 	return false
 }

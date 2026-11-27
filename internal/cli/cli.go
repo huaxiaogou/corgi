@@ -22,6 +22,7 @@ var Commands = map[string]func(corgiDir string, args []string) error{
 	"say":       cmdSay,
 	"spawn":     cmdSpawn,
 	"send":      cmdSend,
+	"verify":    cmdVerify,
 	"report":    cmdReport,
 	"subscribe": cmdSubscribe,
 	"stop":      cmdStop,
@@ -33,6 +34,8 @@ var Commands = map[string]func(corgiDir string, args []string) error{
 	"timer":     cmdTimer,
 	"hook":      cmdHook,
 	"pair":      cmdPair,
+	"update":    cmdUpdate,
+	"upgrade":   cmdUpdate,
 }
 
 // Run executes a CLI subcommand against the local or paired Hub.
@@ -649,4 +652,162 @@ func cmdPair(dir string, args []string) error {
 	fleet.PrintQR(os.Stdout, u)
 	fmt.Printf("\n  %s\n\n", u)
 	return nil
+}
+
+func cmdVerify(dir string, args []string) error {
+	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	review := fs.Bool("review", false, "run read-only cross-model diff review after checks")
+	reviewer := fs.String("reviewer", "", "reviewer CLI: codex or claude (default auto)")
+	cmdStr := fs.String("cmd", "", "override auto-detected check command")
+	send := fs.Bool("send", false, "bounce failure or blocking review findings straight back to worker")
+	if err := parseInterspersed(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: corgi verify [--review] [--reviewer codex|claude] [--cmd \"...\"] [--send] <worker>")
+	}
+	out, err := apiCallWithTimeout(dir, http.MethodPost, "/api/super/verify", map[string]any{
+		"worker":   fs.Arg(0),
+		"cmd":      *cmdStr,
+		"review":   *review,
+		"reviewer": *reviewer,
+		"send":     *send,
+	}, 5*time.Minute)
+	if len(out) > 0 {
+		fmt.Println(strings.TrimSpace(string(out)))
+	}
+	return err
+}
+
+type versionResponse struct {
+	Version  string `json:"version"`
+	Latest   string `json:"latest"`
+	Machines []struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Version string `json:"version"`
+		OS      string `json:"os"`
+		Local   bool   `json:"local"`
+		Online  bool   `json:"online"`
+	} `json:"machines"`
+	Outdated []struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"outdated"`
+	Update *struct {
+		Busy     bool   `json:"busy"`
+		Target   string `json:"target"`
+		Status   string `json:"status"`
+		Summary  string `json:"summary"`
+		Machines []struct {
+			Name    string `json:"name"`
+			Status  string `json:"status"`
+			Version string `json:"version"`
+			Error   string `json:"error"`
+		} `json:"machines"`
+	} `json:"update"`
+}
+
+func cmdUpdate(dir string, args []string) error {
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	checkOnly := fs.Bool("check", false, "only check current vs latest versions without upgrading")
+	all := fs.Bool("all", false, "rolling-update Hub and all online remote nodes")
+	machine := fs.String("machine", "", "upgrade only one remote machine ID")
+	if err := parseInterspersed(fs, args); err != nil {
+		return err
+	}
+
+	verBytes, err := apiCallWithTimeout(dir, http.MethodGet, "/api/version?soon=1", nil, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	var v versionResponse
+	if err := json.Unmarshal(verBytes, &v); err != nil {
+		return fmt.Errorf("解析版本信息失败: %w", err)
+	}
+
+	printVersionTable := func(info versionResponse) {
+		latest := info.Latest
+		if latest == "" {
+			latest = "(未知)"
+		}
+		fmt.Printf("Hub 当前版本: %s | 最新版本: %s\n", info.Version, latest)
+		for _, m := range info.Machines {
+			role := "node"
+			if m.Local {
+				role = "hub "
+			}
+			state := "offline"
+			if m.Online || m.Local {
+				state = "online "
+			}
+			ver := m.Version
+			if ver == "" {
+				ver = "-"
+			}
+			fmt.Printf("  %-4s %-22s %-7s %-12s %s\n", role, m.Name, state, ver, m.OS)
+		}
+	}
+
+	if *checkOnly {
+		printVersionTable(v)
+		if len(v.Outdated) > 0 {
+			fmt.Printf("\n有 %d 台可升级，执行 `corgi update --all` 开始全端滚动升级。\n", len(v.Outdated))
+		} else if v.Latest != "" {
+			fmt.Println("\n所有在线节点均已是最新版本。")
+		}
+		return nil
+	}
+
+	if mID := strings.TrimSpace(*machine); mID != "" {
+		out, err := apiCallWithTimeout(dir, http.MethodPost, "/api/update?machine="+mID, nil, 3*time.Minute)
+		if err != nil {
+			return err
+		}
+		fmt.Println(strings.TrimSpace(string(out)))
+		return nil
+	}
+
+	// Default (and --all): trigger Hub-owned sequential fleet rolling update.
+	_ = *all
+	if v.Latest != "" && len(v.Outdated) == 0 {
+		printVersionTable(v)
+		fmt.Println("\n所有在线节点均已是最新版本，无需升级。")
+		return nil
+	}
+
+	if _, err := apiCallWithTimeout(dir, http.MethodPost, "/api/update/fleet", nil, 30*time.Second); err != nil {
+		return err
+	}
+	fmt.Println("已触发全端滚动升级（远程节点优先，Hub 最后），正在等待完成…")
+
+	deadline := time.Now().Add(4 * time.Minute)
+	sawRestart := false
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		b, err := apiCallWithTimeout(dir, http.MethodGet, "/api/version", nil, 10*time.Second)
+		if err != nil {
+			sawRestart = true
+			continue
+		}
+		var cur versionResponse
+		if json.Unmarshal(b, &cur) != nil {
+			continue
+		}
+		if cur.Update != nil && cur.Update.Busy {
+			continue
+		}
+		if sawRestart || cur.Update == nil || !cur.Update.Busy {
+			printVersionTable(cur)
+			if cur.Update != nil && cur.Update.Summary != "" {
+				fmt.Println("\n" + cur.Update.Summary)
+			}
+			if cur.Update != nil && cur.Update.Status == "error" {
+				return fmt.Errorf("部分机器升级失败")
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("等待升级超时，请运行 `corgi update --check` 查看当前版本")
 }

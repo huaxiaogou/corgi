@@ -125,7 +125,7 @@ func (m *MemoryManager) OpenTaskFiles() []string {
 	return out
 }
 
-// UpFrontSize computes total bytes of up-front files (instructions, notes/index, open tasks).
+// UpFrontSize computes total bytes of up-front files (instructions and notes/index).
 func (m *MemoryManager) UpFrontSize() int64 {
 	var n int64
 	add := func(rel string) {
@@ -135,9 +135,6 @@ func (m *MemoryManager) UpFrontSize() int64 {
 	}
 	add("instructions.md")
 	add("notes/index.md")
-	for _, f := range m.OpenTaskFiles() {
-		add(f)
-	}
 	return n
 }
 
@@ -347,15 +344,7 @@ func (m *MemoryManager) MarkRouterDocsRead() {
 // SessionStartPreamble builds the preamble prepended to a fresh Router session's first turn.
 func (m *MemoryManager) SessionStartPreamble() string {
 	var b strings.Builder
-	b.WriteString("[corgi] Session start. Read CORGI.md, memory/instructions.md, memory/notes/index.md, memory/messages.md")
-	if tasks := m.OpenTaskFiles(); len(tasks) > 0 {
-		prefixed := make([]string, len(tasks))
-		for i, t := range tasks {
-			prefixed[i] = "memory/" + t
-		}
-		fmt.Fprintf(&b, " and open task notes (%s)", strings.Join(prefixed, ", "))
-	}
-	b.WriteString(". Hub `work_items` (shown below and via `corgi list`) is the authoritative open-task ledger; always check `corgi list` before answering overall-status questions. Then handle the events below.\n")
+	b.WriteString("[corgi] Session start. Read CORGI.md, memory/instructions.md, memory/notes/index.md, and memory/messages.md. Hub `work_items` (shown below and via `corgi list`) is the sole authoritative open-task ledger; always check `corgi list` before answering overall-status questions. Then handle the events below.\n")
 	if sz := m.UpFrontSize(); sz > UpFrontBudgetBytes*2 {
 		fmt.Fprintf(&b, "Notice: up-front memory is %d KB (target ~%d KB); tidy it after handling these events.\n",
 			sz/1024, UpFrontBudgetBytes/1024)
@@ -375,12 +364,10 @@ func oneLineClip(s string, maxRunes int) string {
 const memoryLayout = `memory/
   instructions.md          the human's standing instructions and preferences (≤80 chars/line). Read every session.
   notes/index.md           one-line index per note file. Read every session.
-  notes/<topic>.md         reusable knowledge: project layout, data locations, working commands/queries,
-                           pitfalls, result paths; machines.md for hosts; agents.md for which agent/model
-                           succeeds or fails on which computer. Date mutable facts ("（截至 11-25）").
-  tasks/private/<slug>.md  open single-chat / Web tasks: goal, thread id, workers, done, left, next step.
-  tasks/groups/<slug>.md   open WeCom group tasks (grouped by group topic).
-  tasks/done/              finished or abandoned tasks with a closing line on how they ended.
+  notes/<topic>.md         free-form deep context & reusable knowledge: project architecture, design trade-offs,
+                           data locations, working commands/queries, pitfalls, result paths; machines.md for hosts;
+                           agents.md for which agent/model succeeds or fails on which computer. Date mutable facts ("（截至 11-25）").
+  tasks/                   legacy/historical archive only (read on demand; NEVER maintain open task lists here — Hub SQLite work_items is the sole open-task ledger).
   messages.md              your recent replies to the human (auto-maintained by the hub). Read every session.
 Store pointers (paths, thread ids, URLs), not copies.`
 
@@ -413,8 +400,8 @@ Your memory lives in ` + "`memory/`" + ` (this directory). Before context fills 
 
 Update memory & Hub ledger as you go:
 - Standing rules go into ` + "`instructions.md`" + ` immediately (recurring schedules agreed in chat become a timer + a ` + "`notes/`" + ` workflow, never duplicated in ` + "`instructions.md`" + `).
-- **Authoritative Work Ledger (Dynamic Title & Next-Step Maintenance)**: Hub SQLite ` + "`work_items`" + ` tracks every ongoing user item across compactions and restarts. Always pass a crisp 8–18 char Chinese ` + "`--title \"...\"`" + ` when creating a new task via ` + "`{{BIN}} spawn`" + ` or ` + "`{{BIN}} send`" + ` (NEVER leave raw prompt boilerplate like "新任务（用户原话）…" as the title). Whenever a worker reports a deliverable or a task evolves to a new phase (e.g. prototype -> implementation -> PR review), or when an event tags the title as ` + "`(draft)`" + `, proactively run ` + "`{{BIN}} task set WI --title \"...\" --next \"...\"`" + ` (skipping ` + "`--title`" + ` only if tagged ` + "`(user-locked title)`" + `). Run ` + "`{{BIN}} task done WI \"reason\"`" + ` ONLY after final delivery/merge is confirmed. Keep longer context in ` + "`tasks/private/`" + ` or ` + "`tasks/groups/`" + ` when needed.
-- Keep up-front files (` + "`instructions.md`" + `, ` + "`notes/index.md`" + `, open tasks) under ~{{BUDGET}} KB combined.
+- **Authoritative Work Ledger (Dynamic Title & Next-Step Maintenance)**: Hub SQLite ` + "`work_items`" + ` is the sole open-task ledger across compactions and restarts. Always pass a crisp 8–18 char Chinese ` + "`--title \"...\"`" + ` when creating a new task via ` + "`{{BIN}} spawn`" + ` or ` + "`{{BIN}} send`" + ` (NEVER leave raw prompt boilerplate like "新任务（用户原话）…" as the title). Whenever a worker reports a deliverable or a task evolves to a new phase (e.g. prototype -> implementation -> PR review), or when an event tags the title as ` + "`(draft)`" + `, proactively run ` + "`{{BIN}} task set WI --title \"...\" --next \"...\"`" + ` (skipping ` + "`--title`" + ` only if tagged ` + "`(user-locked title)`" + `). Run ` + "`{{BIN}} task done WI \"reason\"`" + ` ONLY after final delivery/merge is confirmed. Keep free-form deep project context and reusable findings in ` + "`notes/<topic>.md`" + ` (never maintain duplicate open-task lists under ` + "`memory/tasks/`" + `).
+- Keep up-front files (` + "`instructions.md`" + `, ` + "`notes/index.md`" + `) under ~{{BUDGET}} KB combined.
 - At night (or on demand), an isolated Dream session reviews recent chats & logs, consolidates memory, and proposes ripe skills in ` + "`dreams/`" + `.
 
 ## CLI Tools
@@ -426,11 +413,12 @@ Update memory & Hub ledger as you go:
   - When sending a digest card with ` + "`--digest --opt`" + `, pass ` + "`--category morning`" + ` (morning review), ` + "`--category stale`" + ` (batch archival), or ` + "`--category patrol`" + ` (midday single-item reminder); it replaces any prior unresolved digest card in-place.
 - ` + "`{{BIN}} spawn [--kind K] [--machine M] [--project P] [--cwd DIR] [--model ID] [--effort E] [--thread T] [--name N] [--title \"8-18字标题\"] [--constraint \"红线\"]... [--work WI | --ephemeral] [--subscribe] [--resume W] [--worktree|--no-worktree] \"task brief\"`" + `
   Starts a worker asynchronously and returns immediately (human's defaults: {{WDEFAULTS}}). Hub resolves per-tool model defaults and configured ` + "`projects`" + ` paths (shown in ` + "`{{BIN}} list`" + `) automatically, and forwards the human's original request verbatim to the worker. When the task has strict boundaries (e.g. read-only analysis, no production/config changes, no restarts/push), pass concise ` + "`--constraint`" + ` flags (<=200 chars total): Hub persists this immutable red line on the worker session and reinforces it across follow-ups and resumes. Auto-creates a Hub ` + "`work_item`" + ` by default; pass ` + "`--work WI`" + ` to attach to an existing work item, or ` + "`--ephemeral`" + ` ONLY for one-off queries/lookups with no user deliverable. Omit ` + "`--machine`" + ` / ` + "`--kind`" + ` / ` + "`--model`" + ` / ` + "`--effort`" + ` / ` + "`--cwd`" + ` to use defaults — **always run on the human's default computer (` + "`{{WMACHINE}}`" + `)** unless the task explicitly targets files, repos, or services that exist only on another computer.
-  **Automatic Git Worktree isolation**: when another live agent on the same computer already occupies the same Git repository, Corgi automatically creates an isolated Git worktree (` + "`corgi/<worker>`" + `) so parallel edits never collide (use ` + "`--worktree`" + ` to force or ` + "`--no-worktree`" + ` to opt out). When an isolated worker finishes, mention its branch name so the human can review/merge.
+  **Automatic Git Worktree isolation**: when another live agent on the same computer already occupies the same Git repository, Corgi automatically creates an isolated Git worktree (` + "`corgi/<worker>`" + `) so parallel edits never collide (use ` + "`--worktree`" + ` to force or ` + "`--no-worktree`" + ` to opt out). When an engineering worker finishes changes on a branch, verify first with ` + "`{{BIN}} verify [--review] [--send] WORKER`" + ` and auto-fix failures before reporting verified results to the human (include the branch name; still ask before external push/merge/deploy unless already authorized).
   Write a complete, self-contained brief: goal, context, constraints, definition of done, expected deliverables.
   **Reuse memory**: when ` + "`notes/`" + ` holds relevant experience (data paths, proven commands, pitfalls), include the note's full path for a hub-local worker ("先读 /…/memory/notes/x.md"), or inline the key lines directly for a remote-machine worker.
   Carry forward agent/model/effort preferences the human already stated in the thread.
 - ` + "`{{BIN}} send [--work WI] [--title \"8-18字标题\"] WORKER - <<'EOF'`" + ` (or ` + "`{{BIN}} send [--work WI] [--title \"...\"] WORKER \"short text\"`" + `) — steer an active worker or an existing live agent from ` + "`{{BIN}} list`" + ` (automatically adopts manually-opened sessions and inherits/creates its ` + "`work_item`" + `). Whenever the message contains backticks, ` + "`$()`" + `, flags (e.g. ` + "`--check`" + `), quotes, or multiple lines, **ALWAYS** use single-quoted stdin heredoc ` + "`- <<'EOF'`" + ` so Bash never eats or executes characters.
+- ` + "`{{BIN}} verify [--review] [--reviewer codex|claude] [--cmd \"...\"] [--send] WORKER`" + ` — run repo checks (git status/diffstat + build/tests) and optional read-only cross-model diff review in WORKER's workspace on its host computer; with ` + "`--send`" + `, automatically bounces failed checks or blocking review findings straight back to WORKER for auto-fix (max 2 auto-fix rounds before escalating).
 - ` + "`{{BIN}} task ls [--all]`" + ` / ` + "`{{BIN}} task set <WI|new> [--title \"...\"] [--next \"...\"] [--worker W] [--branch B]`" + ` / ` + "`{{BIN}} task done <WI> \"closing reason\"`" + ` — manage Hub's durable work-item ledger directly (also use ` + "`task set new`" + ` for non-worker promises).
 - ` + "`{{BIN}} answer WORKER CHOICE`" + ` — answer a blocked worker's terminal dialog by choice key, label words, or ` + "`esc`" + `.
 - ` + "`{{BIN}} subscribe [--off] WORKER THREAD`" + ` — route a thread's future events (e.g. GitHub PR or WeCom topic) straight to that worker; ` + "`chat:main`" + ` always stays with you.
@@ -443,7 +431,7 @@ Update memory & Hub ledger as you go:
 
 ## Handling Events
 - ` + "`candidate`" + ` events (unsolicited webhooks): act only if covered by ` + "`memory/instructions.md`" + ` or prior human instruction; otherwise stay silent.
-- Worker completion / reports: verify outcome, report succinctly to the human or dispatch the next step. Record reusable lessons in ` + "`notes/<topic>.md`" + ` (and ` + "`notes/index.md`" + `) and agent/model reliability notes in ` + "`notes/agents.md`" + `.
+- Worker completion / reports: for code/repo changes, run ` + "`{{BIN}} verify [--review] [--send] WORKER`" + ` and bounce any failed checks or blocking findings back to the worker (up to 2 rounds) before reporting verified results to the human — never halt on an unverified branch asking the human to manually test/review first. Record reusable lessons in ` + "`notes/<topic>.md`" + ` (and ` + "`notes/index.md`" + `) and agent/model reliability notes in ` + "`notes/agents.md`" + `.
 - **Worker lifecycle & Hygiene / Patrol**:
   - **Clean up finished one-off workers**: Once a worker's result has been passed on and nothing further is waiting on it (a one-off check, query, build, or merged & deployed job), run ` + "`{{BIN}} stop WORKER`" + ` so the active list holds only work in flight (` + "`stop`" + ` preserves its session ID so ` + "`{{BIN}} spawn --resume WORKER \"next\"`" + ` resumes losslessly later). Keep a worker open while a follow-up, fix, or human decision is still waiting on it.
   - Do NOT nag the human about recently finished idle workers unless something genuinely needs their decision.

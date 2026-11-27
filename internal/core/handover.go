@@ -139,11 +139,10 @@ func (e *Engine) checkHandover(ctx context.Context, live map[string]liveInfo, ha
 	e.routerDispatching = true
 	e.mu.Unlock()
 
-	prompt := fmt.Sprintf(`[corgi] Handover. Your context window is %d%% full, so Corgi will restart you in a fresh session right after this turn. Nothing carries over except memory/ (layout in CORGI.md), so bring it up to date now:
+	prompt := fmt.Sprintf(`[corgi] Handover. Your context window is %d%% full, so Corgi will restart you in a fresh session right after this turn. Nothing carries over except memory/ (layout in CORGI.md) and Hub SQLite work_items, so bring memory/ up to date now:
 - instructions.md: standing instructions and preferences (merge duplicates, ≤80 chars/line).
-- tasks/private/ & tasks/groups/: one file per open task with current state and next step; move finished ones to tasks/done/.
-- notes/: reusable lessons learned; keep notes/index.md and notes/agents.md in sync.
-Keep up-front files (instructions.md, notes/index.md, open tasks) under ~%d KB combined.
+- notes/: free-form deep project context and reusable lessons learned; keep notes/index.md and notes/agents.md in sync (do NOT create or maintain open-task checklists under memory/tasks/ — Hub SQLite work_items is the sole open-task ledger).
+Keep up-front files (instructions.md, notes/index.md) under ~%d KB combined.
 This turn is for memory files alone: edit them, then stop.`, usage.Pct(), UpFrontBudgetBytes>>10)
 
 	if err := e.memory.WriteRouterDocs(e.binPath, e.Settings()); err != nil {

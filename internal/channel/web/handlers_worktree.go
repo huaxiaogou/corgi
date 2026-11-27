@@ -56,3 +56,18 @@ func (s *Server) handleGitWorktreeCleanup(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, http.StatusOK, res)
 }
+
+func (s *Server) handleGitVerify(w http.ResponseWriter, r *http.Request) {
+	var body gitwt.VerifyRequest
+	if !decodeJSON(w, r, &body) || strings.TrimSpace(body.Dir) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "dir is required"})
+		return
+	}
+	body.Dir = s.expand(body.Dir)
+	res, err := gitwt.Verify(r.Context(), s.Home, body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
