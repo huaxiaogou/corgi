@@ -236,7 +236,7 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	if !req.Ephemeral && resumeBranch != "" && wk.WorkItemID != "" {
 		_ = e.store.RecordWorkItemBranch(ctx, wk.WorkItemID, resumeBranch)
 	}
-	sub := thread != model.MainThread
+	sub := false
 	if req.Subscribe != nil {
 		sub = *req.Subscribe
 	}
@@ -1015,6 +1015,7 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 		}
 	}
 	_ = e.store.ExpireWorkerActions(ctx, wk.Name)
+	e.ClearWeComFocusForWorker(ctx, wk.Name)
 	if wk.PaneID != "" {
 		_ = e.store.DeleteQueuedPromptsByScope(ctx, wk.PaneID)
 		e.setQueuePaused(wk.PaneID, false)

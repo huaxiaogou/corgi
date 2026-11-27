@@ -20,17 +20,28 @@ import (
 )
 
 var (
-	workerNameRe  = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
-	quoteWorkerRe = regexp.MustCompile(`\[#([a-z][a-z0-9_-]{0,31})(?:\s|\]|·)`)
+	workerNameRe              = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+	quoteDirectMarkerRe       = regexp.MustCompile(`↳\s*(?:直聊中|直聊|单次直问)`)
+	quoteDirectParenWorkerRe  = regexp.MustCompile(`[（(]#([a-z][a-z0-9_-]{0,31})(?:\s|·|[）)]|\.|…|$)`)
+	quoteDirectInlineWorkerRe = regexp.MustCompile(`↳\s*(?:直聊中|直聊|单次直问)\s*·\s*#([a-z][a-z0-9_-]{0,31})(?:[^a-z0-9_-]|$)`)
 )
 
-// ExtractQuoteWorkerTag parses "[#unit-tests · devbox]" from a WeCom quoted message.
+// ExtractQuoteWorkerTag parses the target worker handle strictly from dedicated WeCom
+// direct-chat markers ("↳ 直聊", "↳ 直聊中", "↳ 单次直问"). Legacy "[#worker]" tags on
+// Corgi reports are intentionally ignored so quoting Corgi never leaks straight to a worker.
 func ExtractQuoteWorkerTag(quotedText string) string {
-	m := quoteWorkerRe.FindStringSubmatch(quotedText)
-	if len(m) < 2 {
-		return ""
+	for _, line := range strings.Split(quotedText, "\n") {
+		if !quoteDirectMarkerRe.MatchString(line) {
+			continue
+		}
+		if m := quoteDirectParenWorkerRe.FindStringSubmatch(line); len(m) >= 2 {
+			return m[1]
+		}
+		if m := quoteDirectInlineWorkerRe.FindStringSubmatch(line); len(m) >= 2 {
+			return m[1]
+		}
 	}
-	return m[1]
+	return ""
 }
 
 // SpawnRequest defines parameters for launching or resuming a worker.
@@ -553,7 +564,8 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 		promptText += "\n\n" + hint
 	}
 
-	// Fast-path quote routing: "[#worker]" directs follow-up straight to an active worker.
+	// Fast-path quote routing: dedicated direct-chat markers ("↳ 直聊" / "↳ 直聊中" / "↳ 单次直问")
+	// direct follow-up straight to an active worker.
 	directTarget := ""
 	if tag := ExtractQuoteWorkerTag(req.QuoteText); tag != "" {
 		if w, err := e.store.GetWorker(ctx, tag); err == nil && !w.Ended {

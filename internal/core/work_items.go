@@ -284,6 +284,9 @@ func (e *Engine) CloseWorkItem(ctx context.Context, id, note string) (*model.Wor
 	if err != nil {
 		return nil, err
 	}
+	if wi != nil {
+		e.ClearWeComFocusForWorkItem(ctx, wi.ID, wi.Workers)
+	}
 	if len(expired) > 0 {
 		e.mu.Lock()
 		sink := e.sink

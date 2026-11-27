@@ -105,9 +105,9 @@ func (e *Engine) BuildArtifactShareURL(ctx context.Context, artID string) string
 	return e.BuildPreviewURL(ctx, artID)
 }
 
-// MatchesMainChatCorgiReply checks whether quoteText corresponds to a recent Corgi main-chat
-// reply without a [#worker] tag so quoting a main-chat message while in Worker focus routes
-// that single turn cleanly back to Corgi Router.
+// MatchesMainChatCorgiReply checks whether quoteText corresponds to a recent Corgi reply
+// (including worker-referenced reports) so quoting any Corgi message while in Worker focus
+// routes that single turn cleanly back to Corgi Router without losing focus.
 func (e *Engine) MatchesMainChatCorgiReply(ctx context.Context, thread, quoteText string) bool {
 	if e.store == nil {
 		return false
@@ -127,9 +127,6 @@ func (e *Engine) MatchesMainChatCorgiReply(ctx context.Context, thread, quoteTex
 	for i := len(entries) - 1; i >= 0; i-- {
 		en := entries[i]
 		if en == nil || en.Role != "corgi" {
-			continue
-		}
-		if en.WorkerRef != nil && strings.TrimSpace(en.WorkerRef.Name) != "" {
 			continue
 		}
 		txt := normalizeQuoteCompare(en.Text)

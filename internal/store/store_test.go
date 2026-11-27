@@ -194,3 +194,61 @@ func TestDeviceLifecycle(t *testing.T) {
 		t.Fatalf("expected ErrNotFound after delete, got %v", err)
 	}
 }
+
+func TestListKVByPrefixEscapesWildcards(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	seed := map[string]string{
+		"wecom_focus:u1":      `{"worker":"alpha"}`,
+		"wecom_focus:grp1:u2": `{"worker":"beta"}`,
+		"wecomXfocus:u3":      `{"worker":"wrong-underscore"}`,
+		"wecom%focus:u4":      `{"worker":"percent-key"}`,
+		"wecom123focus:u5":    `{"worker":"wrong-percent"}`,
+		"other:key":           `val`,
+	}
+	for k, v := range seed {
+		if err := st.SetKV(ctx, k, v); err != nil {
+			t.Fatalf("SetKV(%q): %v", k, err)
+		}
+	}
+
+	cases := []struct {
+		name     string
+		prefix   string
+		wantKeys []string
+	}{
+		{
+			name:     "exact underscore prefix excludes wildcard matches",
+			prefix:   "wecom_focus:",
+			wantKeys: []string{"wecom_focus:grp1:u2", "wecom_focus:u1"},
+		},
+		{
+			name:     "percent character in prefix is escaped literally",
+			prefix:   "wecom%focus:",
+			wantKeys: []string{"wecom%focus:u4"},
+		},
+		{
+			name:     "unmatched prefix returns empty map",
+			prefix:   "missing_prefix:",
+			wantKeys: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := st.ListKVByPrefix(ctx, tc.prefix)
+			if err != nil {
+				t.Fatalf("ListKVByPrefix(%q) err: %v", tc.prefix, err)
+			}
+			if len(got) != len(tc.wantKeys) {
+				t.Fatalf("ListKVByPrefix(%q) = %+v, want keys %v", tc.prefix, got, tc.wantKeys)
+			}
+			for _, k := range tc.wantKeys {
+				if got[k] != seed[k] {
+					t.Fatalf("ListKVByPrefix(%q)[%q] = %q, want %q", tc.prefix, k, got[k], seed[k])
+				}
+			}
+		})
+	}
+}

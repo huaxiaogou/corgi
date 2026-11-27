@@ -359,6 +359,7 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, scan
 				w.FaultPaneID = ""
 				_ = e.store.UpsertWorker(ctx, w)
 				_ = e.store.ExpireWorkerActions(ctx, w.Name)
+				e.ClearWeComFocusForWorker(ctx, w.Name)
 				_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name,
 					fmt.Sprintf("worker %s exited (pane gone).", w.Name), "", model.RouterName, w.Name)
 				e.addEvent(ctx, w.Thread, w.Name+" 已退出", w.Name, "info")

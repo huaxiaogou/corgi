@@ -254,6 +254,21 @@ type FollowView struct {
 	NextText string    `json:"next_text"`
 }
 
+// WeComFocusView exposes an active (non-expired) WeCom direct-chat focus state to Web clients.
+type WeComFocusView struct {
+	Key        string    `json:"key"`
+	Scope      string    `json:"scope"` // single | group
+	Worker     string    `json:"worker"`
+	Title      string    `json:"title,omitempty"`
+	Machine    string    `json:"machine,omitempty"`
+	Kind       string    `json:"kind,omitempty"`
+	Session    string    `json:"session,omitempty"`
+	WorkItemID string    `json:"work_item_id,omitempty"`
+	EnteredAt  time.Time `json:"entered_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
+
 // WorkerDispatchDefaults exposes non-secret worker dispatch settings and projects directly in SuperView
 // so the chat composer always displays the exact active global default in real time.
 type WorkerDispatchDefaults struct {
@@ -272,20 +287,21 @@ type SuperView struct {
 	Router           RouterView              `json:"router"`
 	DispatchDefaults *WorkerDispatchDefaults `json:"dispatch_defaults,omitempty"`
 	Entries          []*Entry                `json:"entries"`
-	Earlier         bool               `json:"earlier,omitempty"`
-	Actions         []*Action          `json:"actions"`
-	ResolvedActions map[string]*Action `json:"resolved_actions,omitempty"`
-	SnoozedActions  int                `json:"snoozed_actions,omitempty"`
-	Pinned          []*Entry           `json:"pinned"`
-	Workers         []*Worker          `json:"workers"`
-	WorkItems       []*WorkItem        `json:"work_items"`
-	ClosedWorkCount int                `json:"closed_work_count,omitempty"`
-	Threads         []*Thread          `json:"threads"`
-	Queued          int                `json:"queued"`
-	QueuedRouter    int                `json:"queued_router"`
-	QueuedChat      []*QueuedPrompt    `json:"queued_chat,omitempty"`
-	ChatQueuePaused bool               `json:"chat_queue_paused,omitempty"`
-	Paused          bool               `json:"paused"`
-	WeComOnline     bool               `json:"wecom_online"`
-	Follow          *FollowView        `json:"follow,omitempty"`
+	Earlier          bool                    `json:"earlier,omitempty"`
+	Actions          []*Action               `json:"actions"`
+	ResolvedActions  map[string]*Action      `json:"resolved_actions,omitempty"`
+	SnoozedActions   int                     `json:"snoozed_actions,omitempty"`
+	Pinned           []*Entry                `json:"pinned"`
+	Workers          []*Worker               `json:"workers"`
+	WorkItems        []*WorkItem             `json:"work_items"`
+	ClosedWorkCount  int                     `json:"closed_work_count,omitempty"`
+	Threads          []*Thread               `json:"threads"`
+	Queued           int                     `json:"queued"`
+	QueuedRouter     int                     `json:"queued_router"`
+	QueuedChat       []*QueuedPrompt         `json:"queued_chat,omitempty"`
+	ChatQueuePaused  bool                    `json:"chat_queue_paused,omitempty"`
+	Paused           bool                    `json:"paused"`
+	WeComOnline      bool                    `json:"wecom_online"`
+	WeComFocus       *WeComFocusView         `json:"wecom_focus,omitempty"`
+	Follow           *FollowView             `json:"follow,omitempty"`
 }

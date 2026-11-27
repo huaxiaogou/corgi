@@ -49,17 +49,72 @@ func TestParseAndAdvanceTimer(t *testing.T) {
 
 func TestExtractQuoteWorkerTag(t *testing.T) {
 	cases := []struct {
+		name  string
 		quote string
 		want  string
 	}{
-		{"[#unit-tests · claude · devbox] 单测已补完 6 个用例", "unit-tests"},
-		{"[#api_profiler] 发现缺索引", "api_profiler"},
-		{"普通群聊引用没有标签", ""},
+		{
+			name:  "direct header with title and machine",
+			quote: "↳ 直聊 · 太湖方案（#taihu-plan · MacBook）\n\n已排查完成",
+			want:  "taihu-plan",
+		},
+		{
+			name:  "direct header when title equals worker handle",
+			quote: "↳ 直聊 · #unit-tests（Hub）\n\n单测已补完 6 个用例",
+			want:  "unit-tests",
+		},
+		{
+			name:  "direct header with hash inside title still picks handle in parens",
+			quote: "↳ 直聊 · 修复 #abc 按钮（#ui-fix · Hub）",
+			want:  "ui-fix",
+		},
+		{
+			name:  "direct header truncated by wecom quote",
+			quote: "↳ 直聊 · 太湖方案（#taihu-plan...",
+			want:  "taihu-plan",
+		},
+		{
+			name:  "direct focus footer",
+			quote: "> **↳ 直聊中 · 太湖方案（#taihu-plan）** · 发 /back 回 Corgi · /w 切换",
+			want:  "taihu-plan",
+		},
+		{
+			name:  "one-shot quote footer",
+			quote: "> ↳ 单次直问 · #api_profiler · 当前仍在 Corgi 主对话",
+			want:  "api_profiler",
+		},
+		{
+			name:  "direct timeout seal line",
+			quote: "↳ 直聊 · #remote-w1 仍在后台处理中，完成后会自动发给你。",
+			want:  "remote-w1",
+		},
+		{
+			name:  "legacy bracket tag on corgi report must not leak to worker",
+			quote: "[#unit-tests · claude · devbox] 单测已补完 6 个用例",
+			want:  "",
+		},
+		{
+			name:  "legacy short bracket tag ignored",
+			quote: "[#api_profiler] 发现缺索引",
+			want:  "",
+		},
+		{
+			name:  "corgi report mentioning hash handle in prose ignored",
+			quote: "已派 #api-profiler 去查慢查询，稍后同步结果。",
+			want:  "",
+		},
+		{
+			name:  "plain quote without marker",
+			quote: "普通群聊引用没有标签",
+			want:  "",
+		},
 	}
 	for _, tc := range cases {
-		if got := ExtractQuoteWorkerTag(tc.quote); got != tc.want {
-			t.Fatalf("ExtractQuoteWorkerTag(%q) = %q, want %q", tc.quote, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ExtractQuoteWorkerTag(tc.quote); got != tc.want {
+				t.Fatalf("ExtractQuoteWorkerTag(%q) = %q, want %q", tc.quote, got, tc.want)
+			}
+		})
 	}
 }
 

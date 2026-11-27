@@ -88,7 +88,7 @@ func TestNormalizeConstraintAndDirectPromptRemindInterval(t *testing.T) {
 	}
 }
 
-func TestMatchesMainChatCorgiReplyDistinguishesPlainVsWorkerEntry(t *testing.T) {
+func TestMatchesMainChatCorgiReplyMatchesPlainAndWorkerRefEntries(t *testing.T) {
 	eng := openTestCoreEngine(t)
 	ctx := context.Background()
 	now := time.Now()
@@ -106,8 +106,8 @@ func TestMatchesMainChatCorgiReplyDistinguishesPlainVsWorkerEntry(t *testing.T) 
 	if !eng.MatchesMainChatCorgiReply(ctx, model.MainThread, "当前有 4 项待处理事项") {
 		t.Fatal("expected plain main-chat Corgi reply to match")
 	}
-	if eng.MatchesMainChatCorgiReply(ctx, model.MainThread, "已把规则写入长期记忆") {
-		t.Fatal("worker-bound Corgi reply must not match plain main-chat matcher")
+	if !eng.MatchesMainChatCorgiReply(ctx, model.MainThread, "已把规则写入长期记忆") {
+		t.Fatal("expected worker-referenced Corgi report to also match main-chat Corgi replies")
 	}
 	if eng.MatchesMainChatCorgiReply(ctx, model.MainThread, "完全无关的一句话") {
 		t.Fatal("unrelated quote must not match")

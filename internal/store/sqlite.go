@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/kiperjing/corgi/internal/model"
@@ -325,6 +326,29 @@ func (s *Store) DeleteKV(ctx context.Context, key string) error {
 		return fmt.Errorf("delete kv %q: %w", key, err)
 	}
 	return nil
+}
+
+// ListKVByPrefix returns all key-value pairs whose key starts with prefix.
+// SQLite LIKE wildcards in prefix are escaped so matching is strictly exact.
+func (s *Store) ListKVByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
+	rows, err := s.db.QueryContext(ctx, `SELECT k, v FROM kv WHERE k LIKE ? ESCAPE '\' ORDER BY k ASC`, escaped+"%")
+	if err != nil {
+		return nil, fmt.Errorf("list kv by prefix %q: %w", prefix, err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("scan kv by prefix %q: %w", prefix, err)
+		}
+		out[k] = v
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate kv by prefix %q: %w", prefix, err)
+	}
+	return out, nil
 }
 
 // CommitActiveDreamFinish atomically verifies that kv['active_dream'] still belongs to runID,
