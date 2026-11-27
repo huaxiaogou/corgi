@@ -467,8 +467,10 @@ func summarizeWorkerTaskTitle(task string) string {
 }
 
 // RouterTranscriptInfo locates the Hub Router's live JSONL transcript path and adapter.
+// In native API Router mode there is no local PTY CLI transcript, so it returns ("", nil)
+// to prevent WeCom streams from leaking stale historical PTY transcripts.
 func (e *Engine) RouterTranscriptInfo(ctx context.Context) (string, agent.Adapter) {
-	if e.agents == nil || e.memory == nil {
+	if e.isAPIRouterMode() || e.agents == nil || e.memory == nil {
 		return "", nil
 	}
 	kind := agent.NormalizeKind(e.Settings().RouterKind)

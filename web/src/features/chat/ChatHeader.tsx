@@ -44,7 +44,7 @@ export function ChatHeader({
       : router?.handover
         ? "正在交接记忆并切换会话…"
         : router?.status === "working"
-          ? router.replied
+          ? router.replied && router.mode !== "api"
             ? "已回复，在整理记忆…"
             : "在想…"
           : router?.alive

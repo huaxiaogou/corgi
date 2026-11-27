@@ -669,6 +669,23 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 	messages := e.buildAPIRouterMessages(ctx, trig, turnMeta)
 	tools := apiRouterToolDefs()
 	totalCalls := 0
+	var progressLines []string
+	pushProgress := func(line string) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return
+		}
+		if len(progressLines) == 0 || progressLines[len(progressLines)-1] != "• "+line {
+			progressLines = append(progressLines, "• "+line)
+			if len(progressLines) > 6 {
+				progressLines = progressLines[len(progressLines)-6:]
+			}
+		}
+		e.mu.Lock()
+		sink := e.sink
+		e.mu.Unlock()
+		sink.OnAPIRouterProgress(bg, turn.thread, trig.ID, strings.Join(progressLines, "\n"))
+	}
 
 	for step := 0; step < maxAPIRouterSteps; step++ {
 		if ctx.Err() != nil {
@@ -787,6 +804,7 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 			} else if tc.Function.Name == "reply_user" && stepHadErr {
 				toolOut = toolErr("同一步前置工具执行失败，请先查看报错并处理后再调用 reply_user 回复用户。")
 			} else {
+				pushProgress(formatAPIToolProgress(tc))
 				var doneTurn bool
 				toolOut, doneTurn = e.execAPIRouterTool(ctx, turn, trig, turnMeta, tc)
 				if strings.Contains(toolOut, `"ok":false`) {
@@ -821,6 +839,68 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		sealReason = "dispatched"
 	} else if sealReason != "error" {
 		sealReason = "silent"
+	}
+}
+
+func formatAPIToolProgress(tc LLMToolCall) string {
+	var raw map[string]any
+	_ = json.Unmarshal([]byte(tc.Function.Arguments), &raw)
+	strArg := func(k string) string {
+		if v, ok := raw[k].(string); ok {
+			return strings.TrimSpace(v)
+		}
+		return ""
+	}
+	switch tc.Function.Name {
+	case "reply_user":
+		return "正在整理回复…"
+	case "read_detail":
+		kind := strArg("kind")
+		target := strArg("target")
+		switch kind {
+		case "worker":
+			if target != "" {
+				return "正在查看 #" + target + " 最新进展…"
+			}
+		case "project_file":
+			return "正在查阅项目文件…"
+		case "project_git":
+			return "正在查看项目 Git 状态…"
+		case "note":
+			return "正在查阅记忆笔记…"
+		}
+		return "正在查阅任务详情…"
+	case "dispatch_work":
+		if r := strArg("resume"); r != "" {
+			return "正在续接 #" + r + " 执行任务…"
+		}
+		return "正在派发任务给 Worker…"
+	case "steer_worker":
+		if w := strArg("worker"); w != "" {
+			return "正在向 #" + w + " 发送跟进指令…"
+		}
+		return "正在向 Worker 发送指令…"
+	case "verify_worker":
+		if w := strArg("worker"); w != "" {
+			return "正在验收 #" + w + " 的代码改动…"
+		}
+		return "正在执行代码验收…"
+	case "manage_work":
+		switch strArg("action") {
+		case "stop_worker":
+			if t := strArg("target"); t != "" {
+				return "正在停止 #" + t + "…"
+			}
+		case "close_work":
+			return "正在归档工作项…"
+		}
+		return "正在更新工作项状态…"
+	case "manage_timer":
+		return "正在更新定时提醒…"
+	case "save_memory":
+		return "正在更新记忆笔记…"
+	default:
+		return "正在处理中…"
 	}
 }
 

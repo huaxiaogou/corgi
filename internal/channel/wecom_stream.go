@@ -30,11 +30,31 @@ type activeWeComStream struct {
 	pollMu       sync.Mutex
 	triggerID    string
 	entryID      string
+	apiProgress  string
 	locateFn     func(context.Context) (string, agent.Adapter)
 	tr           *agent.TranscriptReader
 	lastPath     string
 	baselineAt   int64
 	lastChangeAt time.Time
+}
+
+func (st *activeWeComStream) setAPIProgress(think string) {
+	if st == nil {
+		return
+	}
+	st.pollMu.Lock()
+	st.apiProgress = strings.TrimSpace(think)
+	st.lastChangeAt = time.Now()
+	st.pollMu.Unlock()
+}
+
+func (st *activeWeComStream) getAPIProgress() string {
+	if st == nil {
+		return ""
+	}
+	st.pollMu.Lock()
+	defer st.pollMu.Unlock()
+	return st.apiProgress
 }
 
 func (st *activeWeComStream) setRefIDs(entryID, triggerID string) {
@@ -288,7 +308,9 @@ func (st *activeWeComStream) seal(ctx context.Context, think, body string) (bool
 	// Perform one final synchronous transcript poll before sealing so fast 2-5s turns
 	// never miss reasoning or tool steps written right before `corgi reply`.
 	if strings.TrimSpace(think) == "" {
-		if latest, _ := st.pollLocalThink(sctx, true); strings.TrimSpace(latest) != "" {
+		if apiProg := st.getAPIProgress(); apiProg != "" {
+			think = apiProg
+		} else if latest, _ := st.pollLocalThink(sctx, true); strings.TrimSpace(latest) != "" {
 			think = latest
 		}
 	}
@@ -333,6 +355,35 @@ func (b *Bus) takeRouterStream(thread string) *activeWeComStream {
 // or by watchRouterStream's continuous-idle safety guard so brief mid-turn tool flickers
 // never prematurely split a WeCom reply into two bubbles.
 func (b *Bus) OnRouterTurnEnd(context.Context) {}
+
+// OnAPIRouterProgress pushes clean, live step/tool progress from the in-process API Router
+// into the matching WeCom stream bubble (replacing any PTY transcript polling).
+func (b *Bus) OnAPIRouterProgress(ctx context.Context, thread, triggerID, think string) {
+	triggerID = strings.TrimSpace(triggerID)
+	think = strings.TrimSpace(think)
+	if thread == "" || triggerID == "" || think == "" {
+		return
+	}
+	st := b.findRouterStreamByTrigger(thread, triggerID)
+	if st == nil || st.session.Finished() {
+		return
+	}
+	st.setAPIProgress(think)
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	_ = st.session.SendProgress(pctx, think, "", false)
+}
+
+func (b *Bus) findRouterStreamByTrigger(thread, triggerID string) *activeWeComStream {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, st := range b.routerStreams[thread] {
+		if st.getTriggerID() == triggerID {
+			return st
+		}
+	}
+	return nil
+}
 
 // OnAPIRouterTurnEnd deterministically and idempotently seals ONLY the WeCom stream bound
 // to triggerID when an in-process API Router turn finishes without emitting an OnReply
@@ -439,9 +490,11 @@ func (b *Bus) watchRouterStream(ctx context.Context, st *activeWeComStream) {
 				return
 			}
 			ticks++
-			recheck := ticks%4 == 0 // recheck transcript path every ~2s for newly rotated sessions
-			if think, _ := st.pollLocalThink(ctx, recheck); think != "" {
-				_ = st.session.SendProgress(ctx, think, "", false)
+			if st.getAPIProgress() == "" {
+				recheck := ticks%4 == 0 // recheck transcript path every ~2s for newly rotated sessions
+				if think, _ := st.pollLocalThink(ctx, recheck); think != "" {
+					_ = st.session.SendProgress(ctx, think, "", false)
+				}
 			}
 			if b.engine == nil {
 				continue

@@ -1245,7 +1245,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                 }`}
               >
                 {routerWorking && <StatusDot status="working" />}
-                <span>{routerWorking ? (router?.replied ? "已回复，在整理记忆…" : "Corgi 在想…") : "\u00A0"}</span>
+                <span>{routerWorking ? (router?.replied && router?.mode !== "api" ? "已回复，在整理记忆…" : "Corgi 在想…") : "\u00A0"}</span>
               </div>
             )}
           </div>

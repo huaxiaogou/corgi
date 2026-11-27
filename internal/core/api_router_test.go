@@ -24,6 +24,7 @@ type recordingAPISink struct {
 	NopSink
 	mu         sync.Mutex
 	turnEnds   []struct{ thread, triggerID, reason string }
+	progress   []struct{ thread, triggerID, think string }
 	replies    []*model.Entry
 	stateCount int
 }
@@ -39,6 +40,12 @@ func (s *recordingAPISink) OnReply(_ context.Context, entry *model.Entry, _ *mod
 	s.replies = append(s.replies, entry)
 	s.mu.Unlock()
 	return ReplyDelivery{}
+}
+
+func (s *recordingAPISink) OnAPIRouterProgress(_ context.Context, thread, triggerID, think string) {
+	s.mu.Lock()
+	s.progress = append(s.progress, struct{ thread, triggerID, think string }{thread, triggerID, think})
+	s.mu.Unlock()
 }
 
 func (s *recordingAPISink) OnAPIRouterTurnEnd(_ context.Context, thread, triggerID, reason string) {
@@ -801,5 +808,73 @@ func TestAPIRouterSameTriggerCircuitBreakerUnblocksQueue(t *testing.T) {
 	sink.mu.Unlock()
 	if !strings.Contains(replyText, "后续消息已正常回复") {
 		t.Fatalf("unexpected reply text for trigGood: %q", replyText)
+	}
+}
+
+func TestAPIModeNoPTYTranscriptLeakAndCleanHistoryAndProgress(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "cmpl-prog", "model": "hy4",
+			"choices": []map[string]any{{
+				"index": 0, "finish_reason": "tool_calls",
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{
+						{"id": "c1", "type": "function", "function": map[string]any{
+							"name":      "reply_user",
+							"arguments": `{"purpose":"answer","text":"一切正常"}`,
+						}},
+					},
+				},
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	eng, _, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	ctx := context.Background()
+
+	// 1. In API mode, RouterTranscriptInfo MUST return ("", nil) so WeCom never streams stale PTY transcripts.
+	if p, ad := eng.RouterTranscriptInfo(ctx); p != "" || ad != nil {
+		t.Fatalf("expected empty RouterTranscriptInfo in API mode, got path=%q ad=%v", p, ad)
+	}
+
+	// 2. Seed prior assistant reply and verify buildThreadSlidingHistory omits internal "[eXXXX HH:MM]" prefix.
+	if _, _, _, err := eng.Reply(ctx, model.MainThread, "之前的正常回复内容", "", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	_, trig, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "wecom", From: "you", Text: "检查一下"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hist := eng.buildThreadSlidingHistory(ctx, model.MainThread, trig)
+	foundAssist := false
+	for _, m := range hist {
+		if m.Role == "assistant" {
+			foundAssist = true
+			s, _ := m.Content.(string)
+			if strings.HasPrefix(s, "[e") {
+				t.Fatalf("assistant history should not carry internal [eXXXX] prefix, got %q", s)
+			}
+			if !strings.Contains(s, "之前的正常回复内容") {
+				t.Fatalf("expected assistant history content preserved, got %q", s)
+			}
+		}
+	}
+	if !foundAssist {
+		t.Fatal("expected prior assistant turn in sliding history")
+	}
+
+	// 3. Running an API turn pushes clean Chinese step progress to ChannelSink.OnAPIRouterProgress.
+	eng.deliverAPIRouter(ctx, []*model.Trigger{trig})
+	waitUntil(t, 5*time.Second, func() bool {
+		return !eng.isRouterWorking(ctx)
+	}, "api progress turn settled")
+
+	sink.mu.Lock()
+	progs := append([]struct{ thread, triggerID, think string }(nil), sink.progress...)
+	sink.mu.Unlock()
+	if len(progs) == 0 || !strings.Contains(progs[0].think, "正在整理回复") || progs[0].triggerID != trig.ID {
+		t.Fatalf("expected Chinese API tool progress for %s, got %+v", trig.ID, progs)
 	}
 }

@@ -15,14 +15,14 @@ import (
 
 const (
 	maxAPIMemoryBytes       = 8192
-	maxAPIHistoryRunes      = 14000
+	maxAPIHistoryRunes      = 9000
 	maxAPICardPreviewRunes  = 160
 	maxAPIImageBytes        = 4 << 20
 	maxAPIImagesPerTurn     = 4
 	apiRouterSystemPromptV1 = `你是 Corgi —— 运行在用户 Hub 进程内的 Super-Agent 大脑。你负责理解意图、快速查证、编排多机 Coding CLI Workers，并向用户简洁准确地汇报。
 
 核心工作原则：
-1. 回复简洁：常规回复尽量简短；列举 2 项以上时必须用 "- " Markdown 列表分条，禁止把多项塞进同一行。
+1. 回复简洁：常规回复尽量简短；列举 2 项以上时必须用 "- " Markdown 列表分条，禁止把多项塞进同一行；回复正文严禁输出 [e1234 01:23] 等内部编号前缀。
 2. 先查后派：遇到查代码、看 Git 状态/提交、看 Worker 详细输出，优先用 read_detail 按需读取，避免为轻量只读查询盲目启动重型 CLI Worker。
 3. 精准使用 reply_user：
    - purpose="answer"：普通问答、进度解释，禁止附加选择按钮。
@@ -119,7 +119,7 @@ func (e *Engine) buildThreadSlidingHistory(ctx context.Context, thread string, t
 	if e.store == nil {
 		return nil
 	}
-	entries, _, err := e.store.ListEntries(ctx, thread, 45)
+	entries, _, err := e.store.ListEntries(ctx, thread, 24)
 	if err != nil || len(entries) == 0 {
 		return nil
 	}
@@ -145,11 +145,12 @@ func (e *Engine) buildThreadSlidingHistory(ctx context.Context, thread string, t
 			}
 			rawItems = append(rawItems, histItem{
 				role: "user",
-				text: fmt.Sprintf("[%s %s] %s", en.ID, en.At.Format("15:04"), clipMultiline(txt, 800)),
+				text: fmt.Sprintf("(%s) %s", en.At.Format("15:04"), clipMultiline(txt, 600)),
 			})
 		case "corgi":
+			// Never prefix assistant turns with internal "[e1234 01:23]" IDs so models don't echo them into user replies.
 			var sb strings.Builder
-			fmt.Fprintf(&sb, "[%s %s] %s", en.ID, en.At.Format("15:04"), clipMultiline(strings.TrimSpace(en.Text), 900))
+			sb.WriteString(clipMultiline(strings.TrimSpace(en.Text), 700))
 			if len(en.Artifacts) > 0 {
 				names := make([]string, 0, len(en.Artifacts))
 				for _, a := range en.Artifacts {
@@ -167,7 +168,7 @@ func (e *Engine) buildThreadSlidingHistory(ctx context.Context, thread string, t
 			// Preserve concise operational events (worker completions, errors, decisions).
 			rawItems = append(rawItems, histItem{
 				role: "user",
-				text: fmt.Sprintf("[系统事件 %s %s] %s", en.ID, en.At.Format("15:04"), oneLineClip(en.Text, 220)),
+				text: fmt.Sprintf("[系统事件 %s] %s", en.At.Format("15:04"), oneLineClip(en.Text, 180)),
 			})
 		}
 	}
@@ -269,11 +270,17 @@ func (e *Engine) buildLiveTailState(ctx context.Context, thread string, trig *mo
 			b.WriteString("\n### 活跃 Workers\n")
 			for _, w := range active {
 				fmt.Fprintf(&b, "- #%s [%s/%s · %s] status=%s", w.Name, w.Kind, orStr(w.Machine, "hub"), orStr(w.Model, "default"), w.Status)
+				if !w.CreatedAt.IsZero() {
+					fmt.Fprintf(&b, " since=%s", w.CreatedAt.Format("15:04"))
+				}
 				if w.WorkItemID != "" {
 					fmt.Fprintf(&b, " work=%s", w.WorkItemID)
 				}
 				if w.ProjectID != "" {
 					fmt.Fprintf(&b, " project=%s", w.ProjectID)
+				}
+				if w.WorktreeBranch != "" {
+					fmt.Fprintf(&b, " branch=%s", w.WorktreeBranch)
 				}
 				if w.LastReport != "" {
 					fmt.Fprintf(&b, " | last=%s", oneLineClip(w.LastReport, maxAPICardPreviewRunes))
