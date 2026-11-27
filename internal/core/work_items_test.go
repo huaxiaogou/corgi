@@ -479,3 +479,71 @@ func TestCausalWorkItemActionProvenanceAndAtomicExpiry(t *testing.T) {
 		t.Fatalf("sibling wiB decision card in same thread must stay pending, got %+v", gotBChoiceAfter)
 	}
 }
+
+func TestReplyPreSendEmptyAttachmentGate(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	eng, err := NewEngine(context.Background(), st, nil, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// 1. Claiming attachment without --file or report snapshot MUST fail BEFORE committing an entry.
+	before, _, _ := st.ListEntries(ctx, model.MainThread, 50)
+	if _, err := eng.ReplyDetailed(ctx, ReplyRequest{
+		Thread: model.MainThread,
+		Text:   "物言 Agent 数据可视化方案报告已重新附上，请查收。",
+	}); err == nil || !strings.Contains(err.Error(), "0 files or report snapshots") {
+		t.Fatalf("expected empty-attachment pre-send rejection, got %v", err)
+	}
+	after, _, _ := st.ListEntries(ctx, model.MainThread, 50)
+	if len(after) != len(before) {
+		t.Fatalf("rejected empty-attachment reply must not persist entry: before=%d after=%d", len(before), len(after))
+	}
+
+	// 2. Negations, questions, and code-span mentions must NOT false-trigger.
+	for _, safeText := range []string{
+		"刚才没有附上方案文件，我马上补发。",
+		"需要我把方案报告作为附件发出来吗？",
+		"排查 `已附上` 和 `请查收附件` 的门禁逻辑。",
+	} {
+		if _, err := eng.ReplyDetailed(ctx, ReplyRequest{Thread: model.MainThread, Text: safeText}); err != nil {
+			t.Fatalf("safe reply %q unexpectedly rejected: %v", safeText, err)
+		}
+	}
+
+	// 3. Claiming attachment WITH explicit --file succeeds cleanly.
+	docPath := filepath.Join(dir, "proposal.md")
+	if err := os.WriteFile(docPath, []byte("# Proposal\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := eng.ReplyDetailed(ctx, ReplyRequest{
+		Thread: model.MainThread,
+		Text:   "物言方案报告已重新附上，请查收。",
+		Files:  []string{docPath},
+	}); err != nil || res == nil || len(res.Entry.Artifacts) != 1 {
+		t.Fatalf("expected --file reply to succeed, res=%+v err=%v", res, err)
+	}
+
+	// 4. Claiming attachment WITH exact --re <report_tID> snapshot (FILES=0) ALSO succeeds cleanly.
+	wk := &model.Worker{Name: "agent-flow-plan", Kind: "agy", Thread: model.MainThread, Status: "idle"}
+	_ = st.UpsertWorker(ctx, wk)
+	repTrig, err := eng.Report(ctx, wk.Name, "", strings.Repeat("详细数据流设计方案。", 60))
+	if err != nil || repTrig == nil || repTrig.ArtifactID == "" {
+		t.Fatalf("Report snapshot setup failed: trig=%+v err=%v", repTrig, err)
+	}
+	if res, err := eng.ReplyDetailed(ctx, ReplyRequest{
+		Thread: model.MainThread,
+		ReID:   repTrig.ID,
+		Worker: wk.Name,
+		Text:   "完整报告已附上，请查收附件。",
+	}); err != nil || res == nil || len(res.Entry.Artifacts) != 1 {
+		t.Fatalf("expected --re report snapshot attachment reply to succeed, res=%+v err=%v", res, err)
+	}
+}

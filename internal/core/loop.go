@@ -394,9 +394,7 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, scan
 			}
 		case prev == "working" && (li.status == "done" || li.status == "idle"):
 			_ = e.store.ExpireWorkerActions(ctx, w.Name)
-			if e.hasDirectTurn(w.Name) || now.Sub(w.ReportAt) > 90*time.Second {
-				e.handleWorkerTurnDone(ctx, w)
-			}
+			e.handleWorkerTurnDone(ctx, w)
 		case (li.status == "done" || li.status == "idle") && e.hasWorkerStartupCheck(w.Name):
 			e.checkWorkerStartupHealth(ctx, w, li, now)
 		}

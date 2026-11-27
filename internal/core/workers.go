@@ -888,7 +888,7 @@ func (e *Engine) Report(ctx context.Context, workerName, paneID, text string) (*
 		}
 		snap := e.lastWorkerTurnSnapshot(ctx, wk)
 		turnNote = e.formatWorkerTurnStatusNote(ctx, wk, snap)
-		e.markWorkerAssistantNotified(wk, snap)
+		e.recordWorkerExplicitReport(wk, snap, artID, isProgressReportText(text), wk.ReportAt)
 	}
 	workID := ""
 	if wk != nil {

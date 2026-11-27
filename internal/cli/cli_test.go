@@ -360,4 +360,30 @@ func TestReadTextFromAndReplyStdinJSON(t *testing.T) {
 	if gotPath != "/api/super/send" || gotBody["text"] != wantSend {
 		t.Fatalf("send got path=%q text=%q, want %q", gotPath, gotBody["text"], wantSend)
 	}
+
+	// 4. `corgi send <worker> -` via stdin preserves backticks, $(), real newlines, and literal \n verbatim.
+	rSend, wSend, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawPrompt := "排查 `--check` 与 `corgi report` 和 $(uname) 及字面 \\n 换行\n第二行\n"
+	_, _ = wSend.WriteString(rawPrompt)
+	_ = wSend.Close()
+	os.Stdin = rSend
+	err = Run(dir, "send", []string{"--work", "wi3420", "worker-a", "-"})
+	os.Stdin = origStdin
+	_ = rSend.Close()
+	if err != nil {
+		t.Fatalf("Run send stdin failed: %v", err)
+	}
+	if gotPath != "/api/super/send" || gotBody["to"] != "worker-a" || gotBody["work_id"] != "wi3420" || gotBody["text"] != rawPrompt {
+		t.Fatalf("send stdin got path=%q body=%#v, want text=%q", gotPath, gotBody, rawPrompt)
+	}
+
+	// 5. Piped stdin without `-` (single-line with literal \n) ALSO preserves raw bytes verbatim.
+	singleRaw := "只读排查 `--check` 与字面 \\n 原样保留"
+	gotRaw, err := readSendTextFrom(nil, strings.NewReader(singleRaw), false)
+	if err != nil || gotRaw != singleRaw {
+		t.Fatalf("readSendTextFrom piped single-line got (%q, %v), want %q", gotRaw, err, singleRaw)
+	}
 }

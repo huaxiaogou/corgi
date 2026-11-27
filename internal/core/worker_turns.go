@@ -46,6 +46,11 @@ type workerTurnWatermark struct {
 	startupDispatchedAt time.Time
 	startupLastProbeAt  time.Time
 	startupAlertedSeq   int64
+	reportedUserAt      int64
+	reportedSeq         int64
+	reportedAt          time.Time
+	reportedArtID       string
+	reportedIsProgress  bool
 }
 
 func (e *Engine) getOrResetWorkerTurnLocked(name, paneID, session string) *workerTurnWatermark {
@@ -204,12 +209,68 @@ func (e *Engine) shouldEmitWorkerTurnSummary(wk *model.Worker, snap workerTurnSn
 		wm.pendingSince = time.Time{}
 		return false
 	}
+	// Suppress duplicate automatic turn-done notifications when the worker already filed an
+	// explicit non-progress `corgi report` for this exact turn (e.g. closing prose written
+	// seconds after `corgi report`). New turns, progress reports, and newer Router deliveries
+	// are never suppressed.
+	if !wm.reportedAt.IsZero() && !wm.reportedIsProgress && wm.deliveredSeq <= wm.reportedSeq {
+		sameTranscriptTurn := snap.FromTranscript && snap.LastUserAt > 0 && wm.reportedUserAt > 0 && snap.LastUserAt == wm.reportedUserAt
+		sameRecentReport := now.Sub(wm.reportedAt) <= 90*time.Second && (snap.LastUserAt == 0 || wm.reportedUserAt == 0 || snap.LastUserAt <= wm.reportedUserAt)
+		if sameTranscriptTurn || sameRecentReport {
+			if snap.AssistantAt > wm.lastNotifiedAt {
+				wm.lastNotifiedAt = snap.AssistantAt
+			}
+			wm.pendingCheck = false
+			wm.pendingSince = time.Time{}
+			return false
+		}
+	}
 	if snap.AssistantAt > 0 {
 		wm.lastNotifiedAt = snap.AssistantAt
 	}
 	wm.pendingCheck = false
 	wm.pendingSince = time.Time{}
 	return true
+}
+
+func isProgressReportText(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	low := strings.ToLower(trimmed)
+	return strings.HasPrefix(low, "progress:") ||
+		strings.HasPrefix(trimmed, "进度：") ||
+		strings.HasPrefix(trimmed, "进度:")
+}
+
+// recordWorkerExplicitReport records an explicit `corgi report` for the current turn so
+// closing assistant prose written seconds later does not emit a duplicate turn-done delivery.
+func (e *Engine) recordWorkerExplicitReport(wk *model.Worker, snap workerTurnSnapshot, artID string, isProgress bool, now time.Time) {
+	if wk == nil || wk.Name == "" {
+		return
+	}
+	if snap.FromTranscript {
+		e.observeWorkerTranscript(wk, snap)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	wm := e.getOrResetWorkerTurnLocked(wk.Name, wk.PaneID, wk.Session)
+	if snap.FromTranscript && snap.AfterLastUser && snap.AssistantAt > wm.lastNotifiedAt {
+		wm.lastNotifiedAt = snap.AssistantAt
+	}
+	wm.reportedAt = now
+	wm.reportedArtID = strings.TrimSpace(artID)
+	wm.reportedIsProgress = isProgress
+	if snap.LastUserAt > 0 {
+		wm.reportedUserAt = snap.LastUserAt
+	} else if wm.lastUserAt > 0 {
+		wm.reportedUserAt = wm.lastUserAt
+	}
+	seq := wm.deliveredSeq
+	if snap.LastUserSeq > seq {
+		seq = snap.LastUserSeq
+	}
+	wm.reportedSeq = seq
+	wm.pendingCheck = false
+	wm.pendingSince = time.Time{}
 }
 
 func (e *Engine) markWorkerAssistantNotified(wk *model.Worker, snap workerTurnSnapshot) {

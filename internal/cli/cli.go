@@ -321,6 +321,28 @@ func cmdSpawn(dir string, args []string) error {
 	return err
 }
 
+func readSendTextFrom(args []string, stdin io.Reader, isTTY bool) (string, error) {
+	if (len(args) == 1 && args[0] == "-") || (len(args) == 0 && !isTTY) {
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return "", err
+		}
+		t := string(b)
+		if strings.TrimSpace(t) == "" {
+			return "", fmt.Errorf("text is required")
+		}
+		return t, nil
+	}
+	if len(args) == 0 {
+		return "", fmt.Errorf("usage: corgi send [--work WI] <worker> <text | ->")
+	}
+	t := normalizeEscapedNewlines(strings.Join(args, " "))
+	if strings.TrimSpace(t) == "" {
+		return "", fmt.Errorf("text is required")
+	}
+	return t, nil
+}
+
 func cmdSend(dir string, args []string) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	thread := fs.String("thread", "", "thread id")
@@ -328,11 +350,17 @@ func cmdSend(dir string, args []string) error {
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: corgi send [--work WI] <worker> <text>")
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: corgi send [--work WI] <worker> <text | ->")
+	}
+	fi, err := os.Stdin.Stat()
+	isTTY := err == nil && fi.Mode()&os.ModeCharDevice != 0
+	text, err := readSendTextFrom(fs.Args()[1:], os.Stdin, isTTY)
+	if err != nil {
+		return err
 	}
 	out, err := apiCall(dir, http.MethodPost, "/api/super/send", map[string]any{
-		"to": fs.Arg(0), "text": normalizeEscapedNewlines(strings.Join(fs.Args()[1:], " ")), "thread": *thread, "work_id": *work,
+		"to": fs.Arg(0), "text": text, "thread": *thread, "work_id": *work,
 	})
 	if err == nil {
 		fmt.Println(strings.TrimSpace(string(out)))

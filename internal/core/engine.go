@@ -901,6 +901,12 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 		}
 	}
 
+	hasResolvedAttachment := len(fetchedFiles) > 0 || len(artifactSummaries) > 0 || len(files) > 0
+	if !hasResolvedAttachment && claimsAttachmentIncluded(text) {
+		cleanupBlobs()
+		return nil, fmt.Errorf("reply claims an attachment is included, but 0 files or report snapshots were attached; pass --file /abs/path [--machine M] or --re <report_tID> --worker <W>, or rephrase without claiming an attachment")
+	}
+
 	entry := &model.Entry{
 		ID:          eid,
 		Seq:         eseq,
@@ -1199,6 +1205,32 @@ func (e *Engine) notifyChanged() {
 	sink := e.sink
 	e.mu.Unlock()
 	sink.OnStateChanged()
+}
+
+var (
+	inlineCodeSpanRe   = regexp.MustCompile("(?s)```.*?```|`[^`\n]+`")
+	attachmentClaimRe  = regexp.MustCompile(`(?i)(已重新附上|已附上|已作为附件|作为附件(?:补发|发出|发送|交付|附上)|附件已(?:发|附上|补发|送达)|附在附件|详见附件|见附件|请查收附件|已附带(?:完整|文件|报告|方案|原型)|attached (?:below|here|the file|the report)|see attached|file attached)`)
+	attachmentNegateRe = regexp.MustCompile(`(?i)(未附上|没附上|没有附上|未能附上|暂未附上|无法附上|未附带|无附件|漏发|没发出来|未发送附件|不用附|无需附|需要我|需要附|要不要|是否|如需|吗\s*$|not attached|didn'?t attach|no attachment|without attachment|\?\s*$|？\s*$)`)
+	clauseSplitterRe   = regexp.MustCompile(`[。！!；;\r\n]+`)
+)
+
+// claimsAttachmentIncluded reports whether reply prose affirmatively promises that a file or
+// report attachment is included in THIS reply (ignoring code spans, negations, and questions).
+func claimsAttachmentIncluded(text string) bool {
+	cleaned := inlineCodeSpanRe.ReplaceAllString(text, " ")
+	for _, clause := range clauseSplitterRe.Split(cleaned, -1) {
+		c := strings.TrimSpace(clause)
+		if c == "" {
+			continue
+		}
+		if attachmentNegateRe.MatchString(c) {
+			continue
+		}
+		if attachmentClaimRe.MatchString(c) {
+			return true
+		}
+	}
+	return false
 }
 
 const maxOptionRunes = 240

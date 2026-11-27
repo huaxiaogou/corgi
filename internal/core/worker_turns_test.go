@@ -196,7 +196,8 @@ func TestWorkerStartupCheckCatchesImmediateExecutorCrashAndPausesInstance(t *tes
 	}
 
 	live := map[string]liveInfo{
-		wk.Name: {pane: "wK:p1", kind: "agy", status: "idle", ready: true},
+		model.RouterName: {pane: "wR:p1", kind: "claude", status: "working", ready: true},
+		wk.Name:          {pane: "wK:p1", kind: "agy", status: "idle", ready: true},
 	}
 	scanned := map[string]bool{"": true}
 
@@ -343,5 +344,80 @@ func TestWorkerStartupCheckZeroFalsePositivesOnOldScrollbackAndBenignWarning(t *
 	}
 	if unconfirmed != 1 {
 		t.Fatalf("expected 1 unconfirmed-startup notice, got %d", unconfirmed)
+	}
+}
+
+func TestExplicitReportSuppressesSameTurnClosingDuplicateWhileAllowingNewTurnAndProgress(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	eng, err := NewEngine(context.Background(), st, nil, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wk := &model.Worker{Name: "agent-flow-plan", Kind: "agy", PaneID: "wG:p1", Session: "s-flow", Thread: model.MainThread}
+	t0 := time.Now()
+
+	// 1. Worker delivers explicit final report during turn LastUserAt=1200.
+	midTurnSnap := workerTurnSnapshot{
+		Text:           "正在调用 corgi report",
+		FromTranscript: true,
+		AfterLastUser:  true,
+		AssistantAt:    1500,
+		LastUserAt:     1200,
+		LastUserSeq:    3458,
+	}
+	eng.recordWorkerExplicitReport(wk, midTurnSnap, "art_report_1", false, t0)
+
+	// 11s later, worker finishes closing prose at higher AssistantAt=2400 on the SAME turn -> MUST suppress duplicate.
+	closingSnap := workerTurnSnapshot{
+		Text:           "物言数据流可视化原型已交付并汇报。",
+		FromTranscript: true,
+		AfterLastUser:  true,
+		AssistantAt:    2400,
+		LastUserAt:     1200,
+		LastUserSeq:    3458,
+	}
+	if eng.shouldEmitWorkerTurnSummary(wk, closingSnap, t0.Add(11*time.Second)) {
+		t.Fatal("expected same-turn closing prose after explicit report to be suppressed")
+	}
+
+	// 2. Next turn (LastUserAt=3000) fires a PROGRESS report -> MUST NOT suppress final deliverable turn completion.
+	progSnap := workerTurnSnapshot{
+		Text:           "进度汇报",
+		FromTranscript: true,
+		AfterLastUser:  true,
+		AssistantAt:    3200,
+		LastUserAt:     3000,
+		LastUserSeq:    3470,
+	}
+	eng.recordWorkerExplicitReport(wk, progSnap, "", isProgressReportText("PROGRESS: 已完成 50%"), t0.Add(30*time.Second))
+	finalSnap := workerTurnSnapshot{
+		Text:           "全部完成，交付新版原型",
+		FromTranscript: true,
+		AfterLastUser:  true,
+		AssistantAt:    3800,
+		LastUserAt:     3000,
+		LastUserSeq:    3470,
+	}
+	if !eng.shouldEmitWorkerTurnSummary(wk, finalSnap, t0.Add(45*time.Second)) {
+		t.Fatal("expected progress report NOT to suppress final turn completion")
+	}
+
+	// 3. Brand-new turn (LastUserAt=4500) after an earlier explicit final report -> MUST emit normally.
+	newTurnSnap := workerTurnSnapshot{
+		Text:           "新一轮修复已完成",
+		FromTranscript: true,
+		AfterLastUser:  true,
+		AssistantAt:    5100,
+		LastUserAt:     4500,
+		LastUserSeq:    3480,
+	}
+	if !eng.shouldEmitWorkerTurnSummary(wk, newTurnSnap, t0.Add(60*time.Second)) {
+		t.Fatal("expected new turn after prior explicit report to emit normally")
 	}
 }
