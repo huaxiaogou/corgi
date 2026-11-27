@@ -190,3 +190,37 @@ func TestParseVoteInteractionSelectedItemsFormats(t *testing.T) {
 		t.Fatalf("unexpected vote event B: %+v ok=%v", evB, ok)
 	}
 }
+
+func TestBuildVoteDecisionCardCleanTypographyNoMarkdownOrRedundantPrefix(t *testing.T) {
+	act := &model.Action{
+		ID:      "a3700",
+		Kind:    model.ActionKindRouterChoice,
+		Title:   "**wi3524 直聊身份** · 合入部署",
+		Summary: "分支 `corgi/agy-3637` **已写码完成、验收全绿**。\n- 未合入 / 未部署\n- 请选择推进方式：",
+		Choices: []model.ActionChoice{
+			{Key: "1", Label: "**合入并构建部署+核验**"},
+			{Key: "2", Label: "只合入+构建，暂不部署"},
+			{Key: "3", Label: "先看完整报告 / diff"},
+		},
+	}
+	card := BuildDecisionCard(act, DecisionCardOptions{AllowSnooze: true})
+	mt := card["main_title"].(map[string]any)
+	title := mt["title"].(string)
+	desc := mt["desc"].(string)
+
+	if title != "wi3524 直聊身份 · 合入部署" {
+		t.Fatalf("expected clean explicit title without markdown, got %q", title)
+	}
+	for _, bad := range []string{"**", "`", "单选（", "选定后点下方确认"} {
+		if strings.Contains(desc, bad) || strings.Contains(title, bad) {
+			t.Fatalf("vote card must not contain %q; title=%q desc=%q", bad, title, desc)
+		}
+	}
+	if !strings.Contains(desc, "分支 corgi/agy-3637 已写码完成、验收全绿") {
+		t.Fatalf("expected clean summary in desc, got %q", desc)
+	}
+	opts := card["checkbox"].(map[string]any)["option_list"].([]map[string]any)
+	if opts[0]["text"] != "合入并构建部署+核验" {
+		t.Fatalf("expected markdown stripped from option text, got %q", opts[0]["text"])
+	}
+}

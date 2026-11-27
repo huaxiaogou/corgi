@@ -206,8 +206,9 @@ func apiRouterToolDefs() []LLMToolDef {
 					"type": "object",
 					"properties": map[string]any{
 						"purpose": map[string]any{"type": "string", "enum": []string{"answer", "result", "attention"}, "description": "answer=普通问答（禁按钮），result=交付成果/附件，attention=需人确认的决策卡或提醒"},
-						"text":    map[string]any{"type": "string", "description": "回复正文（2项以上用 '- ' 列表分条）"},
-						"choices": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "仅 purpose=attention 时可用，2–4 个清晰选项"},
+						"title":   map[string]any{"type": "string", "description": "仅 purpose=attention 时可选：简短具体的决策卡标题（≤20字纯文本，如 'wi3524 直聊身份 · 合入部署'）"},
+						"text":    map[string]any{"type": "string", "description": "回复正文（2项以上用 '- ' 列表分条；purpose=attention 时只聚焦当前要拍板的那一件事，用 1–2 句精炼说清现状与决策点，尽量 ≤100 字）"},
+						"choices": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "仅 purpose=attention 时可用，2–4 个清晰选项（每项尽量 ≤14 字，避免手机端截断）"},
 						"multi":   map[string]any{"type": "boolean", "description": "attention 卡片是否多选"},
 						"check":   map[string]any{"type": "boolean", "description": "仅 purpose=attention 且无需多选项时的轻量已读提醒"},
 						"files":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "显式附带的绝对文件路径"},
@@ -309,6 +310,7 @@ func (e *Engine) execAPIRouterTool(ctx context.Context, turn *apiRouterTurn, tri
 func (e *Engine) toolReplyUser(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, rawArgs string) (string, bool) {
 	var args struct {
 		Purpose string   `json:"purpose"`
+		Title   string   `json:"title"`
 		Text    string   `json:"text"`
 		Choices []string `json:"choices"`
 		Multi   bool     `json:"multi"`
@@ -387,6 +389,7 @@ func (e *Engine) toolReplyUser(ctx context.Context, turn *apiRouterTurn, trig *m
 	e.recordAPIRouterInflight(context.Background(), trig, "reply_user", "")
 	res, err := e.ReplyDetailed(ctx, ReplyRequest{
 		Thread:  turn.thread,
+		Title:   strings.TrimSpace(args.Title),
 		Text:    text,
 		ReID:    reID,
 		Options: args.Choices,
@@ -919,6 +922,16 @@ func (e *Engine) toolReadDetail(ctx context.Context, turn *apiRouterTurn, rawArg
 		out := map[string]any{"worker": wk}
 		if !wk.Ended && wk.PaneID != "" {
 			out["last_message"] = e.lastWorkerSummary(ctx, wk)
+			if e.fleet != nil {
+				rctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+				rr, rErr := e.fleet.Read(rctx, wk.PaneID, "recent", "text", 40)
+				cancel()
+				if rErr == nil {
+					if tail := compactScreenTail(rr.Text, 18, 1200); tail != "" {
+						out["screen_tail"] = tail
+					}
+				}
+			}
 		}
 		b, _ := json.Marshal(out)
 		return toolJSON(paginate(string(b)))

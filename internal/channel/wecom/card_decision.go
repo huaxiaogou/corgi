@@ -253,24 +253,26 @@ func buildVoteDecisionCard(a *model.Action, choices []model.ActionChoice, opts D
 		})
 	}
 
-	title, _, body, _ := shapeCardCopy(a, len(choices))
+	title, _, body, _ := shapeCardCopyBudget(a, len(choices), voteMainDescMaxRunes)
 	var descParts []string
-	if isMulti {
-		descParts = append(descParts, fmt.Sprintf("多选（%d 项）· 勾选后点下方确认", len(choices)))
-	} else {
-		descParts = append(descParts, fmt.Sprintf("单选（%d 项）· 选定后点下方确认", len(choices)))
-	}
-	if overflowOmitted > 0 {
-		descParts = append(descParts, fmt.Sprintf("另有 %d 项请前往 Web 控制台选择", overflowOmitted))
-	}
 	if w := strings.TrimSpace(a.TargetWorker); w != "" {
 		descParts = append(descParts, "会话："+w)
 	}
 	if body != "" {
-		descParts = append(descParts, collapseSpaces(body))
+		descParts = append(descParts, formatVoteDescLines(body))
 	}
 	if cmd := strings.TrimSpace(a.Command); cmd != "" {
 		descParts = append(descParts, "命令："+collapseSpaces(cmd))
+	}
+	if overflowOmitted > 0 {
+		descParts = append(descParts, fmt.Sprintf("另有 %d 项请前往 Web 控制台选择", overflowOmitted))
+	}
+	if len(descParts) == 0 {
+		if isMulti {
+			descParts = append(descParts, "可多选，勾选后点击下方确认")
+		} else {
+			descParts = append(descParts, "请选择后点击下方确认")
+		}
 	}
 	submitText := clipRunes(firstNonEmpty(a.ConfirmLabel, "确认提交"), cardButtonTextMaxRunes)
 
@@ -279,7 +281,7 @@ func buildVoteDecisionCard(a *model.Action, choices []model.ActionChoice, opts D
 		"source":    map[string]any{"desc": formatPendingSourceDesc(opts)},
 		"main_title": map[string]any{
 			"title": title,
-			"desc":  clipRunes(strings.Join(descParts, " · "), voteMainDescMaxRunes),
+			"desc":  clipRunes(strings.Join(descParts, "\n"), voteMainDescMaxRunes),
 		},
 		"checkbox": map[string]any{
 			"question_key": sanitizeTaskID(a.ID),

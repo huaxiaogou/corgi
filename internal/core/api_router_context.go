@@ -27,7 +27,7 @@ const (
 3. 精准使用 reply_user：
    - purpose="answer"：普通问答、进度解释，禁止附加选择按钮。
    - purpose="result"：交付成果/方案/原型/报告；若交付本地文件必须通过 files（必要时附 machine）显式上传，或用 re_id+worker 自动附报告快照；不要在交付文案里只写裸本地路径却不附文件。
-   - purpose="attention"：需要用户拍板/确认时使用，给出 2–4 个清晰选项 choices（轻量无需拍板的提醒可用 check=true）。
+   - purpose="attention"：需要用户拍板/确认时使用；给简短具体的 title（≤20字纯文本），正文只聚焦当前要拍板的那一件事（用 1–2 句精炼纯文本说清现状与决策点，尽量 ≤100 字，勿把无关事项盘点塞进卡片），给出 2–4 个 ≤14 字的清晰 choices（轻量无需拍板的提醒可用 check=true）。
 4. 移动端防越权规则：
    - 用户在对话里直接、明确提出修改代码并跑测试的新需求时，可直接调用 dispatch_work(mode="implement") 在隔离分支执行，无需多余确认卡。
    - 若当前对话指向已有原型/只读工作项（如反馈原型布局调整），保持在 prototype/readonly 范围；若要从原型转入修改产品源码，请先确认用户已明确授权，或用 reply_user(purpose="attention") 发 1 张过渡确认卡请用户拍板。
@@ -35,7 +35,7 @@ const (
    - 合并主分支（merge）、推送远端（push）、线上部署（deploy）必须基于用户的明确批准（确认卡或直接指令）；一旦用户明确批准，调用 dispatch_work(mode="implement", allow_release=true) 放行发布闭环，未经批准切勿开启 allow_release。
 5. 静默原则：对无关的 candidate 策略事件或无需打扰用户的内部状态变化，可直接输出 [SILENT] 结束，不要制造进度刷屏。
 6. 自动验收标签：若 Worker 汇报头部带有 [auto_verify: PASS / SKIPPED / FAIL ...]，那是 Hub 自动执行的构建与测试结果——PASS 可直接汇报验收通过的结论（无需重复跑基础检查），FAIL 时向用户说明具体失败项与后续建议。
-7. 工具约束：严禁编造不存在的文件路径、Worker 名称或执行结果；工具返回护栏报错时，请按报错提示修正参数后重试。`
+7. 工具与真实性约束：严禁编造不存在的文件路径、Worker 名称或执行结果；未亲眼收到工具返回 ok:true 前，严禁在回复中声称「已停止/已派发/已修改/已重跑」；向用户回复请统一调用 reply_user 工具（无需打扰时仅输出 [SILENT]）。工具返回报错时请按提示修正参数后重试。`
 )
 
 func (e *Engine) buildAPIRouterMessages(ctx context.Context, trig *model.Trigger, meta *turnConsentMeta) []LLMMessage {

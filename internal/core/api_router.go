@@ -688,6 +688,7 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 	}
 
 	exhaustedSteps := false
+	nudgedBareText := false
 	for step := 0; step < maxAPIRouterSteps; step++ {
 		if ctx.Err() != nil {
 			if turn.isStopped() {
@@ -765,6 +766,16 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		if len(choice.ToolCalls) == 0 {
 			plain := strings.TrimSpace(choice.Content)
 			if plain != "" && !turn.hasReplied() && !isDeliberateSilenceText(trig, plain) {
+				if !nudgedBareText && step < maxAPIRouterSteps-1 {
+					nudgedBareText = true
+					e.logger.Info("api router nudging bare text to tool call",
+						"trigger", trig.ID, "thread", turn.thread, "step", step+1, "model", modelName)
+					messages = append(messages,
+						LLMMessage{Role: "assistant", Content: plain},
+						LLMMessage{Role: "user", Content: "请勿直接输出裸文本：若需要查证、停止或派发 Worker，请先实际调用对应工具并确认返回 ok:true；确认无需更多工具操作后，请调用 reply_user 工具向用户发送最终回复（无需打扰用户时仅输出 [SILENT]）。"},
+					)
+					continue
+				}
 				e.recordAPIRouterInflight(bg, trig, "reply_user", "")
 				res, rErr := e.ReplyDetailed(ctx, ReplyRequest{
 					Thread: turn.thread,

@@ -746,6 +746,7 @@ func (e *Engine) buildDispatchHint(req SayRequest) string {
 // review check, digest replacement, work item linkage, or explicit file attachments.
 type ReplyRequest struct {
 	Thread            string
+	Title             string // optional short decision card title (≤20 chars plain text)
 	Text              string
 	ReID              string
 	Options           []string
@@ -1028,6 +1029,10 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 		if len([]rune(confirmLabel)) > 16 {
 			confirmLabel = oneLineClip(confirmLabel, 16)
 		}
+		actionTitle := oneLineClip(strings.TrimSpace(req.Title), 64)
+		if actionTitle == "" {
+			actionTitle = oneLineClip(text, 64)
+		}
 		action = &model.Action{
 			ID:           aid,
 			Kind:         kind,
@@ -1038,7 +1043,7 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 			Category:     cat,
 			Mode:         actionMode,
 			ConfirmLabel: confirmLabel,
-			Title:        oneLineClip(text, 64),
+			Title:        actionTitle,
 			Summary:      text,
 			Choices:      choices,
 			Status:       model.ActionPending,

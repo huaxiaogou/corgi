@@ -2,6 +2,7 @@ package wecom
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -9,9 +10,42 @@ import (
 	"github.com/kiperjing/corgi/internal/model"
 )
 
+var (
+	mdLinkRe    = regexp.MustCompile(`\[([^\]\n]+)\]\((https?://[^)\s]+)\)`)
+	mdBoldAstRe = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
+	mdBoldUndRe = regexp.MustCompile(`__([^_\n]+)__`)
+	mdStrikeRe  = regexp.MustCompile(`~~([^~\n]+)~~`)
+	mdCodeRe    = regexp.MustCompile("`([^`\n]+)`")
+	mdHeadingRe = regexp.MustCompile(`(?m)^\s{0,3}#{1,6}\s+`)
+	mdBulletRe  = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
+)
+
+// stripMarkdownPlainText strips common Markdown emphasis/link/code markers so plain-text
+// WeCom template_card fields never expose raw "**" or backticks.
+func stripMarkdownPlainText(s string) string {
+	if s == "" {
+		return ""
+	}
+	out := strings.ReplaceAll(s, "\r\n", "\n")
+	out = mdLinkRe.ReplaceAllString(out, "$1")
+	out = mdCodeRe.ReplaceAllString(out, "$1")
+	out = mdBoldAstRe.ReplaceAllString(out, "$1")
+	out = mdBoldUndRe.ReplaceAllString(out, "$1")
+	out = mdStrikeRe.ReplaceAllString(out, "$1")
+	// Clean any stray unmatched "**" left by an upstream rune truncation.
+	out = strings.ReplaceAll(out, "**", "")
+	out = mdHeadingRe.ReplaceAllString(out, "")
+	out = mdBulletRe.ReplaceAllString(out, "· ")
+	return out
+}
+
 func shapeCardCopy(a *model.Action, choiceCount int) (title, desc, body, overflow string) {
-	rawTitle := collapseSpaces(a.Title)
-	rawSummary := normalizeMultiline(a.Summary)
+	return shapeCardCopyBudget(a, choiceCount, cardSubTitleMaxRunes)
+}
+
+func shapeCardCopyBudget(a *model.Action, choiceCount, bodyBudget int) (title, desc, body, overflow string) {
+	rawTitle := collapseSpaces(stripMarkdownPlainText(a.Title))
+	rawSummary := normalizeMultiline(stripMarkdownPlainText(a.Summary))
 
 	sameAsSummary := rawSummary != "" && (rawTitle == "" || isClippedPrefix(rawTitle, rawSummary))
 	switch {
@@ -54,8 +88,8 @@ func shapeCardCopy(a *model.Action, choiceCount int) (title, desc, body, overflo
 		desc = "请确认下一步操作"
 	}
 
-	if body != "" {
-		body, overflow = splitTextBudget(body, cardSubTitleMaxRunes)
+	if body != "" && bodyBudget > 0 {
+		body, overflow = splitTextBudget(body, bodyBudget)
 	}
 	return title, desc, body, overflow
 }
@@ -78,8 +112,8 @@ func shouldExpandOptions(choices []model.ActionChoice) bool {
 }
 
 func formatChoiceFullText(ch model.ActionChoice) string {
-	label := collapseSpaces(ch.Label)
-	detail := collapseSpaces(ch.Detail)
+	label := collapseSpaces(stripMarkdownPlainText(ch.Label))
+	detail := collapseSpaces(stripMarkdownPlainText(ch.Detail))
 	if detail == "" {
 		return label
 	}
@@ -90,7 +124,7 @@ func formatChoiceFullText(ch model.ActionChoice) string {
 }
 
 func formatButtonText(num int, label string, numbered bool) string {
-	clean := collapseSpaces(label)
+	clean := collapseSpaces(stripMarkdownPlainText(label))
 	if clean == "" {
 		clean = fmt.Sprintf("选项%d", num)
 	}

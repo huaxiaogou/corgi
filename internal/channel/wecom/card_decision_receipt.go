@@ -278,13 +278,24 @@ func choiceKey(ch model.ActionChoice, idx int) string {
 }
 
 func formatVoteOptionText(ch model.ActionChoice) string {
-	label := collapseSpaces(ch.Label)
+	label := collapseSpaces(stripMarkdownPlainText(ch.Label))
 	if ch.Recommended && !strings.Contains(label, "推荐") {
 		if len([]rune(label))+4 <= voteOptionMaxRunes {
 			label += "（推荐）"
 		}
 	}
 	return clipRunes(label, voteOptionMaxRunes)
+}
+
+func formatVoteDescLines(body string) string {
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if t := strings.TrimSpace(line); t != "" {
+			out = append(out, t)
+		}
+	}
+	return strings.TrimRightFunc(strings.Join(out, "\n"), isTrimEdgeRune)
 }
 
 func formatPendingSourceDesc(opts DecisionCardOptions) string {

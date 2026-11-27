@@ -960,3 +960,68 @@ func TestAPIRouterMaxStepsExhaustedNeverSilentlySwallows(t *testing.T) {
 		t.Fatalf("expected visible error event on max-step exhaustion, entries=%+v", entries)
 	}
 }
+
+func TestAPIRouterBareTextNudgeAndExplicitCardTitle(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		reqCount int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reqCount++
+		step := reqCount
+		mu.Unlock()
+		switch step {
+		case 1:
+			// Simulate lazy hallucination with zero tool calls.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "cmpl-bare", "model": "kimi-k3",
+				"choices": []map[string]any{{
+					"index": 0, "finish_reason": "stop",
+					"message": map[string]any{"role": "assistant", "content": "已停掉并重新派发替换 Worker"},
+				}},
+			})
+		default:
+			// After nudge, model calls reply_user properly with explicit card title.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "cmpl-tool", "model": "kimi-k3",
+				"choices": []map[string]any{{
+					"index": 0, "finish_reason": "tool_calls",
+					"message": map[string]any{
+						"role": "assistant",
+						"tool_calls": []map[string]any{{
+							"id": "call_ok", "type": "function",
+							"function": map[string]any{
+								"name":      "reply_user",
+								"arguments": `{"purpose":"attention","title":"wi3524 直聊身份 · 合入部署","text":"分支已验收全绿，请确认推进方式。","choices":["合入并部署","只合入构建"]}`,
+							},
+						}},
+					},
+				}},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	eng, st, _, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	ctx := context.Background()
+	trig, err := eng.Ingest(ctx, "worker", model.MainThread, "agy-3713", "worker failed to start", "", model.RouterName, "agy-3713")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.deliverAPIRouter(ctx, []*model.Trigger{trig})
+	waitUntil(t, 5*time.Second, func() bool {
+		return !eng.isRouterWorking(ctx)
+	}, "nudged bare text turn settled")
+
+	mu.Lock()
+	gotSteps := reqCount
+	mu.Unlock()
+	if gotSteps != 2 {
+		t.Fatalf("expected bare text nudged on step 1 and resolved via tool on step 2, got %d requests", gotSteps)
+	}
+	acts, err := st.ListPendingActions(ctx)
+	if err != nil || len(acts) != 1 || acts[0].Title != "wi3524 直聊身份 · 合入部署" {
+		t.Fatalf("expected explicit card title preserved on Action, got %+v err=%v", acts, err)
+	}
+}

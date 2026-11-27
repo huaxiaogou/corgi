@@ -502,9 +502,11 @@ func (e *Engine) checkWorkerStartupHealth(ctx context.Context, w *model.Worker, 
 	if deliveredID != "" {
 		marker = "#" + deliveredID
 	}
+	var screenTail string
 	if e.fleet != nil && paneID != "" {
 		if rr, err := e.fleet.Read(ctx, paneID, "recent", "text", 40); err == nil {
 			delta := agent.ExtractPostDispatchDelta(preScreen, rr.Text, marker, promptText)
+			screenTail = compactScreenTail(rr.Text, 12, 600)
 			if errMsg := agent.ExtractQuotaError(delta, ""); errMsg != "" {
 				e.mu.Lock()
 				if cur := e.workerTurns[w.Name]; cur != nil {
@@ -580,15 +582,50 @@ func (e *Engine) checkWorkerStartupHealth(ctx context.Context, w *model.Worker, 
 	idemKey := fmt.Sprintf("worker-startup-unconfirmed:%s:%s:%d", w.Name, paneID, deliveredSeq)
 	var msg string
 	if e.isAPIRouterMode() {
-		msg = fmt.Sprintf("worker %s has not confirmed starting batch (%s)%s after %ds (pane remains %s with no transcript or error output). Inspect with read_detail(kind=\"worker\", target=%q) or call manage_work(action=\"stop_worker\", target=%q) and re-dispatch; avoid blindly resending to the same pane.",
+		msg = fmt.Sprintf("worker %s has not confirmed starting batch (%s)%s after %ds (pane remains %s). Inspect with read_detail(kind=\"worker\", target=%q) or call manage_work(action=\"stop_worker\", target=%q) before deciding next steps; avoid blindly resending to the same pane.",
 			w.Name, orStr(batchDesc, marker), wiTag, int(checkWindow.Seconds()), orStr(li.status, "idle"), w.Name, w.Name)
 	} else {
-		msg = fmt.Sprintf("worker %s has not confirmed starting batch (%s)%s after %ds (pane remains %s with no transcript or error output). Inspect with `%s show %s` or stop and re-dispatch; avoid blindly resending to the same pane.",
+		msg = fmt.Sprintf("worker %s has not confirmed starting batch (%s)%s after %ds (pane remains %s). Inspect with `%s show %s` or stop and re-dispatch; avoid blindly resending to the same pane.",
 			w.Name, orStr(batchDesc, marker), wiTag, int(checkWindow.Seconds()), orStr(li.status, "idle"), orStr(e.binPath, "corgi"), w.Name)
+	}
+	if screenTail != "" {
+		msg += "\nRecent pane output:\n" + screenTail
 	}
 	_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name, msg, idemKey, model.RouterName, w.Name, TriggerMeta{WorkItemID: w.WorkItemID})
 	e.addEvent(ctx, w.Thread, w.Name+" 派发后未确认启动，已通知大脑核查", w.Name, "error")
 	e.notifyChanged()
+}
+
+// compactScreenTail extracts up to maxLines trailing non-empty lines from a terminal screen
+// snapshot (bounded to maxRunes) so Router/humans can see real CLI errors on startup failures.
+func compactScreenTail(screen string, maxLines, maxRunes int) string {
+	raw := strings.Split(strings.ReplaceAll(screen, "\r\n", "\n"), "\n")
+	lines := make([]string, 0, len(raw))
+	for _, l := range raw {
+		t := strings.TrimSpace(l)
+		if t == "" {
+			continue
+		}
+		// Skip pure box-drawing separator bars.
+		if strings.Trim(t, "─━═-_= ") == "" {
+			continue
+		}
+		lines = append(lines, t)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	if maxLines > 0 && len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	joined := strings.Join(lines, "\n")
+	if maxRunes > 0 {
+		r := []rune(joined)
+		if len(r) > maxRunes {
+			joined = "…\n" + string(r[len(r)-maxRunes:])
+		}
+	}
+	return joined
 }
 
 func (e *Engine) rerouteFaultedWorkerTriggers(ctx context.Context, w *model.Worker, list []*model.Trigger) {
