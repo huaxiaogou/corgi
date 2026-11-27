@@ -2,7 +2,9 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -782,6 +784,42 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"machines":                    machines,
 		"hook_key":                    hookKey,
 	})
+}
+
+func (s *Server) handleWeComFocusClear(w http.ResponseWriter, r *http.Request) {
+	if !s.isOwnerRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "仅控制台主人可操作企微直聊焦点"})
+		return
+	}
+	var body struct {
+		Key string `json:"key"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json: " + err.Error()})
+			return
+		}
+	}
+	key := strings.TrimSpace(body.Key)
+	if key != "" {
+		if !strings.HasPrefix(key, core.WeComFocusKVPrefix) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid wecom focus key"})
+			return
+		}
+		cleared, err := s.Engine.ClearWeComFocus(r.Context(), key)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cleared": cleared})
+		return
+	}
+	removed, err := s.Engine.ClearAllWeComFocuses(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cleared": removed > 0, "removed": removed})
 }
 
 func (s *Server) handleWeComApprove(w http.ResponseWriter, r *http.Request) {

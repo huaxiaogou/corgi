@@ -194,6 +194,7 @@ func (s *Server) registerSuperRoutes(mux *http.ServeMux, api func(string, http.H
 	api("GET /api/super/settings", s.handleGetSettings)
 	api("POST /api/super/settings", s.handleSaveSettings)
 	api("POST /api/super/wecom/approve", s.handleWeComApprove)
+	api("POST /api/super/wecom/focus/clear", s.handleWeComFocusClear)
 	api("GET /api/super/memory", s.handleGetMemory)
 	api("POST /api/super/memory", s.handleSaveMemory)
 	api("POST /api/super/dream", s.handleStartDream)

@@ -930,3 +930,95 @@ func TestSuperWorkItemsPaginationSearchReopenAndClearNextStepHTTP(t *testing.T) 
 		t.Fatalf("after reopen want 2 open & 2 closed, got open=%d closed=%d", len(snap2.WorkItems), snap2.ClosedWorkCount)
 	}
 }
+
+func TestWeComFocusClearEndpointOwnerAuthAndSilentReset(t *testing.T) {
+	srv, master := newTestServer(t)
+	h := srv.Routes()
+	ctx := context.Background()
+
+	// Pair a remote machine device token via AuthManager to verify non-owner callers get 403.
+	code, _ := srv.Auth.NewCode("machine")
+	_, machineToken, err := srv.Auth.Redeem(ctx, code, "machine", "MacBook", "darwin/arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := srv.Engine.SaveWeComFocus(ctx, "wecom_focus:u1", &core.WeComFocus{
+		Worker: "agy-3637", Title: "会话身份提醒", Kind: "agy",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Engine.SaveWeComFocus(ctx, "wecom_focus:grp-1:u1", &core.WeComFocus{
+		Worker: "grp-w", Title: "群直聊", Kind: "claude",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	doReq := func(method, url, token string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		var rdr *bytes.Reader
+		if body != nil {
+			b, _ := json.Marshal(body)
+			rdr = bytes.NewReader(b)
+		} else {
+			rdr = bytes.NewReader(nil)
+		}
+		req := httptest.NewRequest(method, url, rdr)
+		req.Header.Set("Authorization", "Bearer "+token)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. GET /api/super?thread=chat:main exposes active single-chat WeComFocus.
+	snapRec := doReq(http.MethodGet, "/api/super?thread=chat:main", master, nil)
+	if snapRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/super want 200, got %d", snapRec.Code)
+	}
+	var snap model.SuperView
+	if err := json.Unmarshal(snapRec.Body.Bytes(), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.WeComFocus == nil || snap.WeComFocus.Key != "wecom_focus:u1" || snap.WeComFocus.Worker != "agy-3637" {
+		t.Fatalf("expected active wecom_focus in snapshot, got %+v", snap.WeComFocus)
+	}
+
+	// 2. Machine token cannot clear WeCom focus (Owner auth required).
+	forbidRec := doReq(http.MethodPost, "/api/super/wecom/focus/clear", machineToken, map[string]any{"key": "wecom_focus:u1"})
+	if forbidRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for machine token, got %d body=%s", forbidRec.Code, forbidRec.Body.String())
+	}
+
+	// 3. Invalid key outside wecom_focus: namespace is rejected (400).
+	badKeyRec := doReq(http.MethodPost, "/api/super/wecom/focus/clear", master, map[string]any{"key": "settings"})
+	if badKeyRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-focus key, got %d body=%s", badKeyRec.Code, badKeyRec.Body.String())
+	}
+
+	// 4. Owner clears specific single focus key cleanly while group focus remains until clear-all.
+	clrRec := doReq(http.MethodPost, "/api/super/wecom/focus/clear", master, map[string]any{"key": "wecom_focus:u1"})
+	if clrRec.Code != http.StatusOK {
+		t.Fatalf("clear single focus want 200, got %d body=%s", clrRec.Code, clrRec.Body.String())
+	}
+	snapAfterRec := doReq(http.MethodGet, "/api/super?thread=chat:main", master, nil)
+	var snapAfter model.SuperView
+	_ = json.Unmarshal(snapAfterRec.Body.Bytes(), &snapAfter)
+	if snapAfter.WeComFocus != nil {
+		t.Fatalf("expected nil chat:main wecom_focus after clear, got %+v", snapAfter.WeComFocus)
+	}
+
+	// 5. Owner clears all remaining focuses with empty body.
+	clrAllRec := doReq(http.MethodPost, "/api/super/wecom/focus/clear", master, nil)
+	if clrAllRec.Code != http.StatusOK {
+		t.Fatalf("clear all focus want 200, got %d body=%s", clrAllRec.Code, clrAllRec.Body.String())
+	}
+	snapGrpRec := doReq(http.MethodGet, "/api/super?thread=wecom:grp-1", master, nil)
+	var snapGrp model.SuperView
+	_ = json.Unmarshal(snapGrpRec.Body.Bytes(), &snapGrp)
+	if snapGrp.WeComFocus != nil {
+		t.Fatalf("expected nil group wecom_focus after clear-all, got %+v", snapGrp.WeComFocus)
+	}
+}

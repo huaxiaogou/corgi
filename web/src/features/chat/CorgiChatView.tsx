@@ -8,6 +8,7 @@ import { MarkdownText } from "../../components/MarkdownText";
 import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { QuoteBlock } from "../../components/QuoteBlock";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
+import { formatWeComFocusBanner } from "../../lib/agentIdentity";
 import { api } from "../../lib/api";
 import {
   isDecisionAction,
@@ -98,6 +99,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const [searchHits, setSearchHits] = useState<{ id: string; role: string; snippet: string }[]>([]);
   const [pinnedOpen, setPinnedOpen] = useState(false);
   const [inboxOpen, setInboxOpen] = useState(false);
+  const [clearingWeComFocus, setClearingWeComFocus] = useState(false);
   const [inboxFilter, setInboxFilter] = useState("all");
   const [inboxSearch, setInboxSearch] = useState("");
   const [activeFloatingId, setActiveFloatingId] = useState("");
@@ -433,6 +435,22 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
     else updateNotebookMode("hidden");
   };
 
+  const wecomFocus = data?.wecom_focus;
+  const wecomFocusLabel = formatWeComFocusBanner(wecomFocus);
+
+  const clearWeComFocus = async () => {
+    if (!wecomFocus || clearingWeComFocus) return;
+    setClearingWeComFocus(true);
+    try {
+      await api("/api/super/wecom/focus/clear", { key: wecomFocus.key });
+      onToast("已将企微切回 Corgi 主对话");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "切回企微焦点失败");
+    } finally {
+      setClearingWeComFocus(false);
+    }
+  };
+
   return (
     <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
       <ChatHeader
@@ -450,6 +468,23 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
         onTogglePause={() => void togglePause()}
         onOpenRouterPane={onSelectWorker}
       />
+
+      {wecomFocus && wecomFocusLabel && (
+        <div className="px-5 py-1.5 border-b border-hairline surface-rail shrink-0 flex items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: "var(--attn)" }} />
+            <span className="text-secondary truncate">{wecomFocusLabel}</span>
+          </div>
+          <button
+            type="button"
+            disabled={clearingWeComFocus}
+            onClick={() => void clearWeComFocus()}
+            className="px-2 py-0.5 rounded-md border border-strong surface-bg surface-hover text-primary font-medium cursor-pointer shrink-0 disabled:opacity-50"
+          >
+            {clearingWeComFocus ? "切回中…" : "切回 Corgi"}
+          </button>
+        </div>
+      )}
 
       {searchOpen && (
         <div className="px-5 py-2.5 border-b border-hairline surface-rail space-y-2">

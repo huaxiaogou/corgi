@@ -1,4 +1,4 @@
-import type { AgentView } from "../types/api";
+import type { AgentView, WeComFocusView } from "../types/api";
 
 export type IdentityPane = Pick<AgentView, "pane_id" | "name" | "topic" | "workspace_label" | "kind" | "is_agent">;
 
@@ -168,4 +168,17 @@ export function formatAgentSpeakerLabel(opts: {
   if (machine) parts.push(machine);
   if (parts.length > 0) return parts.join(" · ");
   return opts.isAgent === false ? "终端" : "Agent";
+}
+
+export function formatWeComFocusBanner(
+  focus: Pick<WeComFocusView, "worker" | "title"> | null | undefined
+): string {
+  if (!focus || !focus.worker.trim()) return "";
+  const worker = focus.worker.trim();
+  const handle = worker.startsWith("#") ? worker : `#${worker}`;
+  const title = (focus.title ?? "").trim();
+  if (title && title.toLowerCase() !== worker.toLowerCase() && !title.includes(handle)) {
+    return `企微正在直聊 · ${title} (${handle})`;
+  }
+  return `企微正在直聊 · ${handle}`;
 }

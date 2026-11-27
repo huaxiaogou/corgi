@@ -195,3 +195,19 @@ test("formatDocumentTitle, formatMobileAgentBar, formatAgentComposerContext, and
     "Corgi 底层终端 · claude"
   );
 });
+
+test("formatWeComFocusBanner renders concise status line without forbidden copy", async () => {
+  const { formatWeComFocusBanner } = await loadModule("src/lib/agentIdentity.ts");
+
+  const cases = [
+    { focus: null, want: "" },
+    { focus: { worker: "agy-3637", title: "会话身份提醒" }, want: "企微正在直聊 · 会话身份提醒 (#agy-3637)" },
+    { focus: { worker: "agy-3637", title: "agy-3637" }, want: "企微正在直聊 · #agy-3637" },
+    { focus: { worker: "api-profiler", title: "" }, want: "企微正在直聊 · #api-profiler" },
+  ];
+  for (const tc of cases) {
+    const got = formatWeComFocusBanner(tc.focus);
+    assert.equal(got, tc.want);
+    assertNoForbiddenCopy("wecomFocusBanner", got);
+  }
+});

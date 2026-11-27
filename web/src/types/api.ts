@@ -183,6 +183,20 @@ export interface FollowView {
   next_text: string;
 }
 
+export interface WeComFocusView {
+  key: string;
+  scope: "single" | "group" | string;
+  worker: string;
+  title?: string;
+  machine?: string;
+  kind?: string;
+  session?: string;
+  work_item_id?: string;
+  entered_at: string;
+  updated_at: string;
+  expires_at: string;
+}
+
 export interface QueuedPrompt {
   id: string;
   seq?: number;
@@ -241,6 +255,7 @@ export interface SuperView {
   chat_queue_paused?: boolean;
   paused: boolean;
   wecom_online: boolean;
+  wecom_focus?: WeComFocusView;
   follow?: FollowView;
 }
 
