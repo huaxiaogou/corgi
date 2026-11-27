@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Hash, Moon, Pin, Plus, Settings as SettingsIcon, Sun, X } from "lucide-react";
+import { isInternalCorgiPane } from "../lib/agentIdentity";
 import { api } from "../lib/api";
 import { isDecisionAction } from "../lib/chatFilter";
 import type { AgentView, Machine, SuperView } from "../types/api";
@@ -62,14 +63,8 @@ export function Sidebar({
     return () => window.clearInterval(t);
   }, []);
 
-  const isInternalPane = (a: AgentView) =>
-    a.name === "corgi" ||
-    a.name === "corgi-dream" ||
-    a.workspace_label === "corgi · router" ||
-    a.workspace_label === "corgi · dream" ||
-    Boolean(a.workspace_label?.startsWith("corgi · dream · "));
-  const visibleAgents = agents.filter((a) => !isInternalPane(a));
-  const visibleShells = shells.filter((s) => !isInternalPane(s));
+  const visibleAgents = agents.filter((a) => !isInternalCorgiPane(a));
+  const visibleShells = shells.filter((s) => !isInternalCorgiPane(s));
   const blocked = visibleAgents.filter((a) => a.status === "blocked");
   const running = visibleAgents.filter(
     (a) => a.status === "working" || a.status === "starting" || a.status === "waiting"
@@ -211,7 +206,7 @@ export function Sidebar({
                 type="button"
                 onClick={() => pick({ view: "agent", paneId: a.pane_id })}
                 className={`w-full px-2.5 py-2 rounded-xl flex items-center justify-between gap-2 text-left cursor-pointer ${
-                  route.view === "agent" && route.paneId === a.pane_id ? "surface-active" : "surface-hover"
+                  route.view === "agent" && route.paneId === a.pane_id ? "sidebar-direct-focus" : "surface-hover"
                 }`}
               >
                 <div className="flex items-center gap-2 min-w-0">
@@ -239,7 +234,7 @@ export function Sidebar({
               type="button"
               onClick={() => pick({ view: "agent", paneId: a.pane_id })}
               className={`w-full px-2.5 py-2 rounded-xl flex items-center justify-between gap-2 text-left cursor-pointer ${
-                route.view === "agent" && route.paneId === a.pane_id ? "surface-active" : "surface-hover"
+                route.view === "agent" && route.paneId === a.pane_id ? "sidebar-direct-focus" : "surface-hover"
               }`}
             >
               <div className="flex items-center gap-2 min-w-0">
@@ -276,7 +271,7 @@ export function Sidebar({
                     if (e.key === "Enter" || e.key === " ") pick({ view: "agent", paneId: a.pane_id });
                   }}
                   className={`group w-full px-2.5 py-2 rounded-xl flex items-center justify-between gap-2 text-left cursor-pointer ${
-                    route.view === "agent" && route.paneId === a.pane_id ? "surface-active" : "surface-hover"
+                    route.view === "agent" && route.paneId === a.pane_id ? "sidebar-direct-focus" : "surface-hover"
                   }`}
                 >
                   <div className="flex items-center gap-2 min-w-0">
@@ -321,7 +316,7 @@ export function Sidebar({
                 type="button"
                 onClick={() => pick({ view: "agent", paneId: s.pane_id })}
                 className={`w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2 text-left cursor-pointer ${
-                  route.view === "agent" && route.paneId === s.pane_id ? "surface-active" : "surface-hover"
+                  route.view === "agent" && route.paneId === s.pane_id ? "sidebar-direct-focus" : "surface-hover"
                 }`}
               >
                 <AgentGlyph kind="shell" className="w-3.5 h-3.5 text-muted shrink-0" />

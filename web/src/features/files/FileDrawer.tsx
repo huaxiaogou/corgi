@@ -17,7 +17,7 @@ import { SplitResizer } from "./SplitResizer";
 interface Props {
   target: FileDrawerTarget | null;
   onClose: () => void;
-  onJumpWorker?: (ref: EntryWorkerRef) => void;
+  onJumpWorker?: (ref: EntryWorkerRef) => void | boolean | Promise<boolean | void>;
 }
 
 const WIDTH_STORAGE_KEY_HTML = "corgi.preview.width.html";
@@ -321,7 +321,13 @@ export function FileDrawer({ target, onClose, onJumpWorker }: Props) {
             </span>
             <button
               type="button"
-              onClick={() => onJumpWorker(target.workerRef!)}
+              onClick={() => {
+                void Promise.resolve(onJumpWorker(target.workerRef!)).then((ok) => {
+                  if (!isDesktop && ok !== false) {
+                    onClose();
+                  }
+                });
+              }}
               className="px-2.5 py-1 rounded-lg btn-accent text-[11.5px] font-medium cursor-pointer shrink-0"
             >
               继续问这个 Worker →

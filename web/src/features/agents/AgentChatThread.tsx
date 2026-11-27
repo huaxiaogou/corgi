@@ -1,6 +1,7 @@
 import { Terminal } from "lucide-react";
-import { StatusDot } from "../../components/CorgiMark";
+import { AgentGlyph, CorgiMark, StatusDot } from "../../components/CorgiMark";
 import { MarkdownText } from "../../components/MarkdownText";
+import { formatAgentSpeakerLabel } from "../../lib/agentIdentity";
 import type { Approval, ChatMessage } from "../../types/api";
 
 export interface PendingPrompt {
@@ -22,6 +23,10 @@ interface Props {
   liveMeta: string;
   setupHint: boolean;
   isAgent: boolean;
+  agentName?: string;
+  agentKind?: string;
+  agentMachine?: string;
+  isCorgiBrain?: boolean;
   onLoadEarlier: () => void;
   onPickAskOption: (opt: string) => void;
   onAnswerApproval: (choice: Approval["choices"][number], index: number) => void;
@@ -41,6 +46,10 @@ export function AgentChatThread({
   liveMeta,
   setupHint,
   isAgent,
+  agentName,
+  agentKind,
+  agentMachine,
+  isCorgiBrain = false,
   onLoadEarlier,
   onPickAskOption,
   onAnswerApproval,
@@ -48,6 +57,13 @@ export function AgentChatThread({
   onSwitchToScreen,
   onOpenFile,
 }: Props) {
+  const speakerLabel = formatAgentSpeakerLabel({
+    name: agentName,
+    kind: agentKind,
+    machine: agentMachine,
+    isAgent,
+    isCorgiBrain,
+  });
   if (messages.length === 0 && pendingPrompts.length === 0 && !approval && liveStatus !== "working") {
     return (
       <div className="max-w-[740px] mx-auto py-16 text-center space-y-3">
@@ -142,8 +158,20 @@ export function AgentChatThread({
           );
         }
         return (
-          <div key={idx} className="text-[14.5px]">
-            <MarkdownText text={m.text ?? ""} onOpenFile={onOpenFile} />
+          <div key={idx} className="flex items-start gap-3">
+            <div className="w-7 h-7 rounded-lg border border-hairline surface-rail flex items-center justify-center shrink-0 mt-0.5 text-secondary">
+              {isCorgiBrain ? (
+                <CorgiMark className="w-4 h-4" />
+              ) : (
+                <AgentGlyph kind={agentKind || "agy"} isAgent={isAgent} className="w-4 h-4" />
+              )}
+            </div>
+            <div className="flex-1 min-w-0 space-y-1">
+              <div className="text-[11px] font-mono-code text-muted truncate">{speakerLabel}</div>
+              <div className="text-[14.5px]">
+                <MarkdownText text={m.text ?? ""} onOpenFile={onOpenFile} />
+              </div>
+            </div>
           </div>
         );
       })}

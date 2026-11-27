@@ -618,10 +618,12 @@ export function WorkNotebook({
                     <button
                       type="button"
                       onClick={() => onOpenWorker(w.name)}
+                      title={`进入 #${w.name} 直聊`}
                       className="inline-flex items-center gap-1 px-1.5 py-0.5 surface-hover cursor-pointer"
                     >
                       <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: dotBg(w.status) }} />
                       <span>{w.name}</span>
+                      <span className="text-muted text-[9.5px]" aria-hidden="true">↗</span>
                     </button>
                     <button
                       type="button"
