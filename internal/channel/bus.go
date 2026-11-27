@@ -41,16 +41,17 @@ type Bus struct {
 	sendFileFn      func(ctx context.Context, chatID, filename string, data []byte) error
 	sendStreamFn    wecom.StreamSendFunc
 
-	mu              sync.Mutex
-	flushMu         sync.Mutex
-	chatSendMu      map[string]*sync.Mutex
-	subs            map[chan struct{}]struct{}
-	outbox          map[string][]outboxItem
-	routerStreams   map[string]*activeWeComStream
-	seenWeComMsgs   map[string]time.Time
-	pendingWebQuote map[string]string
-	webSeenAt       time.Time
-	wecomActiveAt   time.Time
+	mu                sync.Mutex
+	flushMu           sync.Mutex
+	chatSendMu        map[string]*sync.Mutex
+	subs              map[chan struct{}]struct{}
+	outbox            map[string][]outboxItem
+	routerStreams     map[string][]*activeWeComStream
+	lastRouterReplyAt map[string]time.Time
+	seenWeComMsgs     map[string]time.Time
+	pendingWebQuote   map[string]string
+	webSeenAt         time.Time
+	wecomActiveAt     time.Time
 }
 
 // NewBus wires the Super-Agent Engine to Web SSE subscribers and the WeCom client.
@@ -59,16 +60,17 @@ func NewBus(eng *core.Engine, wc *wecom.Client, logger *slog.Logger) *Bus {
 		logger = slog.Default()
 	}
 	b := &Bus{
-		engine:          eng,
-		wecom:           wc,
-		logger:          logger,
-		flushDelay:      20 * time.Second,
-		chatSendMu:      map[string]*sync.Mutex{},
-		subs:            map[chan struct{}]struct{}{},
-		outbox:          map[string][]outboxItem{},
-		routerStreams:   map[string]*activeWeComStream{},
-		seenWeComMsgs:   map[string]time.Time{},
-		pendingWebQuote: map[string]string{},
+		engine:            eng,
+		wecom:             wc,
+		logger:            logger,
+		flushDelay:        20 * time.Second,
+		chatSendMu:        map[string]*sync.Mutex{},
+		subs:              map[chan struct{}]struct{}{},
+		outbox:            map[string][]outboxItem{},
+		routerStreams:     map[string][]*activeWeComStream{},
+		lastRouterReplyAt: map[string]time.Time{},
+		seenWeComMsgs:     map[string]time.Time{},
+		pendingWebQuote:   map[string]string{},
 	}
 	if wc != nil {
 		b.sendFn = wc.SendMarkdown
@@ -404,6 +406,7 @@ func formatPreviewLinksBlock(attachments []core.AttachmentFile) string {
 func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Action, attachments []core.AttachmentFile) core.ReplyDelivery {
 	chatID := threadToWeComChat(entry.Thread)
 	now := time.Now()
+	b.recordRouterReplyAt(entry.Thread, now)
 	suppress, wecomRecent := b.wecomDeliveryState(entry.Thread, now)
 	hasExplicitFiles := len(attachments) > 0 || len(entry.Files) > 0
 	linksBlock := formatPreviewLinksBlock(attachments)

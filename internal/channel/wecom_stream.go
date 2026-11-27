@@ -45,22 +45,12 @@ func (b *Bus) canSendStream() bool {
 	return true
 }
 
+const maxOpenRouterStreamsPerThread = 5
+
 func (b *Bus) startRouterStream(ctx context.Context, thread, chatID, reqID string) *activeWeComStream {
 	reqID = strings.TrimSpace(reqID)
 	if reqID == "" || !b.canSendStream() {
 		return nil
-	}
-	// If an earlier Router stream for this thread is still open (user sent a follow-up quickly),
-	// seal it cleanly before opening the new stream bound to the latest req_id.
-	b.mu.Lock()
-	if b.routerStreams == nil {
-		b.routerStreams = map[string]*activeWeComStream{}
-	}
-	prev := b.routerStreams[thread]
-	delete(b.routerStreams, thread)
-	b.mu.Unlock()
-	if prev != nil {
-		prev.seal(context.Background(), "", "已收到补充消息，将在下一条合并回复。")
 	}
 
 	watchCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
@@ -93,9 +83,23 @@ func (b *Bus) startRouterStream(ctx context.Context, thread, chatID, reqID strin
 		return nil
 	}
 
+	// Keep concurrent open streams in strict FIFO order per thread so rapid back-to-back
+	// unrelated questions each retain their own stream and seal 1-to-1 when Router replies.
+	var evicted *activeWeComStream
 	b.mu.Lock()
-	b.routerStreams[thread] = st
+	if b.routerStreams == nil {
+		b.routerStreams = map[string][]*activeWeComStream{}
+	}
+	q := append(b.routerStreams[thread], st)
+	if len(q) > maxOpenRouterStreamsPerThread {
+		evicted = q[0]
+		q = append([]*activeWeComStream(nil), q[1:]...)
+	}
+	b.routerStreams[thread] = q
 	b.mu.Unlock()
+	if evicted != nil {
+		_, _ = evicted.seal(context.Background(), "", "仍在后台处理中，完成后会自动发给你。")
+	}
 
 	go b.watchRouterStream(watchCtx, st)
 	return st
@@ -261,15 +265,36 @@ func (st *activeWeComStream) seal(ctx context.Context, think, body string) (bool
 	return st.session.Finish(sctx, think, body)
 }
 
+func (b *Bus) recordRouterReplyAt(thread string, at time.Time) {
+	if thread == "" {
+		return
+	}
+	b.mu.Lock()
+	if b.lastRouterReplyAt == nil {
+		b.lastRouterReplyAt = map[string]time.Time{}
+	}
+	b.lastRouterReplyAt[thread] = at
+	b.mu.Unlock()
+}
+
+func (b *Bus) routerReplyAt(thread string) time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastRouterReplyAt[thread]
+}
+
 func (b *Bus) takeRouterStream(thread string) *activeWeComStream {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.routerStreams == nil {
+	q := b.routerStreams[thread]
+	if len(q) == 0 {
 		return nil
 	}
-	st := b.routerStreams[thread]
-	if st != nil {
+	st := q[0]
+	if len(q) == 1 {
 		delete(b.routerStreams, thread)
+	} else {
+		b.routerStreams[thread] = append([]*activeWeComStream(nil), q[1:]...)
 	}
 	return st
 }
@@ -304,12 +329,26 @@ func (b *Bus) watchRouterStream(ctx context.Context, st *activeWeComStream) {
 			if think, _ := st.pollLocalThink(ctx, recheck); think != "" {
 				_ = st.session.SendProgress(ctx, think, "", false)
 			}
-			// Only auto-seal a silent Router turn after prolonged, verified continuous idle
+			if b.engine == nil {
+				continue
+			}
+			idle := b.engine.RouterContinuousIdle()
+			// If Router genuinely merged 2 consecutive user messages into a single reply
+			// (a reply landed after st.startedAt) and Router has now stayed idle >= 8s with
+			// no queued triggers left, cleanly close the leftover extra stream.
+			if replyAt := b.routerReplyAt(st.thread); replyAt.After(st.startedAt) &&
+				time.Since(replyAt) >= 8*time.Second &&
+				idle >= 8*time.Second &&
+				!b.engine.HasQueuedRouterTriggers(ctx) {
+				b.clearRouterStreamIfMatch(st)
+				_, _ = st.seal(ctx, "", "已合并回复于上一条。")
+				return
+			}
+			// Otherwise only auto-seal a silent Router turn after prolonged, verified continuous idle
 			// (never on brief 3s tool-call flickers).
-			if b.engine != nil &&
-				time.Since(st.startedAt) >= 45*time.Second &&
+			if time.Since(st.startedAt) >= 45*time.Second &&
 				st.idleSinceChange() >= 15*time.Second &&
-				b.engine.RouterContinuousIdle() >= 30*time.Second &&
+				idle >= 30*time.Second &&
 				!b.engine.HasQueuedRouterTriggers(ctx) {
 				b.clearRouterStreamIfMatch(st)
 				_, _ = st.seal(ctx, "", "已处理，如需进一步操作请告诉我。")
@@ -324,8 +363,17 @@ func (b *Bus) clearRouterStreamIfMatch(st *activeWeComStream) {
 		return
 	}
 	b.mu.Lock()
-	if b.routerStreams[st.thread] == st {
-		delete(b.routerStreams, st.thread)
+	q := b.routerStreams[st.thread]
+	for i, cur := range q {
+		if cur == st {
+			q = append(q[:i], q[i+1:]...)
+			if len(q) == 0 {
+				delete(b.routerStreams, st.thread)
+			} else {
+				b.routerStreams[st.thread] = q
+			}
+			break
+		}
 	}
 	b.mu.Unlock()
 }

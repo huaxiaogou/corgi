@@ -101,8 +101,8 @@ func TestWeComRouterStreamSealsOnReplyWithoutDuplicateMarkdown(t *testing.T) {
 	_ = eng
 }
 
-func TestWeComConsecutiveMessagesSealPreviousRouterStream(t *testing.T) {
-	_, bus, streams, _, mu := openWeComStreamTestEnv(t)
+func TestWeComConsecutiveMessagesKeepIndependentFIFOStreams(t *testing.T) {
+	_, bus, streams, markdowns, mu := openWeComStreamTestEnv(t)
 	ctx := context.Background()
 
 	bus.HandleWeComMessage(ctx, wecom.IncomingMessage{
@@ -111,7 +111,7 @@ func TestWeComConsecutiveMessagesSealPreviousRouterStream(t *testing.T) {
 		ChatType: "single",
 		ChatID:   "U1",
 		FromUser: "U1",
-		Text:     "第一问",
+		Text:     "原型什么进展了",
 	})
 	bus.HandleWeComMessage(ctx, wecom.IncomingMessage{
 		ReqID:    "req-2",
@@ -119,19 +119,33 @@ func TestWeComConsecutiveMessagesSealPreviousRouterStream(t *testing.T) {
 		ChatType: "single",
 		ChatID:   "U1",
 		FromUser: "U1",
-		Text:     "补充一句",
+		Text:     "太湖最新方案是什么",
 	})
+
+	// Neither stream is prematurely sealed with "已收到补充消息，将在下一条合并回复".
+	mu.Lock()
+	if len(*streams) != 2 || (*streams)[0].finish || (*streams)[1].finish {
+		t.Fatalf("expected 2 open interim streams without premature merge notice, got %+v", *streams)
+	}
+	mu.Unlock()
+
+	// Router replies independently to question 1 then question 2 -> strict 1-to-1 FIFO stream sealing!
+	bus.OnReply(ctx, &model.Entry{ID: "e1", Thread: model.MainThread, Text: "原型制作中"}, nil, nil)
+	bus.OnReply(ctx, &model.Entry{ID: "e2", Thread: model.MainThread, Text: "太湖推荐方案 A"}, nil, nil)
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*streams) != 3 {
-		t.Fatalf("expected 3 frames (req-1 init, req-1 seal, req-2 init), got %d: %+v", len(*streams), *streams)
+	if len(*markdowns) != 0 {
+		t.Fatalf("expected 0 fallback markdowns when 2 streams seal 1-to-1, got %+v", *markdowns)
 	}
-	if (*streams)[1].reqID != "req-1" || !(*streams)[1].finish {
-		t.Fatalf("expected req-1 to be sealed before opening req-2, got %+v", (*streams)[1])
+	if len(*streams) != 4 {
+		t.Fatalf("expected 4 frames (req-1 init, req-2 init, req-1 fin, req-2 fin), got %d: %+v", len(*streams), *streams)
 	}
-	if (*streams)[2].reqID != "req-2" || (*streams)[2].finish {
-		t.Fatalf("expected req-2 open interim frame, got %+v", (*streams)[2])
+	if (*streams)[2].reqID != "req-1" || !(*streams)[2].finish || !strings.Contains((*streams)[2].content, "原型制作中") {
+		t.Fatalf("expected first reply to seal req-1, got %+v", (*streams)[2])
+	}
+	if (*streams)[3].reqID != "req-2" || !(*streams)[3].finish || !strings.Contains((*streams)[3].content, "太湖推荐方案 A") {
+		t.Fatalf("expected second reply to seal req-2, got %+v", (*streams)[3])
 	}
 }
 
@@ -242,7 +256,10 @@ func TestRouterStreamNotPrematurelySealedAndCapturesFinalThink(t *testing.T) {
 
 	// Attach the transcript reader baseline as Hub would, then append fast-turn reasoning + Bash call.
 	bus.mu.Lock()
-	st := bus.routerStreams[model.MainThread]
+	var st *activeWeComStream
+	if q := bus.routerStreams[model.MainThread]; len(q) > 0 {
+		st = q[0]
+	}
 	bus.mu.Unlock()
 	if st == nil {
 		t.Fatal("expected active router stream")
