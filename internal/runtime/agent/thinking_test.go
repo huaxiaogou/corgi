@@ -94,3 +94,57 @@ func TestLastAssistantAfterLastUserDoesNotLeakStaleTurn(t *testing.T) {
 		t.Fatalf("expected fresh answer after latest user turn, got ok=%v txt=%q", ok, txt)
 	}
 }
+
+func TestCodexToolErrorParsingAndBoundedTurnToolStats(t *testing.T) {
+	ad := &CodexAdapter{}
+	// Array-wrapped JSON output with non-zero exit_code -> Error: true.
+	failLine := []byte(`{"type":"response_item","payload":{"type":"function_call_output","output":[{"type":"input_text","text":"Script completed\nOutput:\n"},{"type":"input_text","text":"{\"chunk_id\":\"1\",\"exit_code\":1,\"output\":\"FAIL\"}"}]}}`)
+	msgs, ok := ad.ParseTranscriptLine(failLine, "")
+	if !ok || len(msgs) != 1 || !msgs[0].Error {
+		t.Fatalf("expected codex exit_code=1 parsed as Error=true, got ok=%v msgs=%+v", ok, msgs)
+	}
+	// exit_code=0 -> Error: false.
+	okLine := []byte(`{"type":"response_item","payload":{"type":"function_call_output","output":[{"type":"input_text","text":"{\"chunk_id\":\"2\",\"exit_code\":0,\"output\":\"PASS\"}"}]}}`)
+	msgs2, ok := ad.ParseTranscriptLine(okLine, "")
+	if !ok || len(msgs2) != 1 || msgs2[0].Error {
+		t.Fatalf("expected codex exit_code=0 parsed as Error=false, got ok=%v msgs=%+v", ok, msgs2)
+	}
+
+	// Build a CodeBuddy transcript with an old turn failure followed by a new turn alternating
+	// edit(ok) -> test(fail) x4 (8 tool results + 8 tool calls = 16 tool messages).
+	p := filepath.Join(t.TempDir(), "thrash.jsonl")
+	var lines []byte
+	appendLine := func(s string) { lines = append(lines, []byte(s+"\n")...) }
+	appendLine(`{"type":"message","role":"user","content":[{"type":"input_text","text":"old turn"}]}`)
+	appendLine(`{"type":"function_call_result","name":"Bash","status":"error","output":"old err"}`)
+	appendLine(`{"type":"message","role":"user","content":[{"type":"input_text","text":"fix tests"}]}`)
+	for i := 0; i < 4; i++ {
+		appendLine(`{"type":"function_call","name":"Edit","arguments":{"file_path":"a.go"}}`)
+		appendLine(`{"type":"function_call_result","name":"Edit","status":"success","output":"edited"}`)
+		appendLine(`{"type":"function_call","name":"Bash","arguments":{"command":"go test"}}`)
+		appendLine(`{"type":"function_call_result","name":"Bash","status":"error","output":"FAIL"}`)
+	}
+	if err := os.WriteFile(p, lines, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stats := ComputeTurnToolStats(p, &CodeBuddyAdapter{}, 1<<20)
+	if stats == nil {
+		t.Fatal("expected non-nil ToolStats")
+	}
+	// Calls must NOT be counted; LastUserAt must still be recorded when hitting windowSize=8.
+	if stats.N != 8 || stats.Failed != 4 || stats.TrailingFailed != 1 || stats.LastFailureAt <= 0 || stats.LastUserAt <= 0 {
+		t.Fatalf("unexpected tool stats: %+v", stats)
+	}
+
+	// Verify a fresh turn with fewer than 8 results stops strictly at the latest user turn
+	// and never leaks failures from prior turns.
+	appendLine(`{"type":"message","role":"user","content":[{"type":"input_text","text":"new clean turn"}]}`)
+	appendLine(`{"type":"function_call_result","name":"Edit","status":"success","output":"ok"}`)
+	if err := os.WriteFile(p, lines, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cleanStats := ComputeTurnToolStats(p, &CodeBuddyAdapter{}, 1<<20)
+	if cleanStats == nil || cleanStats.N != 1 || cleanStats.Failed != 0 || cleanStats.LastUserAt <= stats.LastUserAt {
+		t.Fatalf("expected clean turn isolated from prior failures, got %+v", cleanStats)
+	}
+}

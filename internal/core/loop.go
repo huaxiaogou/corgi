@@ -141,8 +141,9 @@ func (e *Engine) tick(parent context.Context) {
 	e.deliverQueued(ctx, live, scanned)
 	e.drainPanePrompts(ctx, rawAgents)
 
-	// 6. Watchdog for stalled workers and zero-token gated idle patrol / morning digest.
+	// 6. Watchdog for stalled/thrashing workers and zero-token gated idle patrol / morning digest.
 	e.checkStalls(ctx, live, now)
+	e.checkWorkerThrash(ctx, live, now)
 	e.checkIdlePatrol(ctx, live, now)
 
 	// 7. Optional overnight idle auto-update after tonight's scheduled Dream succeeds/skips.
@@ -645,6 +646,14 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 	e.mu.Unlock()
 
 	var b strings.Builder
+	var workerConstraint string
+	if target != model.RouterName {
+		if wk, wErr := e.store.GetWorker(ctx, target); wErr == nil && wk != nil && strings.TrimSpace(wk.Constraint) != "" {
+			workerConstraint = strings.TrimSpace(wk.Constraint)
+			b.WriteString(FormatConstraintHeader(workerConstraint))
+			b.WriteString("\n\n")
+		}
+	}
 	if fresh {
 		b.WriteString(e.memory.SessionStartPreamble())
 		b.WriteString("\n")
@@ -737,6 +746,9 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 		e.routerTrueIdleSince = time.Time{}
 	}
 	e.mu.Unlock()
+	if workerConstraint != "" && paneID != "" {
+		e.markConstraintDelivered(paneID)
+	}
 
 	for _, t := range list {
 		t.Targets = removeStr(t.Targets, target)
@@ -899,7 +911,7 @@ func (e *Engine) checkStalls(ctx context.Context, live map[string]liveInfo, now 
 			continue
 		}
 		li, ok := live[w.Name]
-		if !ok || li.status != "working" {
+		if !ok || li.status != "working" || e.hasDirectTurn(w.Name) {
 			e.mu.Lock()
 			delete(e.lastScreen, w.Name)
 			e.mu.Unlock()

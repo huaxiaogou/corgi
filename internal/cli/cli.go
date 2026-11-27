@@ -280,6 +280,8 @@ func cmdSpawn(dir string, args []string) error {
 	noWorktree := fs.Bool("no-worktree", false, "disable automatic git worktree isolation")
 	work := fs.String("work", "", "attach worker to an existing open work item id")
 	project := fs.String("project", "", "project workspace id or name")
+	var constraints stringList
+	fs.Var(&constraints, "constraint", "immutable hard constraint/red-line for this worker session (repeatable)")
 	ephemeral := fs.Bool("ephemeral", false, "do not create a durable work item (one-off lookup only)")
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
@@ -294,10 +296,18 @@ func cmdSpawn(dir string, args []string) error {
 	} else if *noWorktree {
 		wtMode = "off"
 	}
+	var cleanConstraints []string
+	for _, c := range constraints {
+		if t := strings.TrimSpace(c); t != "" {
+			cleanConstraints = append(cleanConstraints, t)
+		}
+	}
 	body := map[string]any{
 		"kind": *kind, "machine": *machine, "cwd": *cwd, "thread": *thread,
 		"name": *name, "model": *modelName, "effort": *effort, "resume": *resume,
-		"worktree": wtMode, "work_id": *work, "project_id": *project, "ephemeral": *ephemeral, "task": task, "by": caller(),
+		"worktree": wtMode, "work_id": *work, "project_id": *project,
+		"constraint": strings.Join(cleanConstraints, "；"),
+		"ephemeral":  *ephemeral, "task": task, "by": caller(),
 	}
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "subscribe" {

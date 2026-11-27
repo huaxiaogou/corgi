@@ -51,6 +51,7 @@ type SpawnRequest struct {
 	WorkID          string `json:"work_id,omitempty"`
 	ProjectID       string `json:"project_id,omitempty"`
 	OriginalRequest string `json:"original_request,omitempty"`
+	Constraint      string `json:"constraint,omitempty"`
 	Ephemeral       bool   `json:"ephemeral,omitempty"`
 }
 
@@ -155,13 +156,15 @@ type Engine struct {
 	bypassStartRetryTimeout time.Duration
 	rereadTrigID            string
 
-	wakeCh        chan struct{}
-	queueMu       sync.Mutex
-	wtMu          sync.Mutex
-	pausedQueues  map[string]bool
-	drainCooldown map[string]time.Time
-	directTurns   map[string][]*pendingDirectTurn
-	directBgNotes []string
+	wakeCh             chan struct{}
+	queueMu            sync.Mutex
+	wtMu               sync.Mutex
+	pausedQueues       map[string]bool
+	drainCooldown      map[string]time.Time
+	directTurns        map[string][]*pendingDirectTurn
+	directBgNotes      []string
+	watchdogMarks      map[string]*watchdogMark
+	constraintRemindAt map[string]time.Time
 }
 
 // NewEngine constructs a Super-Agent Engine initialized from SQLite.
@@ -211,10 +214,12 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		bypassCheckedAt:  map[string]time.Time{},
 		bypassHealFailAt: map[string]time.Time{},
 		bypassHealedPID:  map[string]uint32{},
-		wakeCh:           make(chan struct{}, 1),
-		pausedQueues:     map[string]bool{},
-		drainCooldown:    map[string]time.Time{},
-		directTurns:      map[string][]*pendingDirectTurn{},
+		wakeCh:             make(chan struct{}, 1),
+		pausedQueues:       map[string]bool{},
+		drainCooldown:      map[string]time.Time{},
+		directTurns:        map[string][]*pendingDirectTurn{},
+		watchdogMarks:      map[string]*watchdogMark{},
+		constraintRemindAt: map[string]time.Time{},
 	}
 	eng.loadActiveDreamMarker(ctx)
 	return eng, nil

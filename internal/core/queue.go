@@ -97,8 +97,12 @@ func (e *Engine) SubmitPanePrompt(ctx context.Context, target, text, mode string
 		if e.fleet == nil {
 			return false, nil, fmt.Errorf("fleet not configured")
 		}
-		if err := e.fleet.Prompt(ctx, paneID, text); err != nil {
+		sendText, hadConstraint := e.decorateDirectPrompt(ctx, paneID, text)
+		if err := e.fleet.Prompt(ctx, paneID, sendText); err != nil {
 			return false, nil, err
+		}
+		if hadConstraint {
+			e.markConstraintDelivered(paneID)
 		}
 		e.setQueuePaused(paneID, false)
 		e.markDrainCooldown(paneID)
@@ -132,8 +136,12 @@ func (e *Engine) SubmitPanePrompt(ctx context.Context, target, text, mode string
 	if e.fleet == nil {
 		return false, nil, fmt.Errorf("fleet not configured")
 	}
-	if err := e.fleet.Prompt(ctx, paneID, text); err != nil {
+	sendText, hadConstraint := e.decorateDirectPrompt(ctx, paneID, text)
+	if err := e.fleet.Prompt(ctx, paneID, sendText); err != nil {
 		return false, nil, err
+	}
+	if hadConstraint {
+		e.markConstraintDelivered(paneID)
 	}
 	e.setQueuePaused(paneID, false)
 	e.markDrainCooldown(paneID)
@@ -154,8 +162,12 @@ func (e *Engine) SteerPanePrompt(ctx context.Context, target, qid string) (*mode
 	if e.fleet == nil {
 		return nil, fmt.Errorf("fleet not configured")
 	}
-	if err := e.fleet.Prompt(ctx, paneID, item.Text); err != nil {
+	sendText, hadConstraint := e.decorateDirectPrompt(ctx, paneID, item.Text)
+	if err := e.fleet.Prompt(ctx, paneID, sendText); err != nil {
 		return nil, err
+	}
+	if hadConstraint {
+		e.markConstraintDelivered(paneID)
 	}
 	_ = e.store.DeleteQueuedPrompt(ctx, item.ID)
 	e.setQueuePaused(item.Scope, false)
@@ -529,13 +541,17 @@ func (e *Engine) drainPanePrompts(ctx context.Context, rawAgents []model.Agent) 
 			continue
 		}
 		first := items[0]
-		if err := e.fleet.Prompt(ctx, paneID, first.Text); err != nil {
+		sendText, hadConstraint := e.decorateDirectPrompt(ctx, paneID, first.Text)
+		if err := e.fleet.Prompt(ctx, paneID, sendText); err != nil {
 			var he *herdr.Error
 			if errors.As(err, &he) && (he.Code == "agent_blocked" || he.Code == "agent_not_ready") {
 				continue
 			}
 			e.logger.Warn("drain pane queued prompt failed", "pane", paneID, "id", first.ID, "err", err)
 			continue
+		}
+		if hadConstraint {
+			e.markConstraintDelivered(paneID)
 		}
 		_ = e.store.DeleteQueuedPrompt(ctx, first.ID)
 		e.markDrainCooldown(paneID)

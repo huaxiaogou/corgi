@@ -130,12 +130,14 @@ func (s *Server) buildPaneState(ctx context.Context) model.PaneState {
 				v.IdleSince = wk.IdleSince
 				v.Keep = wk.Keep
 				v.CreatedBy = wk.CreatedBy
+				v.Constraint = wk.Constraint
 			} else if wk := workerByName[v.Name]; wk != nil {
 				v.WorktreeBranch = wk.WorktreeBranch
 				v.RepoRoot = wk.RepoRoot
 				v.IdleSince = wk.IdleSince
 				v.Keep = wk.Keep
 				v.CreatedBy = wk.CreatedBy
+				v.Constraint = wk.Constraint
 			}
 			st.Agents = append(st.Agents, v)
 		} else {
@@ -525,12 +527,21 @@ func (s *Server) handleStreamPane(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLastMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if r.URL.Query().Get("tool_stats") == "1" {
+		if tr, ad := s.readerForPane(ctx, id); tr != nil && ad != nil {
+			stats := agent.ComputeTurnToolStats(tr.Path(), ad, 1<<20)
+			writeJSON(w, http.StatusOK, map[string]any{"tool_stats": stats})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tool_stats": nil})
+		return
+	}
 	maxRunes := 1200
 	if r.URL.Query().Get("full") == "1" {
 		maxRunes = 128000
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
 	if tr, _ := s.readerForPane(ctx, id); tr != nil {
 		tr.OpenTail()
 		afterText, hasAfter := tr.LastAssistantAfterLastUser(maxRunes)

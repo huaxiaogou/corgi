@@ -123,14 +123,20 @@ func (s *Server) handleResumeHistory(w http.ResponseWriter, r *http.Request) {
 	if s.Engine != nil {
 		workID := strings.TrimSpace(target.WorkItemID)
 		modelName, effort := strings.TrimSpace(target.Model), strings.TrimSpace(target.Effort)
-		if workID == "" && target.Name != "" {
+		constraint := strings.TrimSpace(target.Constraint)
+		if (workID == "" || constraint == "") && target.Name != "" {
 			if old, wErr := s.Store.GetWorker(r.Context(), target.Name); wErr == nil && (old.Session == "" || old.Session == target.Session) {
-				workID = old.WorkItemID
+				if workID == "" {
+					workID = old.WorkItemID
+				}
 				if modelName == "" {
 					modelName = old.Model
 				}
 				if effort == "" {
 					effort = old.Effort
+				}
+				if constraint == "" {
+					constraint = old.Constraint
 				}
 			}
 		}
@@ -149,6 +155,7 @@ func (s *Server) handleResumeHistory(w http.ResponseWriter, r *http.Request) {
 			Effort:     effort,
 			SessionID:  target.Session,
 			WorkItemID: workID,
+			Constraint: constraint,
 		})
 		if lErr != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": lErr.Error()})

@@ -23,6 +23,11 @@ type capturedStreamFrame struct {
 }
 
 func openWeComStreamTestEnv(t *testing.T) (*core.Engine, *Bus, *[]capturedStreamFrame, *[]string, *sync.Mutex) {
+	eng, _, bus, streams, markdowns, mu := openWeComStreamTestEnvWithStore(t)
+	return eng, bus, streams, markdowns, mu
+}
+
+func openWeComStreamTestEnvWithStore(t *testing.T) (*core.Engine, *store.Store, *Bus, *[]capturedStreamFrame, *[]string, *sync.Mutex) {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "corgi.db"))
@@ -51,7 +56,7 @@ func openWeComStreamTestEnv(t *testing.T) (*core.Engine, *Bus, *[]capturedStream
 		return nil
 	}
 	bus.sendMarkdownACK = bus.sendFn
-	return eng, bus, &streams, &markdowns, &mu
+	return eng, st, bus, &streams, &markdowns, &mu
 }
 
 func TestWeComRouterStreamSealsOnReplyWithoutDuplicateMarkdown(t *testing.T) {
@@ -327,5 +332,53 @@ func TestLongSessionBeyond60MessagesStillStreamsLiveThink(t *testing.T) {
 	}
 	if strings.Contains(think, "hist q") || strings.Contains(think, "hist a") {
 		t.Fatalf("historical messages leaked into think: %q", think)
+	}
+}
+
+func TestWeComQuoteMainChatWhileFocusedRoutesOnceToRouter(t *testing.T) {
+	_, st, bus, streams, _, mu := openWeComStreamTestEnvWithStore(t)
+	ctx := context.Background()
+
+	// Seed a plain main-chat Corgi reply (no WorkerRef) and focus user on worker "taihu-plan".
+	if err := st.InsertEntry(ctx, &model.Entry{
+		ID:     "e-main-1",
+		Thread: model.MainThread,
+		Role:   "corgi",
+		Text:   "当前有 **4 项**待处理事项，其中太湖方案待审阅。",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	focusKey := wecomFocusKey("single", "U1", "U1")
+	bus.saveWeComFocus(ctx, focusKey, &wecomFocus{Worker: "taihu-plan", Title: "太湖方案"})
+
+	// While focused on taihu-plan, user quotes the plain main-chat Corgi reply (even without markdown
+	// and with WeCom truncation) -> should route ONCE to Corgi Router without clearing saved focus.
+	bus.HandleWeComMessage(ctx, wecom.IncomingMessage{
+		ReqID:     "req-quote-main",
+		MsgID:     "msg-quote-main",
+		ChatType:  "single",
+		ChatID:    "U1",
+		FromUser:  "U1",
+		Text:      "帮我把第 2 项先归档",
+		QuoteText: "当前有 4 项待处理事项，其中太湖方案...",
+	})
+
+	// Focus must remain intact on taihu-plan.
+	if f := bus.loadWeComFocus(ctx, focusKey); f == nil || f.Worker != "taihu-plan" {
+		t.Fatalf("expected saved focus taihu-plan untouched, got %+v", f)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*streams) != 1 || (*streams)[0].reqID != "req-quote-main" || !strings.Contains((*streams)[0].content, "正在思考并分析你的请求") {
+		t.Fatalf("expected message routed to Corgi Router stream, got %+v", *streams)
+	}
+
+	// Verify direct-worker prompt formatting carries quote context cleanly.
+	got := formatWeComDirectPrompt("  第 2 步  改成只读模式  ", "按这个改")
+	if got != "[引用：第 2 步 改成只读模式]\n按这个改" {
+		t.Fatalf("unexpected direct quote prompt: %q", got)
+	}
+	if plain := formatWeComDirectPrompt("", "直接说"); plain != "直接说" {
+		t.Fatalf("unexpected plain direct prompt: %q", plain)
 	}
 }

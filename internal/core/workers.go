@@ -21,10 +21,15 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		return nil, fmt.Errorf("task is required")
 	}
 	st := e.Settings()
+	reqConstraint, err := NormalizeConstraint(req.Constraint)
+	if err != nil {
+		return nil, err
+	}
 	var (
-		sessionID    string
-		resumeWorkID string
-		resumeBranch string
+		sessionID        string
+		resumeWorkID     string
+		resumeBranch     string
+		workerConstraint = reqConstraint
 	)
 	if req.Resume != "" {
 		old, err := e.store.GetWorker(ctx, req.Resume)
@@ -37,6 +42,11 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		if old.Session == "" {
 			return nil, fmt.Errorf("worker %q has no saved session id to resume; spawn a fresh worker", req.Resume)
 		}
+		oldConstraint, _ := NormalizeConstraint(old.Constraint)
+		if reqConstraint != "" && reqConstraint != oldConstraint {
+			return nil, fmt.Errorf("cannot change constraint when resuming worker %q (existing: %q); spawn a new worker for a different scope", req.Resume, oldConstraint)
+		}
+		workerConstraint = oldConstraint
 		req.Kind, req.Cwd, req.Machine, sessionID = old.Kind, old.Cwd, old.Machine, old.Session
 		resumeWorkID = old.WorkItemID
 		resumeBranch = old.WorktreeBranch
@@ -187,6 +197,7 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		Run:         &[2]string{modelName, effort},
 		Status:      "starting",
 		Session:     sessionID,
+		Constraint:  workerConstraint,
 	}
 	if proj != nil {
 		wk.ProjectID = proj.ID
@@ -330,6 +341,7 @@ type LaunchManagedRequest struct {
 	WorkItemID string
 	ProjectID  string
 	Worktree   string // auto (default) | on | off
+	Constraint string
 	ExtraArgs  []string
 }
 
@@ -341,6 +353,7 @@ type ResumeWorkerRequest struct {
 	Kind       string `json:"kind,omitempty"`
 	Cwd        string `json:"cwd,omitempty"`
 	WorkItemID string `json:"work_item_id,omitempty"`
+	Constraint string `json:"constraint,omitempty"`
 }
 
 // ResumeWorkerSession returns the existing live pane if the exact worker session is already running,
@@ -379,7 +392,11 @@ func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerReques
 	kind := agent.NormalizeKind(req.Kind)
 	cwd := strings.TrimSpace(req.Cwd)
 	workID := strings.TrimSpace(req.WorkItemID)
-	modelName, effort, title := "", "", ""
+	reqConstraint, cErr := NormalizeConstraint(req.Constraint)
+	if cErr != nil {
+		return nil, false, cErr
+	}
+	modelName, effort, title, savedConstraint := "", "", "", ""
 	var repoRoot string
 
 	if name != "" {
@@ -400,7 +417,7 @@ func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerReques
 				if workID == "" {
 					workID = old.WorkItemID
 				}
-				modelName, effort, title, repoRoot = old.Model, old.Effort, old.Title, old.RepoRoot
+				modelName, effort, title, repoRoot, savedConstraint = old.Model, old.Effort, old.Title, old.RepoRoot, old.Constraint
 			}
 		}
 	}
@@ -438,8 +455,15 @@ func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerReques
 			if name == "" {
 				name = es.Name
 			}
+			if savedConstraint == "" {
+				savedConstraint = es.Constraint
+			}
 			break
 		}
+	}
+	savedConstraint, _ = NormalizeConstraint(savedConstraint)
+	if reqConstraint != "" && reqConstraint != savedConstraint {
+		return nil, false, fmt.Errorf("cannot change constraint when resuming worker %q (existing: %q); start a new session for a different scope", orStr(name, sess), savedConstraint)
 	}
 
 	if sess == "" {
@@ -470,6 +494,7 @@ func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerReques
 		Effort:     effort,
 		SessionID:  sess,
 		WorkItemID: workID,
+		Constraint: savedConstraint,
 	})
 	if err != nil {
 		return nil, false, err
@@ -599,6 +624,10 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 		status = "starting"
 	}
 
+	constraint, cErr := NormalizeConstraint(req.Constraint)
+	if cErr != nil {
+		return nil, cErr
+	}
 	wk := &model.Worker{
 		Name:        name,
 		Kind:        kind,
@@ -617,6 +646,7 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 		Status:      status,
 		Session:     req.SessionID,
 		WorkItemID:  strings.TrimSpace(req.WorkItemID),
+		Constraint:  constraint,
 	}
 	if proj := ResolveProject(st.Projects, req.ProjectID, cwd); proj != nil {
 		wk.ProjectID = proj.ID
@@ -911,6 +941,7 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 	if wk.PaneID != "" {
 		_ = e.store.DeleteQueuedPromptsByScope(ctx, wk.PaneID)
 		e.setQueuePaused(wk.PaneID, false)
+		e.clearConstraintDelivered(wk.PaneID)
 	}
 	wtNote := ""
 	if wk.WorktreePath != "" && wk.RepoRoot != "" {
@@ -930,7 +961,7 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 		_ = e.store.SaveEndedSession(ctx, &model.EndedSession{
 			ID: eid, Kind: wk.Kind, Machine: wk.Machine, Cwd: histCwd,
 			Name: wk.Name, Title: orStr(wk.Title, wk.Name), Session: wk.Session,
-			WorkItemID: wk.WorkItemID, Model: wk.Model, Effort: wk.Effort, EndedAt: time.Now(),
+			WorkItemID: wk.WorkItemID, Model: wk.Model, Effort: wk.Effort, Constraint: wk.Constraint, EndedAt: time.Now(),
 		}, 40)
 	}
 	e.addEvent(ctx, wk.Thread, "已停止 "+wk.Name+"（会话已保留，可随时续接"+wtNote+"）", wk.Name, "info")

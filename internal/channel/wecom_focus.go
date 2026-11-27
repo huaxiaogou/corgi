@@ -166,7 +166,7 @@ func (b *Bus) formatWeComHelp(ctx context.Context, focusKey string) string {
 			"- `/w`：弹出事项卡片切换直聊（也支持 `/w 1` 或 `/w 关键词`）\n"+
 			"- `/back`：返回 Corgi 主对话\n"+
 			"- `/help`：查看当前状态与命令\n\n"+
-			"提示：长按引用任意带 `[#名称]` 的消息回复，可单次追问该 Worker。",
+			"提示：长按引用带 `[#名称]` 的消息可单次追问该 Worker；直聊时引用主对话回复可单次发回主对话而不切出当前直聊。",
 		status,
 	)
 }
@@ -231,8 +231,12 @@ func (b *Bus) handleWeComControlOrDirect(ctx context.Context, msg wecom.Incoming
 		return true
 	}
 
-	// 5. Active Worker focus mode -> route straight to focused Worker.
+	// 5. Active Worker focus mode -> if user explicitly quotes a plain main-chat Corgi reply
+	// (no `[#worker]` tag), route this single turn back to Corgi Router without losing Worker focus.
 	if focus := b.loadWeComFocus(ctx, focusKey); focus != nil {
+		if strings.TrimSpace(msg.QuoteText) != "" && b.engine != nil && b.engine.MatchesMainChatCorgiReply(ctx, thread, msg.QuoteText) {
+			return false
+		}
 		b.dispatchWeComDirectWorker(ctx, msg, thread, replyChatID, *focus, text, true)
 		return true
 	}
@@ -366,13 +370,15 @@ func (b *Bus) dispatchWeComDirectWorker(ctx context.Context, msg wecom.IncomingM
 		}
 	}
 
+	promptText := formatWeComDirectPrompt(msg.QuoteText, text)
+
 	w, _, err := b.engine.SendDirectWorkerMessage(ctx, core.DirectWorkerRequest{
 		Name:       target.Worker,
 		Machine:    target.Machine,
 		Session:    target.Session,
 		Kind:       target.Kind,
 		WorkItemID: target.WorkItemID,
-		Text:       text,
+		Text:       promptText,
 		OnDone:     onDone,
 	})
 	if err != nil {
@@ -405,6 +411,17 @@ func (b *Bus) dispatchWeComDirectWorker(ctx context.Context, msg wecom.IncomingM
 			WorkItemID: w.WorkItemID,
 		})
 	}
+}
+
+func formatWeComDirectPrompt(quoteText, text string) string {
+	if q := strings.Join(strings.Fields(strings.TrimSpace(quoteText)), " "); q != "" {
+		r := []rune(q)
+		if len(r) > 240 {
+			q = string(r[:240]) + "…"
+		}
+		return fmt.Sprintf("[引用：%s]\n%s", q, text)
+	}
+	return text
 }
 
 func firstNonEmptyStr(vals ...string) string {

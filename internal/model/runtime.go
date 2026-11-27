@@ -95,6 +95,7 @@ type AgentView struct {
 	IdleSince      *time.Time `json:"idle_since,omitempty"`
 	Keep           bool       `json:"keep,omitempty"`
 	CreatedBy      string     `json:"created_by,omitempty"`
+	Constraint     string     `json:"constraint,omitempty"`
 }
 
 // QueuedPrompt is one durable human prompt waiting for a busy agent pane or main Corgi chat thread.
@@ -204,6 +205,15 @@ type Approval struct {
 	Raw     string   `json:"raw,omitempty"`
 }
 
+// ToolStats summarizes recent tool results within the current worker turn for thrash detection.
+type ToolStats struct {
+	N              int   `json:"n"`
+	Failed         int   `json:"failed"`
+	TrailingFailed int   `json:"trailing_failed"`
+	LastFailureAt  int64 `json:"last_failure_at,omitempty"`
+	LastUserAt     int64 `json:"last_user_at,omitempty"`
+}
+
 // EndedSession remembers a closed agent session for review or --resume.
 type EndedSession struct {
 	ID         string    `json:"id"`
@@ -216,6 +226,7 @@ type EndedSession struct {
 	WorkItemID string    `json:"work_item_id,omitempty"`
 	Model      string    `json:"model,omitempty"`
 	Effort     string    `json:"effort,omitempty"`
+	Constraint string    `json:"constraint,omitempty"`
 	EndedAt    time.Time `json:"ended_at"`
 }
 

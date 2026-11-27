@@ -105,6 +105,61 @@ func (e *Engine) BuildArtifactShareURL(ctx context.Context, artID string) string
 	return e.BuildPreviewURL(ctx, artID)
 }
 
+// MatchesMainChatCorgiReply checks whether quoteText corresponds to a recent Corgi main-chat
+// reply without a [#worker] tag so quoting a main-chat message while in Worker focus routes
+// that single turn cleanly back to Corgi Router.
+func (e *Engine) MatchesMainChatCorgiReply(ctx context.Context, thread, quoteText string) bool {
+	if e.store == nil {
+		return false
+	}
+	q := normalizeQuoteCompare(quoteText)
+	qRunes := []rune(q)
+	if len(qRunes) < 4 {
+		return false
+	}
+	if thread == "" {
+		thread = model.MainThread
+	}
+	entries, _, err := e.store.ListEntries(ctx, thread, 40)
+	if err != nil {
+		return false
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		en := entries[i]
+		if en == nil || en.Role != "corgi" {
+			continue
+		}
+		if en.WorkerRef != nil && strings.TrimSpace(en.WorkerRef.Name) != "" {
+			continue
+		}
+		txt := normalizeQuoteCompare(en.Text)
+		if txt == "" {
+			continue
+		}
+		if strings.Contains(txt, q) || (len([]rune(txt)) >= 6 && strings.Contains(q, txt)) {
+			return true
+		}
+		if len(qRunes) >= 16 && strings.Contains(txt, string(qRunes[:16])) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeQuoteCompare(s string) string {
+	s = strings.TrimSpace(s)
+	if start := strings.Index(s, "<think>"); start >= 0 {
+		if end := strings.Index(s[start:], "</think>"); end >= 0 {
+			s = s[:start] + " " + s[start+end+len("</think>"):]
+		}
+	}
+	repl := strings.NewReplacer("**", "", "__", "", "`", "", "\r", " ")
+	s = repl.Replace(s)
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.TrimRight(s, ".…")
+	return strings.TrimSpace(s)
+}
+
 // MachineDisplayName maps a machine ID ("" for Hub) to a short human-readable label.
 func (e *Engine) MachineDisplayName(machineID string) string {
 	machineID = strings.TrimSpace(machineID)

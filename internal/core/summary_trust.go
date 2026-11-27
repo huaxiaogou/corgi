@@ -152,6 +152,55 @@ func (e *Engine) lastWorkerFullMessageDetailed(ctx context.Context, w *model.Wor
 	return "(no output captured)", false, false
 }
 
+// workerTurnToolStats returns bounded current-turn tool result statistics for thrash detection,
+// reading locally on Hub or via GET /api/panes/{id}/last?tool_stats=1 on remote Nodes.
+func (e *Engine) workerTurnToolStats(ctx context.Context, w *model.Worker) (*model.ToolStats, bool) {
+	if w == nil || w.PaneID == "" || e.fleet == nil {
+		return nil, false
+	}
+	localPane, machine := fleet.SplitID(w.PaneID)
+	if machine != "" {
+		hc, err := e.fleet.HTTPClient(machine)
+		if err != nil {
+			return nil, false
+		}
+		rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(rctx, http.MethodGet, "http://node/api/panes/"+url.PathEscape(localPane)+"/last?tool_stats=1", nil)
+		if err != nil {
+			return nil, false
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			return nil, false
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, false
+		}
+		var out struct {
+			ToolStats *model.ToolStats `json:"tool_stats"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&out) != nil || out.ToolStats == nil {
+			return nil, false
+		}
+		return out.ToolStats, true
+	}
+	ad, err := e.agents.Get(w.Kind)
+	if err != nil {
+		return nil, false
+	}
+	p := ad.LocateTranscript(e.home, w.Cwd, w.Session, w.CreatedAt)
+	if p == "" {
+		return nil, false
+	}
+	stats := agent.ComputeTurnToolStats(p, ad, 1<<20)
+	if stats == nil {
+		return nil, false
+	}
+	return stats, true
+}
+
 // lastWorkerSummary fetches the worker's latest assistant message from its machine's transcript
 // (via /api/panes/{id}/last for remote nodes), falling back to the last 14 terminal lines.
 func (e *Engine) lastWorkerSummary(ctx context.Context, w *model.Worker) string {

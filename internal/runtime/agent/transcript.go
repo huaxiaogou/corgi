@@ -161,6 +161,106 @@ func (tr *TranscriptReader) LastAssistantAfterLastUser(maxRunes int) (string, bo
 	return "", false
 }
 
+// ComputeTurnToolStats reads at most the trailing maxTailBytes (default 1 MiB) of a JSONL
+// transcript without expanding the read window and summarizes up to the last 8 tool results
+// since the most recent user message for thrash detection.
+func ComputeTurnToolStats(path string, adapter Adapter, maxTailBytes int64) *model.ToolStats {
+	if path == "" || adapter == nil {
+		return nil
+	}
+	if maxTailBytes <= 0 {
+		maxTailBytes = 1 << 20
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.Size() == 0 {
+		return &model.ToolStats{}
+	}
+	var offset int64
+	partial := false
+	if fi.Size() > maxTailBytes {
+		offset = fi.Size() - maxTailBytes
+		partial = true
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return nil
+		}
+	}
+	rd := bufio.NewReaderSize(f, 1<<16)
+	if partial {
+		skip, err := rd.ReadBytes('\n')
+		if err != nil {
+			return &model.ToolStats{}
+		}
+		offset += int64(len(skip))
+	}
+	var msgs []*model.Message
+	for {
+		line, err := rd.ReadBytes('\n')
+		if len(line) > 0 {
+			// Skip incomplete trailing line still being flushed to disk.
+			if line[len(line)-1] != '\n' {
+				break
+			}
+			lineStart := offset
+			offset += int64(len(line))
+			if parsed, ok := adapter.ParseTranscriptLine(line, ""); ok {
+				for _, m := range parsed {
+					m.At = lineStart
+					msgs = append(msgs, m)
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	return SummarizeTurnToolStats(msgs, 8)
+}
+
+// SummarizeTurnToolStats scans msgs backward until the most recent user turn, collecting up to
+// windowSize tool results (messages with Kind=="tool" and non-empty Output or Error==true).
+func SummarizeTurnToolStats(msgs []*model.Message, windowSize int) *model.ToolStats {
+	if windowSize <= 0 {
+		windowSize = 8
+	}
+	stats := &model.ToolStats{}
+	trailingBroken := false
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m == nil {
+			continue
+		}
+		if m.Kind == "user" {
+			stats.LastUserAt = m.At
+			break
+		}
+		if stats.N >= windowSize || m.Kind != "tool" {
+			continue
+		}
+		// Count only actual tool results (not tool_use / function_call invocations).
+		if strings.TrimSpace(m.Output) == "" && !m.Error {
+			continue
+		}
+		stats.N++
+		if m.Error {
+			stats.Failed++
+			if stats.LastFailureAt == 0 {
+				stats.LastFailureAt = m.At
+			}
+			if !trailingBroken {
+				stats.TrailingFailed++
+			}
+		} else {
+			trailingBroken = true
+		}
+	}
+	return stats
+}
+
 // EarlierMessages loads up to earlierPageSize messages starting strictly before byte offset `before`.
 func EarlierMessages(path string, adapter Adapter, imgDir string, before int64) ([]*model.Message, int64) {
 	fi, err := os.Stat(path)

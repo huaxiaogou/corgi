@@ -109,6 +109,7 @@ export interface Worker {
   keep?: boolean;
   snooze_until?: string;
   work_item_id?: string;
+  constraint?: string;
 }
 
 export interface WorkArtifact {
@@ -257,6 +258,7 @@ export interface AgentView {
   idle_since?: string;
   keep?: boolean;
   created_by?: string;
+  constraint?: string;
 }
 
 export interface PaneState {

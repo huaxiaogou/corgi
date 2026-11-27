@@ -197,6 +197,7 @@ type Worker struct {
 	Keep            bool       `json:"keep,omitempty"`
 	SnoozeUntil     *time.Time `json:"snooze_until,omitempty"`
 	WorkItemID      string     `json:"work_item_id,omitempty"`
+	Constraint      string     `json:"constraint,omitempty"`
 }
 
 const (

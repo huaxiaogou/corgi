@@ -398,7 +398,7 @@ func (a *AgyAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Messag
 		if outText == "" {
 			return nil, false
 		}
-		isErr := strings.Contains(rec.Content, "exited with code") && !strings.Contains(rec.Content, "exited with code 0")
+		isErr := detectAgyCommandExitError(rec.Content)
 		return []*model.Message{{
 			Kind:   "tool",
 			Name:   "result",
@@ -438,6 +438,15 @@ func (a *AgyAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Messag
 		}}, true
 	}
 	return nil, false
+}
+
+var agyExitCodeLineRe = regexp.MustCompile(`(?im)^\s*(?:command\s+)?exited with code\s+(-?\d+)\b`)
+
+func detectAgyCommandExitError(raw string) bool {
+	if m := agyExitCodeLineRe.FindStringSubmatch(raw); len(m) == 2 {
+		return m[1] != "0"
+	}
+	return false
 }
 
 func summarizeAgyToolArgs(raw json.RawMessage) string {

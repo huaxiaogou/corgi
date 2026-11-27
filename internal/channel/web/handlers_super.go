@@ -337,6 +337,9 @@ func (s *Server) handleSuperSpawn(w http.ResponseWriter, r *http.Request) {
 	if wk.WorkItemID != "" {
 		res["work_item_id"] = wk.WorkItemID
 	}
+	if wk.Constraint != "" {
+		res["constraint"] = wk.Constraint
+	}
 	writeJSON(w, http.StatusAccepted, res)
 }
 

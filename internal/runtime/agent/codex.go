@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -309,11 +311,11 @@ func (c *CodexAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Mess
 	switch rec.Type {
 	case "response_item":
 		var p struct {
-			Type    string `json:"type"`
-			Role    string `json:"role"`
-			Name    string `json:"name"`
-			Args    string `json:"arguments"`
-			Output  string `json:"output"`
+			Type    string          `json:"type"`
+			Role    string          `json:"role"`
+			Name    string          `json:"name"`
+			Args    string          `json:"arguments"`
+			Output  json.RawMessage `json:"output"`
 			Summary []struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
@@ -362,7 +364,9 @@ func (c *CodexAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Mess
 		case "function_call":
 			return []*model.Message{{Kind: "tool", Name: p.Name, Input: clipText(p.Args, 300)}}, true
 		case "function_call_output":
-			return []*model.Message{{Kind: "tool", Name: "result", Output: clipText(p.Output, 800)}}, true
+			rawOut := extractCodexToolOutput(p.Output)
+			isErr := detectCodexToolOutputError(rawOut)
+			return []*model.Message{{Kind: "tool", Name: "result", Output: clipText(rawOut, 800), Error: isErr}}, true
 		}
 	case "event_msg":
 		var p struct {
@@ -388,6 +392,53 @@ func (c *CodexAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Mess
 		}
 	}
 	return nil, false
+}
+
+var (
+	codexExitCodeJSONRe = regexp.MustCompile(`"exit_code"\s*:\s*(-?\d+)`)
+	codexExitCodeTextRe = regexp.MustCompile(`(?im)(?:^|\n)\s*(?:process exited with code|command exited with code|exit code:)\s*(-?\d+)\b`)
+)
+
+func extractCodexToolOutput(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		return plain
+	}
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) == nil && len(blocks) > 0 {
+		var parts []string
+		for _, b := range blocks {
+			if t := strings.TrimSpace(b.Text); t != "" {
+				parts = append(parts, t)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func detectCodexToolOutputError(rawOut string) bool {
+	if rawOut == "" {
+		return false
+	}
+	if m := codexExitCodeJSONRe.FindStringSubmatch(rawOut); len(m) == 2 {
+		if code, err := strconv.Atoi(m[1]); err == nil {
+			return code != 0
+		}
+	}
+	if m := codexExitCodeTextRe.FindStringSubmatch(rawOut); len(m) == 2 {
+		if code, err := strconv.Atoi(m[1]); err == nil {
+			return code != 0
+		}
+	}
+	return false
 }
 
 func (c *CodexAdapter) ReadContextUsage(transcriptPath string, _ int) model.ContextUsage {

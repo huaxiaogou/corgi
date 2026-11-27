@@ -464,6 +464,14 @@ export function AgentPaneView({ pane, focusSeq = 0, queuedPrompts = [], queuePau
             {contextPct > 0 && <span className="text-[11px] font-mono-code text-muted">上下文 {contextPct}%</span>}
           </div>
           <div className="text-[11.5px] font-mono-code text-muted truncate mt-0.5">{pane.machine ? `${pane.machine} · ` : ""}{pane.cwd}</div>
+          {pane.constraint && (
+            <div
+              title={`本会话红线：${pane.constraint}`}
+              className="text-[11px] text-amber-700 dark:text-amber-300 truncate mt-0.5"
+            >
+              红线：{pane.constraint}
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <div className="inline-flex p-0.5 rounded-lg text-xs surface-rail border border-hairline">

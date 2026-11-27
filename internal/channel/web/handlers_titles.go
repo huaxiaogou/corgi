@@ -225,14 +225,19 @@ func (s *Server) WatchEndings(ctx context.Context) {
 				continue
 			}
 			kind := agent.NormalizeKind(a.Kind)
+			constraint := strings.TrimSpace(a.Constraint)
+			if constraint == "" && prev[a.PaneID] != nil {
+				constraint = prev[a.PaneID].sess.Constraint
+			}
 			prev[a.PaneID] = &tracked{
 				sess: model.EndedSession{
-					Kind:    kind,
-					Machine: a.Machine,
-					Cwd:     a.Cwd,
-					Title:   a.Topic,
-					Name:    a.Name,
-					Session: a.Session,
+					Kind:       kind,
+					Machine:    a.Machine,
+					Cwd:        a.Cwd,
+					Title:      a.Topic,
+					Name:       a.Name,
+					Session:    a.Session,
+					Constraint: constraint,
 				},
 			}
 			_ = s.Store.ForgetEndedSession(ctx, kind, a.Machine, a.Session)
@@ -246,6 +251,14 @@ func (s *Server) WatchEndings(ctx context.Context) {
 				continue
 			}
 			delete(prev, paneID)
+			if tr.sess.Constraint == "" && tr.sess.Name != "" {
+				if wk, wErr := s.Store.GetWorker(ctx, tr.sess.Name); wErr == nil && wk != nil && (wk.Session == "" || wk.Session == tr.sess.Session) {
+					tr.sess.Constraint = wk.Constraint
+					if tr.sess.WorkItemID == "" {
+						tr.sess.WorkItemID = wk.WorkItemID
+					}
+				}
+			}
 			id, _, err := s.Store.NextID(ctx, "h")
 			if err != nil {
 				continue
