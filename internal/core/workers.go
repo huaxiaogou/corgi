@@ -739,6 +739,9 @@ func (e *Engine) SendToWorkerWithWork(ctx context.Context, workerName, thread, t
 		}
 		wk = adopted
 	}
+	if isWorkerFaulted(wk) {
+		return nil, "", fmt.Errorf("worker %q is paused due to fatal error (%s); run `%s stop %s` and dispatch to a healthy worker/model", wk.Name, oneLineClip(wk.FaultError, 120), orStr(e.binPath, "corgi"), wk.Name)
+	}
 	if thread == "" {
 		thread = wk.Thread
 	}
@@ -875,7 +878,10 @@ func (e *Engine) Report(ctx context.Context, workerName, paneID, text string) (*
 		thread = wk.Thread
 		wk.LastReport = text
 		wk.ReportAt = time.Now()
+		wk.FaultError = ""
+		wk.FaultPaneID = ""
 		_ = e.store.UpsertWorker(ctx, wk)
+		e.disarmWorkerStartupCheck(wk.Name)
 		if id := e.captureWorkerReportSnapshot(ctx, wk, text, 500); id != "" {
 			artID = id
 			artNote = fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --re <this event #tID> --worker %s on `corgi reply` (when not using --file) to attach this exact snapshot]", id, wk.Name)
@@ -940,6 +946,8 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 	}
 	wk.Ended = true
 	wk.Status = "done"
+	wk.FaultError = ""
+	wk.FaultPaneID = ""
 	if err := e.store.UpsertWorker(ctx, wk); err != nil {
 		return err
 	}

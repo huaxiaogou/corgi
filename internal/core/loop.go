@@ -295,9 +295,11 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, scan
 				// preserve worker state and pending approvals until its machine is observed again.
 				continue
 			}
-			if w.Status != "starting" && w.Status != "failed" && time.Since(w.CreatedAt) > 20*time.Second {
+			if w.Status != "starting" && time.Since(w.CreatedAt) > 20*time.Second {
 				w.Ended = true
 				w.Status = "gone"
+				w.FaultError = ""
+				w.FaultPaneID = ""
 				_ = e.store.UpsertWorker(ctx, w)
 				_ = e.store.ExpireWorkerActions(ctx, w.Name)
 				_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name,
@@ -346,9 +348,26 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, scan
 			resetWorkerIdle(w)
 			idleChanged = true
 		}
-		if li.status == prev && li.pane == w.PaneID {
+		if li.status == "working" || li.status == "blocked" || (w.FaultPaneID != "" && li.pane != "" && li.pane != w.FaultPaneID) {
+			e.disarmWorkerStartupCheck(w.Name)
+			if w.FaultError != "" || w.FaultPaneID != "" {
+				w.FaultError = ""
+				w.FaultPaneID = ""
+				sessionChanged = true
+			}
+		}
+		effectiveStatus := li.status
+		if isWorkerFaulted(w) && (li.status == "idle" || li.status == "done") {
+			effectiveStatus = "failed"
+		}
+		if effectiveStatus == prev && li.pane == w.PaneID {
 			if idleChanged || sessionChanged {
 				_ = e.store.UpsertWorker(ctx, w)
+			}
+			// Inspect freshly-dispatched idle/done workers for immediate fatal executor errors
+			// or silent non-starts even when herdr never observed a working transition.
+			if (li.status == "done" || li.status == "idle") && e.hasWorkerStartupCheck(w.Name) {
+				e.checkWorkerStartupHealth(ctx, w, li, now)
 			}
 			// Re-check steady idle/done workers when waiting for a delayed transcript flush
 			// (direct WeCom turns OR Router-managed turns that went idle with empty interim text).
@@ -361,7 +380,7 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, scan
 			e.clearWorkerPendingCheck(w.Name)
 		}
 		w.PaneID = li.pane
-		w.Status = li.status
+		w.Status = effectiveStatus
 		_ = e.store.UpsertWorker(ctx, w)
 		e.notifyChanged()
 
@@ -378,6 +397,8 @@ func (e *Engine) syncWorkers(ctx context.Context, live map[string]liveInfo, scan
 			if e.hasDirectTurn(w.Name) || now.Sub(w.ReportAt) > 90*time.Second {
 				e.handleWorkerTurnDone(ctx, w)
 			}
+		case (li.status == "done" || li.status == "idle") && e.hasWorkerStartupCheck(w.Name):
+			e.checkWorkerStartupHealth(ctx, w, li, now)
 		}
 	}
 }
@@ -482,6 +503,10 @@ func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
 	dt := e.popDirectTurn(w.Name)
 	if qErr != "" {
 		e.clearWorkerPendingCheck(w.Name)
+		e.disarmWorkerStartupCheck(w.Name)
+		if agent.ExtractFatalExecutorError(screen, checkAgainst) != "" {
+			e.markWorkerFaulted(ctx, w, w.PaneID, qErr)
+		}
 		if dt != nil && dt.callback != nil {
 			res := DirectTurnResult{
 				WorkerName:   w.Name,
@@ -600,6 +625,12 @@ func (e *Engine) deliverQueued(ctx context.Context, live map[string]liveInfo, sc
 		if li.status == "blocked" || (!li.ready && li.status == "unknown") || e.isHealingBypassWorker(target, li.pane) {
 			continue
 		}
+		if target != model.RouterName {
+			if wk, wErr := e.store.GetWorker(ctx, target); wErr == nil && isWorkerFaulted(wk) && (wk.FaultPaneID == "" || wk.FaultPaneID == li.pane) {
+				e.rerouteFaultedWorkerTriggers(ctx, wk, list)
+				continue
+			}
+		}
 		// Human chat/wecom messages interrupt Router mid-turn; system events wait for idle.
 		if li.status == "working" {
 			if target == model.RouterName {
@@ -668,12 +699,16 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 	e.mu.Unlock()
 
 	var b strings.Builder
+	var targetWorker *model.Worker
 	var workerConstraint string
 	if target != model.RouterName {
-		if wk, wErr := e.store.GetWorker(ctx, target); wErr == nil && wk != nil && strings.TrimSpace(wk.Constraint) != "" {
-			workerConstraint = strings.TrimSpace(wk.Constraint)
-			b.WriteString(FormatConstraintHeader(workerConstraint))
-			b.WriteString("\n\n")
+		if wk, wErr := e.store.GetWorker(ctx, target); wErr == nil && wk != nil {
+			targetWorker = wk
+			if strings.TrimSpace(wk.Constraint) != "" {
+				workerConstraint = strings.TrimSpace(wk.Constraint)
+				b.WriteString(FormatConstraintHeader(workerConstraint))
+				b.WriteString("\n\n")
+			}
 		}
 	}
 	if fresh {
@@ -747,7 +782,16 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 	if paneID != "" {
 		promptTarget = paneID
 	}
-	if err := e.fleet.Prompt(ctx, promptTarget, b.String()); err != nil {
+	var preScreen string
+	var preSnap workerTurnSnapshot
+	if target != model.RouterName && targetWorker != nil {
+		if rr, rErr := e.fleet.Read(ctx, promptTarget, "recent", "text", 30); rErr == nil {
+			preScreen = rr.Text
+		}
+		preSnap = e.lastWorkerTurnSnapshot(ctx, targetWorker)
+	}
+	promptBody := b.String()
+	if err := e.fleet.Prompt(ctx, promptTarget, promptBody); err != nil {
 		var he *herdr.Error
 		if errors.As(err, &he) && (he.Code == "agent_blocked" || he.Code == "agent_not_ready") {
 			return
@@ -773,6 +817,9 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 	}
 	if target != model.RouterName {
 		e.recordWorkerDelivered(target, paneID, list)
+		if targetWorker != nil {
+			e.armWorkerStartupCheck(targetWorker, paneID, list, promptBody, preScreen, preSnap, time.Now())
+		}
 	}
 
 	for _, t := range list {

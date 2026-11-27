@@ -16,19 +16,22 @@ import (
 )
 
 var (
-	numChoiceRe     = regexp.MustCompile(`^\s*([›>•❯▶▸●➜→]?)\s*(\d+)[.)]\s+(.+)$`)
-	cursorChoiceRe  = regexp.MustCompile(`^(\s*)([›>❯▶▸➜→])\s+(.+)$`)
-	checkboxLineRe  = regexp.MustCompile(`^\s*([›>❯▶▸➜→])?\s*(\[[ xX✓]\])\s+(.+)$`)
-	horizTokenRe    = regexp.MustCompile(`(?:\[([A-Za-z][A-Za-z0-9 _/-]{1,20})\]|([›>❯▶▸➜→])\s+([A-Za-z][A-Za-z0-9/-]{1,20})(?:\s{2,}|$))`)
-	primaryBtnRe    = regexp.MustCompile(`(?i)^(done|confirm|continue|next|ok|accept|allow|yes|finish|submit)$`)
-	ruleOrLogoRe    = regexp.MustCompile(`^[-─━═╭╮╰╯┌┐└┘│┃|╌┄┈▄▀█▌▐░▒▓\s]+$`)
-	footerHintRe    = regexp.MustCompile(`(?i)(↑/↓|navigate\s*·|enter\s+(to\s+)?(confirm|toggle|select|continue)|esc\s+to\s+(cancel|interrupt|back)|tab\s+to\s+amend|\bauto\s*·\s*[a-z0-9])`)
-	dialogActionRe  = regexp.MustCompile(`(?i)(↑/↓\s*navigate|enter\s+(to\s+)?(confirm|toggle|select|continue)|esc\s+to\s+(cancel|back)|tab\s+to\s+amend)`)
-	idleChromeRe    = regexp.MustCompile("(?i)(bypass permissions on|manual mode on|accept edits on|plan mode on|\\? for shortcuts|← for agents|↵\\s*send|⏎\\s*send|shift\\+tab to cycle|⇧tab to cycle|^\\s*[❯>›]\\s*$|^\\s*[❯>›]\\s+try\\s+\")")
-	bgFooterRe      = regexp.MustCompile(`(?i)\b[1-9]\d*\s+(background\s+(task|shell|job)s?\b|task\(s\)|shells?\s+running\b)`)
-	quotaErrRe      = regexp.MustCompile(`(?i)(usage limit|limit reached|hit your( \w+)? limit|reached your( \w+)? limit|quota exceeded|exceeded your( current)? quota|resource.?exhausted|daily limit|rate.?limit(ed)?\b|credit balance|out of credits|please run /login|not logged in|invalid api key|api error|overloaded|unexpected status \d{3}|try again (at|in) )`)
-	confirmHintRe   = regexp.MustCompile(`(?i)(do you want to|allow|proceed|trust (this|the files|the contents)|do you trust|confirm|press enter|esc to cancel|y/n|yes,?\s*(i trust|allow|proceed)|choose your color scheme|terms of service|select login method)`)
-	activityGlyphRe = regexp.MustCompile(`^[✢✳✶✻✽✹●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*(.+)$`)
+	numChoiceRe            = regexp.MustCompile(`^\s*([›>•❯▶▸●➜→]?)\s*(\d+)[.)]\s+(.+)$`)
+	cursorChoiceRe         = regexp.MustCompile(`^(\s*)([›>❯▶▸➜→])\s+(.+)$`)
+	checkboxLineRe         = regexp.MustCompile(`^\s*([›>❯▶▸➜→])?\s*(\[[ xX✓]\])\s+(.+)$`)
+	horizTokenRe           = regexp.MustCompile(`(?:\[([A-Za-z][A-Za-z0-9 _/-]{1,20})\]|([›>❯▶▸➜→])\s+([A-Za-z][A-Za-z0-9/-]{1,20})(?:\s{2,}|$))`)
+	primaryBtnRe           = regexp.MustCompile(`(?i)^(done|confirm|continue|next|ok|accept|allow|yes|finish|submit)$`)
+	ruleOrLogoRe           = regexp.MustCompile(`^[-─━═╭╮╰╯┌┐└┘│┃|╌┄┈▄▀█▌▐░▒▓\s]+$`)
+	footerHintRe           = regexp.MustCompile(`(?i)(↑/↓|navigate\s*·|enter\s+(to\s+)?(confirm|toggle|select|continue)|esc\s+to\s+(cancel|interrupt|back)|tab\s+to\s+amend|\bauto\s*·\s*[a-z0-9])`)
+	dialogActionRe         = regexp.MustCompile(`(?i)(↑/↓\s*navigate|enter\s+(to\s+)?(confirm|toggle|select|continue)|esc\s+to\s+(cancel|back)|tab\s+to\s+amend)`)
+	idleChromeRe           = regexp.MustCompile("(?i)(bypass permissions on|manual mode on|accept edits on|plan mode on|\\? for shortcuts|← for agents|↵\\s*send|⏎\\s*send|shift\\+tab to cycle|⇧tab to cycle|^\\s*[❯>›]\\s*$|^\\s*[❯>›]\\s+try\\s+\")")
+	bgFooterRe             = regexp.MustCompile(`(?i)\b[1-9]\d*\s+(background\s+(task|shell|job)s?\b|task\(s\)|shells?\s+running\b)`)
+	quotaErrRe             = regexp.MustCompile(`(?i)(usage limit|limit reached|hit your( \w+)? limit|reached your( \w+)? limit|quota exceeded|exceeded your( current)? quota|resource.?exhausted|daily limit|rate.?limit(ed)?\b|credit balance|out of credits|please run /login|not logged in|invalid api key|api error|overloaded|unexpected status \d{3}|try again (at|in) )`)
+	fatalExecutorErrRe     = regexp.MustCompile(`(?i)(failed to construct executor|plan model not specified|you must specify a valid model|failed to initialize (executor|model|agent)|model ["']?[^"'\s]+["']? (not found|is not supported|unavailable)|unknown model\b|invalid model\b|session (corrupted|invalid|not found)|invalid session\b)`)
+	hardFatalExecutorErrRe = regexp.MustCompile(`(?i)(failed to construct executor|plan model not specified|you must specify a valid model|failed to initialize (executor|model|agent))`)
+	nonFatalFallbackHintRe = regexp.MustCompile(`(?i)(falling back|fallback|deprecated)`)
+	confirmHintRe          = regexp.MustCompile(`(?i)(do you want to|allow|proceed|trust (this|the files|the contents)|do you trust|confirm|press enter|esc to cancel|y/n|yes,?\s*(i trust|allow|proceed)|choose your color scheme|terms of service|select login method)`)
+	activityGlyphRe        = regexp.MustCompile(`^[✢✳✶✻✽✹●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*(.+)$`)
 )
 
 const maxBelowMenu = 4
@@ -617,10 +620,37 @@ func stripNonFatalWarningBanners(screen string) []string {
 	return out
 }
 
-// ExtractQuotaError scans the bottom of a terminal for provider rate limits / auth errors,
-// ignoring non-fatal CLI warning banners and lines whose matched error phrase already appears
-// in the assistant's own summary.
+// ExtractFatalExecutorError scans the bottom of a terminal BEFORE warning-banner stripping so
+// fatal CLI/executor errors prefixed with `⚠` (such as `⚠ failed to construct executor: plan model not specified`)
+// are detected reliably, while benign deprecation/fallback notices and phrases already quoted in
+// ignoreText are excluded.
+func ExtractFatalExecutorError(screen, ignoreText string) string {
+	lowIgnore := strings.ToLower(ignoreText)
+	lines := nonEmptyTail(screen, 16)
+	for _, l := range lines {
+		cleaned := strings.Trim(l, "⎿⏺●•✗✘⚠■│ ")
+		if cleaned == "" {
+			continue
+		}
+		if nonFatalFallbackHintRe.MatchString(cleaned) && !hardFatalExecutorErrRe.MatchString(cleaned) {
+			continue
+		}
+		if match := fatalExecutorErrRe.FindString(cleaned); match != "" {
+			if lowIgnore == "" || !strings.Contains(lowIgnore, strings.ToLower(match)) {
+				return clipText(cleaned, 200)
+			}
+		}
+	}
+	return ""
+}
+
+// ExtractQuotaError scans the bottom of a terminal for fatal executor errors or provider rate
+// limits / auth errors, ignoring non-fatal CLI warning banners and lines whose matched error
+// phrase already appears in the assistant's own summary.
 func ExtractQuotaError(screen, summary string) string {
+	if fatal := ExtractFatalExecutorError(screen, summary); fatal != "" {
+		return fatal
+	}
 	lowSummary := strings.ToLower(summary)
 	filtered := stripNonFatalWarningBanners(screen)
 	if len(filtered) > 12 {
@@ -635,6 +665,125 @@ func ExtractQuotaError(screen, summary string) string {
 		}
 	}
 	return ""
+}
+
+// ExtractPostDispatchDelta isolates terminal lines newly produced after a prompt dispatch by:
+//  1. Trimming persistent bottom TUI chrome (rules, empty input prompt, shortcut hints),
+//  2. Slicing strictly after the pre-dispatch screen anchor (preventing stale scrollback errors),
+//  3. Slicing strictly after marker (e.g. "#t3483") when echoed on screen,
+//  4. Removing lines verbatim echoed from promptText so error phrases mentioned in a task prompt
+//     never false-trigger startup failure alerts.
+func ExtractPostDispatchDelta(preScreen, postScreen, marker, promptText string) string {
+	postBody := trimTrailingChromeLines(nonEmptyLines(postScreen))
+	if len(postBody) == 0 {
+		return ""
+	}
+	preBody := trimTrailingChromeLines(nonEmptyLines(preScreen))
+
+	delta := postBody
+	if len(preBody) > 0 {
+		if slicesEqual(preBody, postBody) {
+			return ""
+		}
+		if cut, ok := findPreScreenCutIndex(preBody, postBody); ok {
+			delta = postBody[cut:]
+		}
+	}
+	if len(delta) == 0 {
+		return ""
+	}
+	if m := strings.TrimSpace(marker); m != "" {
+		lastIdx := -1
+		for i, l := range delta {
+			if strings.Contains(l, m) {
+				lastIdx = i
+			}
+		}
+		if lastIdx >= 0 {
+			delta = delta[lastIdx+1:]
+		}
+	}
+	if len(delta) == 0 {
+		return ""
+	}
+	normPrompt := collapseInlineSpace(promptText)
+	if normPrompt == "" {
+		return strings.Join(delta, "\n")
+	}
+	out := make([]string, 0, len(delta))
+	for _, l := range delta {
+		normLine := collapseInlineSpace(strings.TrimLeft(l, ">›❯ "))
+		if normLine == "" {
+			continue
+		}
+		if strings.HasPrefix(normLine, "[corgi] ") && strings.Contains(normPrompt, normLine) {
+			continue
+		}
+		if len([]rune(normLine)) >= 6 && strings.Contains(normPrompt, normLine) {
+			continue
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
+}
+
+func nonEmptyLines(s string) []string {
+	var out []string
+	for _, l := range strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n") {
+		if t := strings.TrimSpace(l); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func trimTrailingChromeLines(lines []string) []string {
+	end := len(lines)
+	for end > 0 {
+		l := lines[end-1]
+		if ruleOrLogoRe.MatchString(l) || idleChromeRe.MatchString(l) || footerHintRe.MatchString(l) {
+			end--
+			continue
+		}
+		break
+	}
+	return lines[:end]
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func findPreScreenCutIndex(pre, post []string) (int, bool) {
+	maxAnchor := len(pre)
+	if maxAnchor > 4 {
+		maxAnchor = 4
+	}
+	for anchorLen := maxAnchor; anchorLen >= 1; anchorLen-- {
+		anchor := pre[len(pre)-anchorLen:]
+		// Avoid matching a single purely decorative/generic line as an anchor.
+		if anchorLen == 1 && (ruleOrLogoRe.MatchString(anchor[0]) || len([]rune(anchor[0])) < 6) {
+			continue
+		}
+		for i := len(post) - anchorLen; i >= 0; i-- {
+			if slicesEqual(post[i:i+anchorLen], anchor) {
+				return i + anchorLen, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func collapseInlineSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // TailLines returns the last maxLines non-empty lines of screen joined by newline.

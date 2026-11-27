@@ -131,6 +131,74 @@ Esc to cancel
 	if got := ExtractQuotaError(withFatal, ""); !strings.Contains(got, "529") {
 		t.Fatalf("expected fatal error after warning banner caught, got %q", got)
 	}
+	// Real agy executor error prefixed with `⚠` MUST NOT be swallowed by warning stripping.
+	agyFatal := strings.Join([]string{
+		"⚠ failed to construct executor: plan model not specified; you must specify a valid model",
+		"Error ID: ac007c06-4541-4f66-a808-7f73d8495761-19",
+	}, "\n")
+	if got := ExtractFatalExecutorError(agyFatal, ""); !strings.Contains(got, "plan model not specified") {
+		t.Fatalf("expected agy fatal executor error caught, got %q", got)
+	}
+	if got := ExtractQuotaError(agyFatal, ""); !strings.Contains(got, "plan model not specified") {
+		t.Fatalf("expected ExtractQuotaError to catch agy fatal executor error, got %q", got)
+	}
+	// Non-fatal warning mentioning model fallback must still be ignored by ExtractFatalExecutorError.
+	if got := ExtractFatalExecutorError(warningBanner, ""); got != "" {
+		t.Fatalf("expected benign model fallback warning ignored, got %q", got)
+	}
+}
+
+func TestExtractPostDispatchDelta(t *testing.T) {
+	chrome := strings.Join([]string{
+		"────────────────────────────────────────",
+		">",
+		"────────────────────────────────────────",
+		"? for shortcuts",
+	}, "\n")
+	pre := strings.Join([]string{
+		"> [corgi] 1 new event",
+		"  #t3425 · chat:main · router · from corgi · 18:58",
+		"⚠ failed to construct executor: plan model not specified; you must specify a valid model",
+		"Error ID: ac007c06-4541-4f66-a808-7f73d8495761-17",
+		chrome,
+	}, "\n")
+
+	// 1. Unchanged screen with stale scrollback error -> empty delta (zero false positives).
+	if got := ExtractPostDispatchDelta(pre, pre, "#t3483", "继续 wi3420 只读排查"); got != "" {
+		t.Fatalf("expected empty delta on unchanged screen, got %q", got)
+	}
+
+	// 2. New dispatch followed by real immediate agy crash -> isolates only the new error.
+	prompt := "[corgi] 1 new event\n\n#t3483 · chat:main · router · from corgi · 19:44\n  继续 wi3420 只读排查，禁止改代码。\n"
+	postCrash := strings.Join([]string{
+		"⚠ failed to construct executor: plan model not specified; you must specify a valid model",
+		"Error ID: ac007c06-4541-4f66-a808-7f73d8495761-17",
+		"────────────────────────────────────────",
+		"> [corgi] 1 new event",
+		"  #t3483 · chat:main · router · from corgi · 19:44",
+		"    继续 wi3420 只读排查，禁止改代码。",
+		"⚠ failed to construct executor: plan model not specified; you must specify a valid model",
+		"Error ID: ac007c06-4541-4f66-a808-7f73d8495761-19",
+		chrome,
+	}, "\n")
+	delta := ExtractPostDispatchDelta(pre, postCrash, "#t3483", prompt)
+	if got := ExtractQuotaError(delta, ""); !strings.Contains(got, "plan model not specified") {
+		t.Fatalf("expected new post-dispatch crash detected, delta=%q err=%q", delta, got)
+	}
+
+	// 3. Prompt itself quoting the error string echoed on screen without CLI crash -> zero false positives.
+	debugPrompt := "[corgi] 1 new event\n\n#t3501 · chat:main · router · from corgi · 20:10\n  排查为什么出现 failed to construct executor: plan model not specified 报错。\n"
+	postEchoOnly := strings.Join([]string{
+		"Done previous task.",
+		"> [corgi] 1 new event",
+		"  #t3501 · chat:main · router · from corgi · 20:10",
+		"    排查为什么出现 failed to construct executor: plan model not specified 报错。",
+		chrome,
+	}, "\n")
+	deltaEcho := ExtractPostDispatchDelta("Done previous task.\n"+chrome, postEchoOnly, "#t3501", debugPrompt)
+	if got := ExtractQuotaError(deltaEcho, ""); got != "" {
+		t.Fatalf("expected echoed prompt text suppressed, delta=%q err=%q", deltaEcho, got)
+	}
 }
 
 func TestTranscriptReaderIncrementalAndImageExtraction(t *testing.T) {

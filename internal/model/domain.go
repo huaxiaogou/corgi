@@ -134,16 +134,16 @@ type SearchResult struct {
 
 // Trigger is one durable event in the Super-Agent inbox.
 type Trigger struct {
-	ID      string    `json:"id"`
-	Seq     int64     `json:"seq"`
-	Source  string    `json:"source"` // chat | wecom | timer | worker | router | system
-	Thread  string    `json:"thread"`
-	From    string    `json:"from,omitempty"`
-	Text    string    `json:"text"`
-	At      time.Time `json:"at"`
-	Policy  string    `json:"policy"` // respond | candidate | ignore
-	Status  string    `json:"status"` // queued | delivered | ignored
-	Targets []string  `json:"targets,omitempty"`
+	ID         string    `json:"id"`
+	Seq        int64     `json:"seq"`
+	Source     string    `json:"source"` // chat | wecom | timer | worker | router | system
+	Thread     string    `json:"thread"`
+	From       string    `json:"from,omitempty"`
+	Text       string    `json:"text"`
+	At         time.Time `json:"at"`
+	Policy     string    `json:"policy"` // respond | candidate | ignore
+	Status     string    `json:"status"` // queued | delivered | ignored
+	Targets    []string  `json:"targets,omitempty"`
 	IdemKey    string    `json:"idem_key,omitempty"`
 	Ref        string    `json:"ref,omitempty"`
 	Steer      bool      `json:"steer,omitempty"`
@@ -162,22 +162,24 @@ type Thread struct {
 
 // Worker represents a managed coding agent spawned by Corgi.
 type Worker struct {
-	Name            string     `json:"name"`
-	Kind            string     `json:"kind"` // claude | codex | agy | codebuddy
-	Machine         string     `json:"machine,omitempty"`
-	Cwd             string     `json:"cwd"`
-	Task            string     `json:"task"`
-	Thread          string     `json:"thread"`
-	PaneID          string     `json:"pane_id,omitempty"`
-	WorkspaceID     string     `json:"workspace_id,omitempty"`
-	CreatedBy       string     `json:"created_by"`
-	CreatedAt       time.Time  `json:"created_at"`
+	Name                 string     `json:"name"`
+	Kind                 string     `json:"kind"` // claude | codex | agy | codebuddy
+	Machine              string     `json:"machine,omitempty"`
+	Cwd                  string     `json:"cwd"`
+	Task                 string     `json:"task"`
+	Thread               string     `json:"thread"`
+	PaneID               string     `json:"pane_id,omitempty"`
+	WorkspaceID          string     `json:"workspace_id,omitempty"`
+	CreatedBy            string     `json:"created_by"`
+	CreatedAt            time.Time  `json:"created_at"`
 	Model                string     `json:"model,omitempty"`
 	Effort               string     `json:"effort,omitempty"`
 	ModelSource          string     `json:"model_source,omitempty"` // explicit | machine_override | kind_default | cli_default
 	Run                  *[2]string `json:"run,omitempty"`
 	Title                string     `json:"title,omitempty"`
 	Status               string     `json:"status"` // starting | working | waiting | idle | done | blocked | gone | failed
+	FaultError           string     `json:"fault_error,omitempty"`
+	FaultPaneID          string     `json:"fault_pane_id,omitempty"`
 	LastReport           string     `json:"last_report,omitempty"`
 	LastReportArtifactID string     `json:"last_report_artifact_id,omitempty"`
 	LastReportAttachedID string     `json:"last_report_attached_id,omitempty"`
@@ -188,17 +190,17 @@ type Worker struct {
 	ProjectID            string     `json:"project_id,omitempty"`
 	ProjectName          string     `json:"project_name,omitempty"`
 	RepoRoot             string     `json:"repo_root,omitempty"`
-	RepoCommonDir   string     `json:"repo_common_dir,omitempty"`
-	WorktreePath    string     `json:"worktree_path,omitempty"`
-	WorktreeBranch  string     `json:"worktree_branch,omitempty"`
-	WorktreeBase    string     `json:"worktree_base,omitempty"`
-	IdleSince       *time.Time `json:"idle_since,omitempty"`
-	IdlePatrolAt    *time.Time `json:"idle_patrol_at,omitempty"`
-	IdlePatrolCount int        `json:"idle_patrol_count,omitempty"`
-	Keep            bool       `json:"keep,omitempty"`
-	SnoozeUntil     *time.Time `json:"snooze_until,omitempty"`
-	WorkItemID      string     `json:"work_item_id,omitempty"`
-	Constraint      string     `json:"constraint,omitempty"`
+	RepoCommonDir        string     `json:"repo_common_dir,omitempty"`
+	WorktreePath         string     `json:"worktree_path,omitempty"`
+	WorktreeBranch       string     `json:"worktree_branch,omitempty"`
+	WorktreeBase         string     `json:"worktree_base,omitempty"`
+	IdleSince            *time.Time `json:"idle_since,omitempty"`
+	IdlePatrolAt         *time.Time `json:"idle_patrol_at,omitempty"`
+	IdlePatrolCount      int        `json:"idle_patrol_count,omitempty"`
+	Keep                 bool       `json:"keep,omitempty"`
+	SnoozeUntil          *time.Time `json:"snooze_until,omitempty"`
+	WorkItemID           string     `json:"work_item_id,omitempty"`
+	Constraint           string     `json:"constraint,omitempty"`
 }
 
 const (
@@ -295,24 +297,24 @@ type Settings struct {
 	Projects             []ProjectWorkspace                    `json:"projects,omitempty"`
 	WorkerCwd            string                                `json:"worker_cwd"`
 	WorkerMachine        string                                `json:"worker_machine,omitempty"`
-	ReplyChars        int      `json:"reply_chars"`
-	StallMinutes      int      `json:"stall_minutes"`
-	IdlePatrolMinutes int      `json:"idle_patrol_minutes,omitempty"` // 0 = default 30, -1 = off
-	ActiveHours       string   `json:"active_hours,omitempty"`        // "" = default "09:00-22:30", "24h" = always
-	StaleArchiveDays  int      `json:"stale_archive_days,omitempty"`  // 0 = default 3, -1 = off
-	MorningDigest     *bool    `json:"morning_digest,omitempty"`      // nil = default true
-	RotatePct         int      `json:"rotate_pct,omitempty"`          // 0 = default 90, -1 = never
-	DreamAt           string   `json:"dream_at,omitempty"`            // "HH:MM", "" = "04:00", "off" = disabled
-	AutoUpdate        bool     `json:"auto_update,omitempty"`         // opt-in overnight idle auto-update (default false)
-	PublicURL         string   `json:"public_url,omitempty"`          // optional canonical Hub base URL for outbound preview links
-	NotifyLevel       string   `json:"notify_level,omitempty"`        // quiet | normal
-	AskPermissions    bool     `json:"ask_permissions,omitempty"`
-	Paused            bool     `json:"paused,omitempty"`
-	WeComEnabled      bool     `json:"wecom_enabled,omitempty"`
-	WeComBotID        string   `json:"wecom_bot_id,omitempty"`
-	WeComSecret       string   `json:"wecom_secret,omitempty"`
-	WeComAllowUsers   []string `json:"wecom_allow_users,omitempty"`
-	WeComDefaultTo    string   `json:"wecom_default_to,omitempty"` // default single-chat userid for proactive push
+	ReplyChars           int                                   `json:"reply_chars"`
+	StallMinutes         int                                   `json:"stall_minutes"`
+	IdlePatrolMinutes    int                                   `json:"idle_patrol_minutes,omitempty"` // 0 = default 30, -1 = off
+	ActiveHours          string                                `json:"active_hours,omitempty"`        // "" = default "09:00-22:30", "24h" = always
+	StaleArchiveDays     int                                   `json:"stale_archive_days,omitempty"`  // 0 = default 3, -1 = off
+	MorningDigest        *bool                                 `json:"morning_digest,omitempty"`      // nil = default true
+	RotatePct            int                                   `json:"rotate_pct,omitempty"`          // 0 = default 90, -1 = never
+	DreamAt              string                                `json:"dream_at,omitempty"`            // "HH:MM", "" = "04:00", "off" = disabled
+	AutoUpdate           bool                                  `json:"auto_update,omitempty"`         // opt-in overnight idle auto-update (default false)
+	PublicURL            string                                `json:"public_url,omitempty"`          // optional canonical Hub base URL for outbound preview links
+	NotifyLevel          string                                `json:"notify_level,omitempty"`        // quiet | normal
+	AskPermissions       bool                                  `json:"ask_permissions,omitempty"`
+	Paused               bool                                  `json:"paused,omitempty"`
+	WeComEnabled         bool                                  `json:"wecom_enabled,omitempty"`
+	WeComBotID           string                                `json:"wecom_bot_id,omitempty"`
+	WeComSecret          string                                `json:"wecom_secret,omitempty"`
+	WeComAllowUsers      []string                              `json:"wecom_allow_users,omitempty"`
+	WeComDefaultTo       string                                `json:"wecom_default_to,omitempty"` // default single-chat userid for proactive push
 }
 
 // MorningDigestEnabled reports whether daily morning summary digests are active (defaults to true).

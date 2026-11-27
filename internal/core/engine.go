@@ -156,16 +156,19 @@ type Engine struct {
 	bypassStartRetryTimeout time.Duration
 	rereadTrigID            string
 
-	wakeCh             chan struct{}
-	queueMu            sync.Mutex
-	wtMu               sync.Mutex
-	pausedQueues       map[string]bool
-	drainCooldown      map[string]time.Time
-	directTurns        map[string][]*pendingDirectTurn
-	directBgNotes      []string
-	watchdogMarks      map[string]*watchdogMark
-	constraintRemindAt map[string]time.Time
-	workerTurns        map[string]*workerTurnWatermark
+	wakeCh                     chan struct{}
+	queueMu                    sync.Mutex
+	wtMu                       sync.Mutex
+	pausedQueues               map[string]bool
+	drainCooldown              map[string]time.Time
+	directTurns                map[string][]*pendingDirectTurn
+	directBgNotes              []string
+	watchdogMarks              map[string]*watchdogMark
+	constraintRemindAt         map[string]time.Time
+	workerTurns                map[string]*workerTurnWatermark
+	workerStartupProbeDelay    time.Duration
+	workerStartupProbeInterval time.Duration
+	workerStartupCheckWindow   time.Duration
 }
 
 // NewEngine constructs a Super-Agent Engine initialized from SQLite.
@@ -194,27 +197,27 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		}
 	}
 	eng := &Engine{
-		store:            st,
-		fleet:            fl,
-		agents:           reg,
-		memory:           mem,
-		sink:             NopSink{},
-		logger:           logger,
-		corgiDir:         corgiDir,
-		home:             home,
-		binPath:          binPath,
-		settings:         settings,
-		policies:         policies,
-		routerRun:        savedRouterRun,
-		lastScreen:       map[string]screenMark{},
-		lastAnswer:       map[string]time.Time{},
-		lastTrust:        map[string]time.Time{},
-		idleCheckAt:      map[string]time.Time{},
-		noAgent:          map[string]time.Time{},
-		healingBypass:    map[string]string{},
-		bypassCheckedAt:  map[string]time.Time{},
-		bypassHealFailAt: map[string]time.Time{},
-		bypassHealedPID:  map[string]uint32{},
+		store:              st,
+		fleet:              fl,
+		agents:             reg,
+		memory:             mem,
+		sink:               NopSink{},
+		logger:             logger,
+		corgiDir:           corgiDir,
+		home:               home,
+		binPath:            binPath,
+		settings:           settings,
+		policies:           policies,
+		routerRun:          savedRouterRun,
+		lastScreen:         map[string]screenMark{},
+		lastAnswer:         map[string]time.Time{},
+		lastTrust:          map[string]time.Time{},
+		idleCheckAt:        map[string]time.Time{},
+		noAgent:            map[string]time.Time{},
+		healingBypass:      map[string]string{},
+		bypassCheckedAt:    map[string]time.Time{},
+		bypassHealFailAt:   map[string]time.Time{},
+		bypassHealedPID:    map[string]uint32{},
 		wakeCh:             make(chan struct{}, 1),
 		pausedQueues:       map[string]bool{},
 		drainCooldown:      map[string]time.Time{},
