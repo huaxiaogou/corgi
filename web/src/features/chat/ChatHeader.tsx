@@ -105,11 +105,15 @@ export function ChatHeader({
                   className="w-1.5 h-1.5 rounded-full"
                   style={{
                     background:
-                      notebookDot === "blocked"
-                        ? "var(--attn)"
-                        : notebookDot === "working"
-                          ? "var(--ok)"
-                          : "var(--fg-3)",
+                      notebookDot === "failed"
+                        ? "var(--err)"
+                        : notebookDot === "blocked"
+                          ? "var(--attn)"
+                          : notebookDot === "working"
+                            ? "var(--ok)"
+                            : notebookDot === "review"
+                              ? "var(--accent)"
+                              : "var(--fg-3)",
                   }}
                 />
               )}
@@ -126,10 +130,10 @@ export function ChatHeader({
               title="切换小本本（页边 / 展开 / 隐藏）"
             >
               <List className="w-4 h-4" strokeWidth={1.7} />
-              {notebookMode === "hidden" && notebookDot === "blocked" && (
+              {notebookMode === "hidden" && (notebookDot === "failed" || notebookDot === "blocked") && (
                 <span
                   className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full"
-                  style={{ background: "var(--attn)" }}
+                  style={{ background: notebookDot === "failed" ? "var(--err)" : "var(--attn)" }}
                 />
               )}
             </button>

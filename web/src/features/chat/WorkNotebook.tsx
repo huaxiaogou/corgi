@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Check, Maximize2, Minimize2, Search } from "lucide-react";
+import { Check, Maximize2, Minimize2, Pencil, Search, X } from "lucide-react";
 import { api } from "../../lib/api";
 import {
   FILTER_BAR_THRESHOLD,
@@ -33,9 +33,19 @@ interface Props {
 }
 
 function dotBg(derived: DerivedWorkStatus): string {
+  if (derived === "failed") return "var(--err)";
   if (derived === "blocked") return "var(--attn)";
   if (derived === "working") return "var(--ok)";
+  if (derived === "review") return "var(--accent)";
   return "var(--fg-3)";
+}
+
+function formatArtifactStamp(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 function prefersReducedMotion(): boolean {
@@ -62,6 +72,9 @@ export function WorkNotebook({
   const [openItemId, setOpenItemId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
+  const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [expandedArtsIds, setExpandedArtsIds] = useState<Set<string>>(() => new Set());
   const [savingId, setSavingId] = useState<string | null>(null);
   const [exitingIds, setExitingIds] = useState<Set<string>>(() => new Set());
   const [optimisticClosedIds, setOptimisticClosedIds] = useState<Set<string>>(() => new Set());
@@ -200,7 +213,7 @@ export function WorkNotebook({
     return naturalOpen;
   }, [naturalOpen, miniHovered]);
 
-  const drawerLocked = drawerHovered || editingId !== null;
+  const drawerLocked = drawerHovered || editingId !== null || editingTitleId !== null;
   const drawerOrdered = useMemo(() => {
     if (drawerLocked && frozenDrawerIdsRef.current) {
       return applyFrozenOrder(naturalOpen, frozenDrawerIdsRef.current);
@@ -213,7 +226,10 @@ export function WorkNotebook({
   const miniHiddenCount = Math.max(0, miniOrdered.length - miniShown.length);
 
   const showFilterBar =
-    naturalOpen.length > FILTER_BAR_THRESHOLD || searchQuery.trim() !== "" || dotFilter !== "all";
+    naturalOpen.length > FILTER_BAR_THRESHOLD ||
+    (doneExpanded && doneTotal > 0) ||
+    searchQuery.trim() !== "" ||
+    dotFilter !== "all";
   const { active: activeGroup, stale: staleGroup, filteringActive } = useMemo(
     () => filterAndPartitionWorkItems(drawerOrdered, searchQuery, dotFilter),
     [drawerOrdered, searchQuery, dotFilter]
@@ -331,6 +347,40 @@ export function WorkNotebook({
     return () => window.clearTimeout(timer);
   }, [doneExpanded, mode, thread, searchQuery, closedCount]);
 
+  const saveTitle = async (item: WorkItem) => {
+    const trimmed = titleDraft.trim();
+    if (!trimmed || trimmed === item.title.trim()) {
+      setEditingTitleId(null);
+      return;
+    }
+    setSavingId(item.id);
+    try {
+      await api("/api/super/tasks", {
+        id: item.id,
+        title: trimmed,
+        user_edited_title: true,
+      });
+      setEditingTitleId(null);
+      onToast("已更新标题（已锁定防止自动覆盖）");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "改名失败");
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const unbindWorker = async (item: WorkItem, workerName: string) => {
+    setSavingId(item.id);
+    try {
+      await api(`/api/super/tasks/${encodeURIComponent(item.id)}/unbind-worker`, { worker: workerName });
+      onToast(`已从本事项解绑 ${workerName}（历史记录与会话保留）`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "解绑失败");
+    } finally {
+      setSavingId(null);
+    }
+  };
+
   const saveNextStep = async (item: WorkItem) => {
     const trimmed = editDraft.trim();
     if (trimmed === (item.next_step ?? "").trim()) {
@@ -411,6 +461,7 @@ export function WorkNotebook({
     const { item, derived, statusText, linkedWorkers } = entry;
     const isOpen = openItemId === item.id;
     const isEditing = editingId === item.id;
+    const isEditingTitle = editingTitleId === item.id;
     const isExiting = exitingIds.has(item.id);
     const isPulsing = pulsingIds.has(item.id);
     const age = formatShortAge(item.updated_at || item.created_at);
@@ -422,20 +473,66 @@ export function WorkNotebook({
         onClick={() => {
           setOpenItemId((cur) => (cur === item.id ? null : item.id));
           setEditingId(null);
+          setEditingTitleId(null);
         }}
         className={`notebook-acc-row px-4 py-2.5 transition-colors cursor-pointer ${
           isOpen ? "is-open surface-rail" : "surface-hover"
         } ${isExiting ? "notebook-row-exiting" : ""}`}
       >
-        <div className="flex items-center justify-between gap-2.5">
-          <span
-            className={`text-[12.5px] truncate ${
-              derived === "blocked" ? "font-medium text-primary" : "text-primary"
-            }`}
-            title={item.title}
-          >
-            {item.title}
-          </span>
+        <div className="flex items-start justify-between gap-2.5">
+          {isOpen && isEditingTitle ? (
+            <div className="flex-1 flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+              <input
+                type="text"
+                autoFocus
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setEditingTitleId(null);
+                  } else if (e.key === "Enter") {
+                    e.preventDefault();
+                    void saveTitle(item);
+                  }
+                }}
+                className="flex-1 px-2 py-0.5 rounded-md surface-bg border border-strong text-[12px] outline-none"
+              />
+              <button
+                type="button"
+                disabled={savingId === item.id}
+                onClick={() => void saveTitle(item)}
+                className="px-2 py-0.5 rounded-md btn-accent text-[11px] font-medium cursor-pointer disabled:opacity-50"
+              >
+                存
+              </button>
+            </div>
+          ) : (
+            <div className="min-w-0 flex-1 flex items-start gap-1.5">
+              <span
+                className={`text-[12.5px] ${isOpen ? "whitespace-normal break-words leading-snug" : "truncate"} ${
+                  derived === "failed" || derived === "blocked" ? "font-medium text-primary" : "text-primary"
+                }`}
+                title={item.title}
+              >
+                {item.title}
+              </span>
+              {isOpen && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEditingTitleId(item.id);
+                    setTitleDraft(item.title);
+                  }}
+                  className="mt-0.5 p-0.5 rounded text-muted hover:text-primary cursor-pointer shrink-0"
+                  title="修改标题"
+                >
+                  <Pencil className="w-3 h-3" strokeWidth={1.8} />
+                </button>
+              )}
+            </div>
+          )}
           <div className="flex items-center gap-2 shrink-0">
             {!isOpen && (
               <button
@@ -514,15 +611,31 @@ export function WorkNotebook({
               (item.artifacts?.length ?? 0) > 0) && (
               <div className="flex flex-wrap gap-1">
                 {linkedWorkers.map((w) => (
-                  <button
+                  <span
                     key={w.name}
-                    type="button"
-                    onClick={() => onOpenWorker(w.name)}
-                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-hairline surface-rail surface-hover text-[10.5px] font-mono-code text-secondary cursor-pointer"
+                    className="inline-flex items-center rounded border border-hairline surface-rail text-[10.5px] font-mono-code text-secondary"
                   >
-                    <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: dotBg(w.status) }} />
-                    <span>{w.name}</span>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => onOpenWorker(w.name)}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 surface-hover cursor-pointer"
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: dotBg(w.status) }} />
+                      <span>{w.name}</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={savingId === item.id}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void unbindWorker(item, w.name);
+                      }}
+                      title={`解绑 ${w.name}（保留历史，不关闭会话）`}
+                      className="px-1 py-0.5 text-muted hover:text-primary border-l border-hairline cursor-pointer disabled:opacity-40"
+                    >
+                      <X className="w-2.5 h-2.5" strokeWidth={2} />
+                    </button>
+                  </span>
                 ))}
                 {(item.branches ?? []).map((br) => (
                   <span
@@ -533,61 +646,109 @@ export function WorkNotebook({
                   </span>
                 ))}
                 {(() => {
+                  type ChipEntry = {
+                    key: string;
+                    name: string;
+                    stamp: string;
+                    expired?: boolean;
+                    onClick?: () => void;
+                    title: string;
+                  };
                   const snapIds = new Set<string>();
-                  const snapButtons = (item.snapshots ?? []).map((snap) => {
+                  const allChips: ChipEntry[] = [];
+                  for (const snap of [...(item.snapshots ?? [])].reverse()) {
                     snapIds.add(snap.id);
-                    if (snap.expired) {
-                      return (
-                        <span
-                          key={snap.id}
-                          title="快照已过期"
-                          className="px-1.5 py-0.5 rounded border border-hairline text-[10.5px] font-mono-code text-muted line-through"
+                    allChips.push({
+                      key: snap.id,
+                      name: snap.name,
+                      stamp: "",
+                      expired: snap.expired,
+                      title: snap.expired ? "快照已过期" : `${snap.name}（Hub 快照）`,
+                      onClick: snap.expired
+                        ? undefined
+                        : () =>
+                            onOpenArtifact?.({
+                              artifactId: snap.id,
+                              name: snap.name,
+                              kind: snap.kind,
+                              shareToken: snap.share_token,
+                            }),
+                    });
+                  }
+                  for (const art of [...(item.artifacts ?? [])].reverse()) {
+                    if (art.artifact_id && snapIds.has(art.artifact_id)) continue;
+                    const nm = art.name || artifactBasename(art.path);
+                    allChips.push({
+                      key: art.artifact_id || `${art.machine ?? ""}:${art.path}:${art.delivered_at ?? ""}`,
+                      name: nm,
+                      stamp: formatArtifactStamp(art.delivered_at),
+                      title: art.path,
+                      onClick: () =>
+                        art.artifact_id && onOpenArtifact
+                          ? onOpenArtifact({
+                              artifactId: art.artifact_id,
+                              name: nm,
+                              kind: art.kind || "text",
+                            })
+                          : onOpenFile(art.path, art.machine),
+                    });
+                  }
+                  const nameCounts = new Map<string, number>();
+                  for (const c of allChips) {
+                    nameCounts.set(c.name, (nameCounts.get(c.name) ?? 0) + 1);
+                  }
+                  const artsExpanded = expandedArtsIds.has(item.id);
+                  const visibleChips = artsExpanded ? allChips : allChips.slice(0, 3);
+                  const hiddenChips = Math.max(0, allChips.length - visibleChips.length);
+                  return (
+                    <>
+                      {visibleChips.map((c, idx) => {
+                        const dup = (nameCounts.get(c.name) ?? 0) > 1;
+                        const label = dup
+                          ? c.stamp
+                            ? `${c.name} · ${c.stamp}`
+                            : `${c.name} #${allChips.length - idx}`
+                          : c.name;
+                        if (c.expired || !c.onClick) {
+                          return (
+                            <span
+                              key={c.key}
+                              title={c.title}
+                              className="px-1.5 py-0.5 rounded border border-hairline text-[10.5px] font-mono-code text-muted line-through"
+                            >
+                              📄 {label}
+                            </span>
+                          );
+                        }
+                        return (
+                          <button
+                            key={c.key}
+                            type="button"
+                            onClick={c.onClick}
+                            title={c.title}
+                            className="px-1.5 py-0.5 rounded border border-strong surface-hover text-[10.5px] font-mono-code text-primary cursor-pointer"
+                          >
+                            📄 {label}
+                          </button>
+                        );
+                      })}
+                      {hiddenChips > 0 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedArtsIds((prev) => {
+                              const next = new Set(prev);
+                              next.add(item.id);
+                              return next;
+                            })
+                          }
+                          className="px-1.5 py-0.5 rounded border border-hairline text-[10.5px] text-muted surface-hover cursor-pointer"
                         >
-                          📄 {snap.name}
-                        </span>
-                      );
-                    }
-                    return (
-                      <button
-                        key={snap.id}
-                        type="button"
-                        onClick={() =>
-                          onOpenArtifact?.({
-                            artifactId: snap.id,
-                            name: snap.name,
-                            kind: snap.kind,
-                            shareToken: snap.share_token,
-                          })
-                        }
-                        title={`${snap.name}（Hub 快照）`}
-                        className="px-1.5 py-0.5 rounded border border-strong surface-hover text-[10.5px] font-mono-code text-primary cursor-pointer"
-                      >
-                        📄 {snap.name}
-                      </button>
-                    );
-                  });
-                  const legacyButtons = (item.artifacts ?? [])
-                    .filter((art) => !art.artifact_id || !snapIds.has(art.artifact_id))
-                    .map((art) => (
-                      <button
-                        key={art.artifact_id || `${art.machine ?? ""}:${art.path}`}
-                        type="button"
-                        onClick={() =>
-                          art.artifact_id && onOpenArtifact
-                            ? onOpenArtifact({
-                                artifactId: art.artifact_id,
-                                name: art.name || artifactBasename(art.path),
-                                kind: art.kind || "text",
-                              })
-                            : onOpenFile(art.path, art.machine)
-                        }
-                        title={art.path}
-                        className="px-1.5 py-0.5 rounded border border-strong surface-hover text-[10.5px] font-mono-code text-primary cursor-pointer"
-                      >
-                        📄 {art.name || artifactBasename(art.path)}
-                      </button>
-                    ));
-                  return [...snapButtons, ...legacyButtons];
+                          +{hiddenChips} 历史版本
+                        </button>
+                      )}
+                    </>
+                  );
                 })()}
               </div>
             )}
@@ -595,14 +756,7 @@ export function WorkNotebook({
             <div className="flex items-center justify-between gap-2 pt-1">
               <span
                 className="text-[10.5px]"
-                style={{
-                  color:
-                    derived === "blocked"
-                      ? "var(--attn)"
-                      : derived === "working"
-                        ? "var(--ok)"
-                        : "var(--fg-3)",
-                }}
+                style={{ color: dotBg(derived) }}
               >
                 {statusText}
               </span>
@@ -772,12 +926,22 @@ export function WorkNotebook({
               >
                 全部
               </button>
-              {(["blocked", "working", "idle"] as const).map((st) => (
+              {(["failed", "blocked", "working", "review", "idle"] as const).map((st) => (
                 <button
                   key={st}
                   type="button"
                   onClick={() => setDotFilter((cur) => (cur === st ? "all" : st))}
-                  title={st === "blocked" ? "仅看待确认" : st === "working" ? "仅看运行中" : "仅看待推进"}
+                  title={
+                    st === "failed"
+                      ? "仅看执行受阻"
+                      : st === "blocked"
+                        ? "仅看待拍板"
+                        : st === "working"
+                          ? "仅看运行中"
+                          : st === "review"
+                            ? "仅看待审阅"
+                            : "仅看待推进"
+                  }
                   className={`w-6 h-6 rounded-md flex items-center justify-center cursor-pointer ${
                     dotFilter === st ? "surface-bg border border-strong" : ""
                   }`}
@@ -859,11 +1023,19 @@ export function WorkNotebook({
                     doneItems.map((item) => (
                       <div
                         key={item.id}
-                        className="px-2 py-1.5 rounded-lg flex items-center justify-between gap-2 text-[11.5px] surface-hover"
+                        className="px-2 py-1.5 rounded-lg flex items-start justify-between gap-2 text-[11.5px] surface-hover"
                       >
-                        <span className="truncate text-muted line-through" title={item.close_note || item.title}>
-                          {item.title}
-                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-muted line-through" title={item.title}>
+                            {item.title}
+                          </div>
+                          {(item.close_note || item.closed_at) && (
+                            <div className="text-[10.5px] text-muted truncate mt-0.5">
+                              {item.closed_at ? `${formatArtifactStamp(item.closed_at)} · ` : ""}
+                              {item.close_note || ""}
+                            </div>
+                          )}
+                        </div>
                         <button
                           type="button"
                           onClick={() => void reopenItem(item)}

@@ -184,6 +184,7 @@ func (s *Server) registerSuperRoutes(mux *http.ServeMux, api func(string, http.H
 	api("POST /api/super/tasks", s.handleSuperSetTask)
 	api("POST /api/super/tasks/{id}/done", s.handleSuperDoneTask)
 	api("POST /api/super/tasks/{id}/reopen", s.handleSuperReopenTask)
+	api("POST /api/super/tasks/{id}/unbind-worker", s.handleSuperUnbindTaskWorker)
 	api("GET /api/super/triggers", s.handleSuperTriggers)
 	api("GET /api/super/timers", s.handleSuperTimers)
 	api("POST /api/super/timers", s.handleSuperAddTimer)

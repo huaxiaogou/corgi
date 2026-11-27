@@ -564,8 +564,9 @@ func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
 		return
 	}
 	turnNote := e.formatWorkerTurnStatusNote(ctx, w, snap)
+	wiNote := e.formatWorkerWorkItemContext(ctx, w)
 	_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name,
-		fmt.Sprintf("worker %s produced a new update (verify before treating as final acceptance). Last message:\n%s%s%s", w.Name, summary, artNote, turnNote),
+		fmt.Sprintf("worker %s produced a new update (verify before treating as final acceptance). Last message:\n%s%s%s%s", w.Name, summary, artNote, turnNote, wiNote),
 		"", model.RouterName, w.Name, TriggerMeta{WorkItemID: w.WorkItemID, ArtifactID: artID})
 	e.addEvent(ctx, w.Thread, w.Name+" 完成了一轮", w.Name, "done")
 }

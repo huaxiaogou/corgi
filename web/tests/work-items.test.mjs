@@ -22,7 +22,7 @@ async function loadWorkItems() {
   }
 }
 
-test("deriveWorkItems prioritizes blocked -> working -> idle, sorts by updated_at, and detects stale > 7d", async () => {
+test("deriveWorkItems prioritizes failed -> blocked -> working -> review -> idle, sorts by updated_at, and detects stale > 7d", async () => {
   const { deriveWorkItems, DAY_MS } = await loadWorkItems();
   const now = Date.parse("2026-11-26T12:00:00Z");
   const isoAgo = (ms) => new Date(now - ms).toISOString();
@@ -34,10 +34,13 @@ test("deriveWorkItems prioritizes blocked -> working -> idle, sorts by updated_a
     { id: "wi4", thread: "chat:main", title: "待确认任务", workers: ["w-blk"], created_at: isoAgo(DAY_MS), updated_at: isoAgo(7200_000) },
     { id: "wi5", thread: "chat:main", title: "已归档", created_at: isoAgo(DAY_MS), updated_at: isoAgo(60_000), closed_at: isoAgo(30_000) },
     { id: "wi6", thread: "wecom:grp1", title: "其他群聊", created_at: isoAgo(DAY_MS), updated_at: isoAgo(10_000) },
+    { id: "wi7", thread: "chat:main", title: "已交原型待审阅", snapshots: [{ id: "art1", name: "proto.html", kind: "html", size: 100 }], created_at: isoAgo(DAY_MS), updated_at: isoAgo(500_000) },
+    { id: "wi8", thread: "chat:main", title: "故障受阻任务", workers: ["w-fail"], created_at: isoAgo(DAY_MS), updated_at: isoAgo(400_000) },
   ];
   const workers = [
     { name: "w-run", kind: "codex", cwd: "/tmp", task: "", thread: "chat:main", created_at: isoAgo(DAY_MS), status: "working" },
     { name: "w-blk", kind: "claude", cwd: "/tmp", task: "", thread: "chat:main", created_at: isoAgo(DAY_MS), status: "idle" },
+    { name: "w-fail", kind: "agy", cwd: "/tmp", task: "", thread: "chat:main", created_at: isoAgo(DAY_MS), status: "failed", fault_error: "plan model not specified" },
   ];
   const actions = [
     { id: "act1", kind: "worker_dialog", thread: "chat:main", target_worker: "w-blk", title: "确认建索引", status: "pending", created_at: isoAgo(30_000) },
@@ -51,13 +54,17 @@ test("deriveWorkItems prioritizes blocked -> working -> idle, sorts by updated_a
   assert.deepEqual(
     derived.map((x) => [x.item.id, x.derived, x.isStale]),
     [
+      ["wi8", "failed", false],
       ["wi4", "blocked", false],
       ["wi3", "working", false],
+      ["wi7", "review", false],
       ["wi2", "idle", false],
       ["wi1", "idle", true],
     ]
   );
-  assert.equal(derived[3].statusText, "搁置较久");
+  assert.equal(derived[0].statusText, "执行受阻");
+  assert.equal(derived[3].statusText, "待审阅");
+  assert.equal(derived[5].statusText, "搁置较久");
 });
 
 test("applyFrozenOrder preserves hovered ordering while reflecting live status updates", async () => {

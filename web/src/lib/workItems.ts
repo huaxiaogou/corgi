@@ -1,7 +1,7 @@
 import type { Action, WorkItem, Worker } from "../types/api";
 import { isDecisionAction } from "./chatFilter";
 
-export type DerivedWorkStatus = "blocked" | "working" | "idle";
+export type DerivedWorkStatus = "failed" | "blocked" | "working" | "review" | "idle";
 export type NotebookMode = "mini" | "expanded" | "hidden";
 
 export interface LinkedWorkerBadge {
@@ -28,16 +28,19 @@ export const WORK_PAGE_SIZE = 15;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
 export function derivedPriority(status: DerivedWorkStatus): number {
-  if (status === "blocked") return 0;
-  if (status === "working") return 1;
-  return 2;
+  if (status === "failed") return 0;
+  if (status === "blocked") return 1;
+  if (status === "working") return 2;
+  if (status === "review") return 3;
+  return 4;
 }
 
-function workerDotStatus(worker: Worker | undefined, hasPendingAction: boolean): DerivedWorkStatus {
-  if (hasPendingAction) return "blocked";
+function workerDotStatus(worker: Worker | undefined, hasPendingDecision: boolean): DerivedWorkStatus {
+  if (worker && !worker.ended && (worker.status === "failed" || Boolean(worker.fault_error))) return "failed";
+  if (hasPendingDecision) return "blocked";
   if (!worker || worker.ended) return "idle";
   if (worker.status === "blocked") return "blocked";
-  if (worker.status === "working" || worker.status === "starting") return "working";
+  if (worker.status === "working" || worker.status === "starting" || worker.status === "waiting") return "working";
   return "idle";
 }
 
@@ -67,12 +70,16 @@ export function deriveWorkItems(
 
   const pendingWorkIds = new Set<string>();
   const pendingWorkers = new Set<string>();
+  const reviewWorkIds = new Set<string>();
+  const reviewWorkers = new Set<string>();
   for (const act of pendingActions) {
-    if (!isDecisionAction(act)) continue;
-    if (act.work_item_id) {
-      pendingWorkIds.add(act.work_item_id);
-    } else if (act.target_worker) {
-      pendingWorkers.add(act.target_worker);
+    if (act.status !== "pending") continue;
+    if (isDecisionAction(act)) {
+      if (act.work_item_id) pendingWorkIds.add(act.work_item_id);
+      else if (act.target_worker) pendingWorkers.add(act.target_worker);
+    } else if (act.kind === "router_check") {
+      if (act.work_item_id) reviewWorkIds.add(act.work_item_id);
+      else if (act.target_worker) reviewWorkers.add(act.target_worker);
     }
   }
 
@@ -89,14 +96,18 @@ export function deriveWorkItems(
       nameSet.add(w.name);
     }
 
+    let hasFailed = false;
     let hasBlocked = pendingWorkIds.has(item.id);
     let hasWorking = false;
+    let hasReview = reviewWorkIds.has(item.id);
     const linkedWorkers: LinkedWorkerBadge[] = [];
     for (const name of nameSet) {
       const wk = workerByName.get(name);
       const hasAct = pendingWorkers.has(name);
+      if (reviewWorkers.has(name)) hasReview = true;
       const st = workerDotStatus(wk, hasAct);
-      if (st === "blocked") hasBlocked = true;
+      if (st === "failed") hasFailed = true;
+      else if (st === "blocked") hasBlocked = true;
       else if (st === "working") hasWorking = true;
       linkedWorkers.push({
         name,
@@ -105,13 +116,33 @@ export function deriveWorkItems(
         paneId: wk && !wk.ended ? wk.pane_id : undefined,
       });
     }
+    const hasDeliverables = (item.snapshots?.length ?? 0) > 0 || (item.artifacts?.length ?? 0) > 0;
+    if (hasDeliverables) hasReview = true;
 
-    const derived: DerivedWorkStatus = hasBlocked ? "blocked" : hasWorking ? "working" : "idle";
+    const derived: DerivedWorkStatus = hasFailed
+      ? "failed"
+      : hasBlocked
+        ? "blocked"
+        : hasWorking
+          ? "working"
+          : hasReview
+            ? "review"
+            : "idle";
     const updatedMs = parseMs(item.updated_at);
     const createdMs = parseMs(item.created_at);
     const isStale = derived === "idle" && updatedMs > 0 && nowMs - updatedMs > STALE_DAYS * DAY_MS;
     const statusText =
-      derived === "blocked" ? "待确认" : derived === "working" ? "运行中" : isStale ? "搁置较久" : "待推进";
+      derived === "failed"
+        ? "执行受阻"
+        : derived === "blocked"
+          ? "待拍板"
+          : derived === "working"
+            ? "运行中"
+            : derived === "review"
+              ? "待审阅"
+              : isStale
+                ? "搁置较久"
+                : "待推进";
 
     out.push({
       item,

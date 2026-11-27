@@ -345,11 +345,13 @@ func (s *Server) handleSuperSpawn(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSuperSend(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		To     string `json:"to"`
-		Text   string `json:"text"`
-		Thread string `json:"thread"`
-		WorkID string `json:"work_id"`
-		Work   string `json:"work"`
+		To        string `json:"to"`
+		Text      string `json:"text"`
+		Thread    string `json:"thread"`
+		WorkID    string `json:"work_id"`
+		Work      string `json:"work"`
+		WorkTitle string `json:"work_title"`
+		Title     string `json:"title"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -358,7 +360,11 @@ func (s *Server) handleSuperSend(w http.ResponseWriter, r *http.Request) {
 	if workID == "" {
 		workID = strings.TrimSpace(body.Work)
 	}
-	trig, resolvedWorkID, err := s.Engine.SendToWorkerWithWork(r.Context(), body.To, body.Thread, body.Text, workID)
+	workTitle := strings.TrimSpace(body.WorkTitle)
+	if workTitle == "" {
+		workTitle = strings.TrimSpace(body.Title)
+	}
+	trig, resolvedWorkID, err := s.Engine.SendToWorkerWithWorkTitle(r.Context(), body.To, body.Thread, body.Text, workID, workTitle)
 	if err != nil {
 		code := http.StatusNotFound
 		if strings.Contains(err.Error(), "multiple open work items") || errors.Is(err, store.ErrWorkItemClosed) {
@@ -552,13 +558,14 @@ func (s *Server) handleSuperTasks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSuperSetTask(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID            string `json:"id"`
-		Thread        string `json:"thread"`
-		Title         string `json:"title"`
-		NextStep      string `json:"next_step"`
-		ClearNextStep bool   `json:"clear_next_step"`
-		Worker        string `json:"worker"`
-		Branch        string `json:"branch"`
+		ID              string `json:"id"`
+		Thread          string `json:"thread"`
+		Title           string `json:"title"`
+		NextStep        string `json:"next_step"`
+		ClearNextStep   bool   `json:"clear_next_step"`
+		Worker          string `json:"worker"`
+		Branch          string `json:"branch"`
+		UserEditedTitle bool   `json:"user_edited_title"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -574,7 +581,7 @@ func (s *Server) handleSuperSetTask(w http.ResponseWriter, r *http.Request) {
 		strings.TrimSpace(body.Branch) == "" {
 		wi, err = s.Engine.ClearWorkItemNextStep(r.Context(), body.ID)
 	} else {
-		wi, err = s.Engine.SetWorkItem(r.Context(), body.ID, body.Thread, body.Title, body.NextStep, body.Worker, body.Branch)
+		wi, err = s.Engine.SetWorkItemWithOptions(r.Context(), body.ID, body.Thread, body.Title, body.NextStep, body.Worker, body.Branch, body.UserEditedTitle)
 		if err == nil && body.ClearNextStep && strings.TrimSpace(body.NextStep) == "" {
 			wi, err = s.Engine.ClearWorkItemNextStep(r.Context(), wi.ID)
 		}
@@ -615,6 +622,25 @@ func (s *Server) handleSuperDoneTask(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSuperReopenTask(w http.ResponseWriter, r *http.Request) {
 	wi, err := s.Engine.ReopenWorkItem(r.Context(), r.PathValue("id"))
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, store.ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "work_item": wi})
+}
+
+func (s *Server) handleSuperUnbindTaskWorker(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Worker string `json:"worker"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	wi, err := s.Engine.UnbindWorkerFromWorkItem(r.Context(), r.PathValue("id"), body.Worker)
 	if err != nil {
 		code := http.StatusBadRequest
 		if errors.Is(err, store.ErrNotFound) {
@@ -692,16 +718,16 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"settings":           masked,
+		"settings":             masked,
 		"effective_public_url": s.Engine.EffectivePublicURL(),
-		"flag_public_url":    s.Engine.FlagPublicURL(),
-		"policies":           s.Engine.Policies(),
-		"wecom_online":       s.Bus.WeComOnline(),
-		"wecom_error":        wecomErr,
-		"wecom_pending":      wecomPending,
-		"hub_agents":         hubAgents,
-		"machines":           machines,
-		"hook_key":           hookKey,
+		"flag_public_url":      s.Engine.FlagPublicURL(),
+		"policies":             s.Engine.Policies(),
+		"wecom_online":         s.Bus.WeComOnline(),
+		"wecom_error":          wecomErr,
+		"wecom_pending":        wecomPending,
+		"hub_agents":           hubAgents,
+		"machines":             machines,
+		"hook_key":             hookKey,
 	})
 }
 

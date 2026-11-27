@@ -14,6 +14,7 @@ import (
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
 	"github.com/kiperjing/corgi/internal/runtime/herdr"
+	"github.com/kiperjing/corgi/internal/store"
 )
 
 func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, error) {
@@ -210,14 +211,22 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		wk.WorktreeBranch = wtPrep.WorktreeBranch
 		wk.WorktreeBase = wtPrep.BaseCommit
 	}
+	var createdNewWI bool
+	var createdDraftTitle bool
 	if req.Ephemeral {
 		err = e.store.UpsertWorker(ctx, wk)
 	} else {
-		_, err = e.store.AttachWorkerAndUpsert(ctx, wk, targetWorkID, newWorkID, oneLineClip(req.Task, 90), "等待 "+name+" 完成并验收")
+		wiTitle, isDraft := DeriveWorkItemTitle(req.WorkTitle, req.Task, origUserReq)
+		createdNewWI = targetWorkID == "" && newWorkID != ""
+		createdDraftTitle = createdNewWI && isDraft
+		_, err = e.store.AttachWorkerAndUpsert(ctx, wk, targetWorkID, newWorkID, wiTitle, "")
 	}
 	e.wtMu.Unlock()
 	if err != nil {
 		return nil, err
+	}
+	if createdDraftTitle && wk.WorkItemID != "" {
+		_ = e.store.SetWorkItemTitleState(ctx, wk.WorkItemID, store.WorkItemTitleDraft)
 	}
 	if !req.Ephemeral && resumeBranch != "" && wk.WorkItemID != "" {
 		_ = e.store.RecordWorkItemBranch(ctx, wk.WorkItemID, resumeBranch)
@@ -731,6 +740,12 @@ func (e *Engine) SendToWorker(ctx context.Context, workerName, thread, text stri
 // explicit workID attaches to that item; otherwise inherits the worker's open item, requires disambiguation
 // when multiple open items reference the worker, or creates a new item if unassigned.
 func (e *Engine) SendToWorkerWithWork(ctx context.Context, workerName, thread, text, workID string) (*model.Trigger, string, error) {
+	return e.SendToWorkerWithWorkTitle(ctx, workerName, thread, text, workID, "")
+}
+
+// SendToWorkerWithWorkTitle steers an active or newly-adopted worker while ensuring durable
+// work-item linkage, using explicit workTitle when creating a brand-new work item.
+func (e *Engine) SendToWorkerWithWorkTitle(ctx context.Context, workerName, thread, text, workID, workTitle string) (*model.Trigger, string, error) {
 	wk, err := e.store.GetWorker(ctx, workerName)
 	if err != nil || wk.Ended {
 		adopted, adoptErr := e.adoptLiveAgent(ctx, workerName, thread, text)
@@ -779,9 +794,13 @@ func (e *Engine) SendToWorkerWithWork(ctx context.Context, workerName, thread, t
 			return nil, "", idErr
 		}
 	}
-	wi, err := e.store.AttachWorkerAndUpsert(ctx, wk, targetWorkID, newWorkID, oneLineClip(text, 90), "等待 "+wk.Name+" 完成并验收")
+	wiTitle, isDraft := DeriveWorkItemTitle(workTitle, text, "")
+	wi, err := e.store.AttachWorkerAndUpsert(ctx, wk, targetWorkID, newWorkID, wiTitle, "")
 	if err != nil {
 		return nil, "", err
+	}
+	if targetWorkID == "" && isDraft && wi != nil {
+		_ = e.store.SetWorkItemTitleState(ctx, wi.ID, store.WorkItemTitleDraft)
 	}
 	if prevBranch != "" && wi != nil {
 		_ = e.store.RecordWorkItemBranch(ctx, wi.ID, prevBranch)
@@ -891,11 +910,13 @@ func (e *Engine) Report(ctx context.Context, workerName, paneID, text string) (*
 		e.recordWorkerExplicitReport(wk, snap, artID, isProgressReportText(text), wk.ReportAt)
 	}
 	workID := ""
+	wiNote := ""
 	if wk != nil {
 		workID = wk.WorkItemID
+		wiNote = e.formatWorkerWorkItemContext(ctx, wk)
 	}
 	e.addEvent(ctx, thread, fmt.Sprintf("%s 汇报：%s", from, oneLineClip(text, 120)), from, "done")
-	trig, err := e.IngestWithMeta(ctx, "worker", thread, from, fmt.Sprintf("report from %s:\n%s%s%s", from, text, artNote, turnNote), "", model.RouterName, from, TriggerMeta{
+	trig, err := e.IngestWithMeta(ctx, "worker", thread, from, fmt.Sprintf("report from %s:\n%s%s%s%s", from, text, artNote, turnNote, wiNote), "", model.RouterName, from, TriggerMeta{
 		WorkItemID: workID,
 		ArtifactID: artID,
 	})

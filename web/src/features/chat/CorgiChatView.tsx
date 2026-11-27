@@ -396,11 +396,15 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
 
   const notebookSummary = useMemo(() => {
     const derived = deriveWorkItems(data?.work_items ?? [], data?.workers ?? [], pendingActions, thread);
-    const dot: DerivedWorkStatus = derived.some((x) => x.derived === "blocked")
-      ? "blocked"
-      : derived.some((x) => x.derived === "working")
-        ? "working"
-        : "idle";
+    const dot: DerivedWorkStatus = derived.some((x) => x.derived === "failed")
+      ? "failed"
+      : derived.some((x) => x.derived === "blocked")
+        ? "blocked"
+        : derived.some((x) => x.derived === "working")
+          ? "working"
+          : derived.some((x) => x.derived === "review")
+            ? "review"
+            : "idle";
     return { count: derived.length, dot };
   }, [data?.work_items, data?.workers, pendingActions, thread]);
 

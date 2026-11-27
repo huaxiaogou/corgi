@@ -97,6 +97,7 @@ export interface Worker {
   run?: [string, string];
   title?: string;
   status: string;
+  fault_error?: string;
   last_report?: string;
   last_report_artifact_id?: string;
   ended?: boolean;

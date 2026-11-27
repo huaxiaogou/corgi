@@ -13,6 +13,98 @@ import (
 	"github.com/kiperjing/corgi/internal/model"
 )
 
+// WorkItem title governance states stored in kv (zero schema migration):
+//   - "draft": auto-cleaned from raw prompt; Router LLM should distill a crisp title on next milestone.
+//   - "locked": explicitly hand-edited by the human in Web; automated Router/Dream updates preserve it.
+//   - "": distilled by Router LLM; Router may freely refine it as the matter evolves.
+const (
+	WorkItemTitleDraft  = "draft"
+	WorkItemTitleLocked = "locked"
+)
+
+func workItemTitleStateKey(id string) string { return "wi_title:" + strings.TrimSpace(id) }
+
+// GetWorkItemTitleState returns "draft", "locked", or "" for work item id.
+func (s *Store) GetWorkItemTitleState(ctx context.Context, id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	v, ok, err := s.GetKV(ctx, workItemTitleStateKey(id))
+	if err != nil || !ok {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+// SetWorkItemTitleState persists or clears ("") the title governance state for work item id.
+func (s *Store) SetWorkItemTitleState(ctx context.Context, id, state string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return s.DeleteKV(ctx, workItemTitleStateKey(id))
+	}
+	return s.SetKV(ctx, workItemTitleStateKey(id), state)
+}
+
+// UnbindWorkerFromWorkItem transactionally detaches workerName from work item id (and clears
+// worker.WorkItemID when it still points to id) while preserving all historical branches,
+// artifacts, and the live worker pane.
+func (s *Store) UnbindWorkerFromWorkItem(ctx context.Context, id, workerName string) (*model.WorkItem, error) {
+	id = strings.TrimSpace(id)
+	workerName = strings.TrimSpace(workerName)
+	if id == "" || workerName == "" {
+		return nil, fmt.Errorf("work item id and worker name are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin unbind worker: %w", err)
+	}
+	defer tx.Rollback()
+
+	wi, err := getWorkItemTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]string, 0, len(wi.Workers))
+	changed := false
+	for _, wn := range wi.Workers {
+		if wn == workerName {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, wn)
+	}
+	if changed {
+		wi.Workers = filtered
+		wi.UpdatedAt = time.Now()
+		if err := saveWorkItemTx(ctx, tx, wi); err != nil {
+			return nil, err
+		}
+	}
+
+	var rawWk string
+	if qErr := tx.QueryRowContext(ctx, `SELECT data FROM workers WHERE name = ?`, workerName).Scan(&rawWk); qErr == nil {
+		var wk model.Worker
+		if json.Unmarshal([]byte(rawWk), &wk) == nil && wk.WorkItemID == id {
+			wk.WorkItemID = ""
+			if wkData, mErr := mustJSON(&wk); mErr == nil {
+				if _, uErr := tx.ExecContext(ctx, `UPDATE workers SET data = ? WHERE name = ?`, wkData, workerName); uErr != nil {
+					return nil, fmt.Errorf("clear worker work_item_id: %w", uErr)
+				}
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit unbind worker %s from %s: %w", workerName, id, err)
+	}
+	return wi, nil
+}
+
 // ErrWorkItemClosed is returned when attempting to mutate or attach work to an already-closed work item.
 var ErrWorkItemClosed = errors.New("work item already closed")
 

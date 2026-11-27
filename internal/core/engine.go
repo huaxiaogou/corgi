@@ -49,6 +49,7 @@ type SpawnRequest struct {
 	Resume          string `json:"resume"`
 	Worktree        string `json:"worktree,omitempty"` // auto (default) | on | off
 	WorkID          string `json:"work_id,omitempty"`
+	WorkTitle       string `json:"work_title,omitempty"`
 	ProjectID       string `json:"project_id,omitempty"`
 	OriginalRequest string `json:"original_request,omitempty"`
 	Constraint      string `json:"constraint,omitempty"`

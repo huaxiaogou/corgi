@@ -547,3 +547,94 @@ func TestReplyPreSendEmptyAttachmentGate(t *testing.T) {
 		t.Fatalf("expected --re report snapshot attachment reply to succeed, res=%+v err=%v", res, err)
 	}
 }
+
+func TestWorkItemDynamicTitleGovernanceUnbindAndWeComPickerDedup(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	eng, err := NewEngine(context.Background(), st, nil, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// 1. DeriveWorkItemTitle strips real dispatch boilerplate ("新任务（用户原话）：...") and flags draft vs explicit --title.
+	draftTitle, isDraft := DeriveWorkItemTitle("", `新任务（用户原话）：‘画个新的拍板卡原型 我记得以前不长这样’，附件：/Users/foo/a.png`, "")
+	if !isDraft || draftTitle != "画个新的拍板卡原型 我记得以前不长这样" {
+		t.Fatalf("unexpected draft title: (%q, %v)", draftTitle, isDraft)
+	}
+	explicitTitle, isDraft2 := DeriveWorkItemTitle("企微拍板卡交互原型", "很长的原始任务说明", "")
+	if isDraft2 || explicitTitle != "企微拍板卡交互原型" {
+		t.Fatalf("unexpected explicit title: (%q, %v)", explicitTitle, isDraft2)
+	}
+
+	// 2. Send without --title creates clean draft title with empty next_step; Report injects [work_item: ... (draft ...)].
+	wk := &model.Worker{Name: "agy-85", Kind: "agy", PaneID: "w7:p1", Thread: model.MainThread, Status: "idle", CreatedAt: time.Now()}
+	_ = st.UpsertWorker(ctx, wk)
+	_, wiID, err := eng.SendToWorkerWithWorkTitle(ctx, wk.Name, model.MainThread, `新任务（用户原话）：‘画个新的拍板卡原型’`, "", "")
+	if err != nil || wiID == "" {
+		t.Fatalf("SendToWorkerWithWorkTitle failed: wi=%q err=%v", wiID, err)
+	}
+	wi, _ := st.GetWorkItem(ctx, wiID)
+	if wi.Title != "画个新的拍板卡原型" || wi.NextStep != "" {
+		t.Fatalf("expected clean draft title & empty initial next_step, got title=%q next=%q", wi.Title, wi.NextStep)
+	}
+	repTrig, err := eng.Report(ctx, wk.Name, "", "交互原型已完成")
+	if err != nil || !strings.Contains(repTrig.Text, "[work_item: "+wiID) || !strings.Contains(repTrig.Text, "(draft") {
+		t.Fatalf("expected [work_item: ... (draft ...)] injected in report trigger, got %q", repTrig.Text)
+	}
+
+	// 3. Router LLM freely refines draft & evolving titles, while human Web rename locks against automated overwrites.
+	if _, err := eng.SetWorkItem(ctx, wiID, model.MainThread, "企微拍板卡交互原型", "评审原型", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.SetWorkItem(ctx, wiID, model.MainThread, "企微拍板卡方案3实现", "待评审合入", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	wiEvolved, _ := st.GetWorkItem(ctx, wiID)
+	if wiEvolved.Title != "企微拍板卡方案3实现" {
+		t.Fatalf("expected Router LLM able to evolve non-locked title, got %q", wiEvolved.Title)
+	}
+	// Human manual edit in Web locks title.
+	if _, err := eng.SetWorkItemWithOptions(ctx, wiID, model.MainThread, "拍板卡最终版（人工命名）", "", "", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.SetWorkItem(ctx, wiID, model.MainThread, "Router 不应覆盖人工标题", "下一步更新仍应生效", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	wiLocked, _ := st.GetWorkItem(ctx, wiID)
+	if wiLocked.Title != "拍板卡最终版（人工命名）" || wiLocked.NextStep != "下一步更新仍应生效" {
+		t.Fatalf("expected user-locked title preserved while next_step updates, got title=%q next=%q", wiLocked.Title, wiLocked.NextStep)
+	}
+
+	// 4. UnbindWorkerFromWorkItem detaches mislinked worker without losing branches/artifacts or stopping pane.
+	_ = st.RecordWorkItemBranch(ctx, wiID, "corgi/wecom-decision-implementation")
+	wk2 := &model.Worker{Name: "wecom-impl", Kind: "agy", PaneID: "wP:p1", Thread: model.MainThread, Status: "working", WorkItemID: wiID, CreatedAt: time.Now()}
+	_, _ = st.AttachWorkerAndUpsert(ctx, wk2, wiID, "", "", "")
+
+	// 5. Before unbinding, WeCom /w ListSelectableWorkers deduplicates multi-worker WorkItem to 1 primary row (preferring working).
+	picks := eng.ListSelectableWorkers(ctx, 20)
+	if len(picks) < 2 || picks[0].Name != "wecom-impl" || picks[0].WorkItemID != wiID {
+		t.Fatalf("expected working worker wecom-impl picked as primary for %s, got %+v", wiID, picks)
+	}
+	if picks[1].Name != "agy-85" || !strings.Contains(picks[1].Title, "agy-85") {
+		t.Fatalf("expected secondary worker demoted with worker suffix instead of duplicate title, got %+v", picks[1])
+	}
+
+	// Now unbind agy-85 -> removed from WorkItem & worker.WorkItemID cleared, branch & pane preserved.
+	unboundWI, err := eng.UnbindWorkerFromWorkItem(ctx, wiID, "agy-85")
+	if err != nil {
+		t.Fatalf("UnbindWorkerFromWorkItem failed: %v", err)
+	}
+	if len(unboundWI.Workers) != 1 || unboundWI.Workers[0] != "wecom-impl" || len(unboundWI.Branches) != 1 {
+		t.Fatalf("unexpected unbound WorkItem state: %+v", unboundWI)
+	}
+	gotAgy, _ := st.GetWorker(ctx, "agy-85")
+	if gotAgy.Ended || gotAgy.WorkItemID != "" {
+		t.Fatalf("expected agy-85 pane still alive with cleared WorkItemID, got %+v", gotAgy)
+	}
+}

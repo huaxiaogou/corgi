@@ -279,6 +279,7 @@ func cmdSpawn(dir string, args []string) error {
 	worktree := fs.Bool("worktree", false, "force isolated git worktree")
 	noWorktree := fs.Bool("no-worktree", false, "disable automatic git worktree isolation")
 	work := fs.String("work", "", "attach worker to an existing open work item id")
+	title := fs.String("title", "", "concise 8-18 char Chinese work item title (when creating a new work item)")
 	project := fs.String("project", "", "project workspace id or name")
 	var constraints stringList
 	fs.Var(&constraints, "constraint", "immutable hard constraint/red-line for this worker session (repeatable)")
@@ -305,7 +306,7 @@ func cmdSpawn(dir string, args []string) error {
 	body := map[string]any{
 		"kind": *kind, "machine": *machine, "cwd": *cwd, "thread": *thread,
 		"name": *name, "model": *modelName, "effort": *effort, "resume": *resume,
-		"worktree": wtMode, "work_id": *work, "project_id": *project,
+		"worktree": wtMode, "work_id": *work, "work_title": *title, "project_id": *project,
 		"constraint": strings.Join(cleanConstraints, "；"),
 		"ephemeral":  *ephemeral, "task": task, "by": caller(),
 	}
@@ -347,11 +348,12 @@ func cmdSend(dir string, args []string) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	thread := fs.String("thread", "", "thread id")
 	work := fs.String("work", "", "optional work item id to attach this worker to")
+	title := fs.String("title", "", "optional concise work item title when auto-creating a new work item")
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: corgi send [--work WI] <worker> <text | ->")
+		return fmt.Errorf("usage: corgi send [--work WI] [--title \"...\"] <worker> <text | ->")
 	}
 	fi, err := os.Stdin.Stat()
 	isTTY := err == nil && fi.Mode()&os.ModeCharDevice != 0
@@ -360,7 +362,7 @@ func cmdSend(dir string, args []string) error {
 		return err
 	}
 	out, err := apiCall(dir, http.MethodPost, "/api/super/send", map[string]any{
-		"to": fs.Arg(0), "text": text, "thread": *thread, "work_id": *work,
+		"to": fs.Arg(0), "text": text, "thread": *thread, "work_id": *work, "work_title": *title,
 	})
 	if err == nil {
 		fmt.Println(strings.TrimSpace(string(out)))
