@@ -21,7 +21,8 @@ type paneRevStatus struct {
 var (
 	customWorkingRe       = regexp.MustCompile(`(?i)(esc to interrupt|streaming\s*·|task running|[✢✳✶✻✽✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*\(\d+s)`)
 	customBottomWorkingRe = regexp.MustCompile(`(?im)^\s*[✢✳✶✻✽✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒◴◷◶◵]\s*(thinking|pondering|working|streaming|brewing|churning|running|executing|generating|connecting|retrying|waiting|printing|reading|writing|searching|editing|analyzing|思考中|处理中|执行中|生成中)`)
-	titleSpinnerRe        = regexp.MustCompile(`^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✢✳✶✻✽✹◐◓◑◒◴◷◶◵]`)
+	// Exclude static idle prefix '✳' used by Claude Code / CodeBuddy window titles when idle.
+	titleSpinnerRe        = regexp.MustCompile(`^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒◴◷◶◵]`)
 	customReadyRe         = regexp.MustCompile(`(?i)(codebuddy code|bypass permissions|do you trust|shift\+tab to cycle|^>\s*$)`)
 	customIdleChromeRe    = regexp.MustCompile(`(?i)(bypass permissions on|← for agents|↵\s*send|⇧tab to cycle|shift\+tab to cycle)`)
 	customChoiceRe        = regexp.MustCompile(`(?m)^\s*([›>•❯▶]\s+.+|\d+[.)]\s+.+)$`)

@@ -191,7 +191,7 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 		if err == nil {
 			found := false
 			for _, a := range live {
-				if a.Name != nil && *a.Name == model.RouterName {
+				if a.Name != nil && *a.Name == model.RouterName && isHubLocalPane(a.PaneID) {
 					found = true
 					kind := rv.Kind
 					if a.Agent != nil && *a.Agent != "" {

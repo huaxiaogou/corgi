@@ -49,6 +49,14 @@ type liveInfo struct {
 	session string
 }
 
+func isHubSystemName(name string) bool {
+	return name == model.RouterName || name == model.DreamName
+}
+
+func isHubLocalPane(paneID string) bool {
+	return paneID != "" && !strings.Contains(paneID, "@")
+}
+
 func (e *Engine) tick(parent context.Context) {
 	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
 	defer cancel()
@@ -93,6 +101,10 @@ func (e *Engine) tick(parent context.Context) {
 		if a.Name == nil || *a.Name == "" {
 			continue
 		}
+		name := *a.Name
+		if isHubSystemName(name) && !isHubLocalPane(a.PaneID) {
+			continue
+		}
 		li := liveInfo{pane: a.PaneID, status: a.AgentStatus, ready: a.Ready}
 		if a.Agent != nil {
 			li.kind = *a.Agent
@@ -100,10 +112,10 @@ func (e *Engine) tick(parent context.Context) {
 		if a.Session != nil {
 			li.session = extractSessionID(a.Session.Kind, a.Session.Value)
 		}
-		if *a.Name == model.RouterName {
+		if name == model.RouterName {
 			li.status = e.stabilizeRouterStatus(a.PaneID, li.kind, li.status, now)
 		}
-		live[*a.Name] = li
+		live[name] = li
 	}
 	if _, alive := live[model.RouterName]; !alive {
 		e.clearRouterLive()

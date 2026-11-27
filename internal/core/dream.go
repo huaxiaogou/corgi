@@ -316,7 +316,7 @@ func (e *Engine) launchDreamAsync(d *dreamRun, st model.Settings) {
 	// Archive current Router session so writeDreamInput includes it.
 	if live, err := e.fleet.Agents(bg); err == nil {
 		for _, a := range live {
-			if a.Name != nil && *a.Name == model.RouterName && a.Session != nil {
+			if a.Name != nil && *a.Name == model.RouterName && isHubLocalPane(a.PaneID) && a.Session != nil {
 				sid := extractSessionID(a.Session.Kind, a.Session.Value)
 				if sid != "" {
 					kind := agent.NormalizeKind(st.RouterKind)

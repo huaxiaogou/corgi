@@ -324,7 +324,7 @@ func (e *Engine) StopRouter(ctx context.Context, thread string) (bool, error) {
 	}
 	paneID := ""
 	for _, a := range agents {
-		if a.Name != nil && *a.Name == model.RouterName {
+		if a.Name != nil && *a.Name == model.RouterName && isHubLocalPane(a.PaneID) {
 			paneID = a.PaneID
 			break
 		}
@@ -425,7 +425,7 @@ func (e *Engine) isRouterWorking(ctx context.Context) bool {
 		return false
 	}
 	for _, a := range agents {
-		if a.Name != nil && *a.Name == model.RouterName {
+		if a.Name != nil && *a.Name == model.RouterName && isHubLocalPane(a.PaneID) {
 			kind := ""
 			if a.Agent != nil {
 				kind = *a.Agent

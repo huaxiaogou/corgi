@@ -428,7 +428,13 @@ func (f *Fleet) AgentsWithScanned(ctx context.Context) ([]model.Agent, map[strin
 	f.mu.Lock()
 	for _, a := range merged {
 		if a.Name != nil && *a.Name != "" {
-			f.names[*a.Name] = a.PaneID
+			name := *a.Name
+			// Router and Dream are strictly Hub-local system sessions: never let an identically
+			// named pane on a remote Node (e.g. a leftover local dev Hub) hijack Hub routing.
+			if (name == model.RouterName || name == model.DreamName) && strings.Contains(a.PaneID, "@") {
+				continue
+			}
+			f.names[name] = a.PaneID
 		}
 	}
 	f.mu.Unlock()
