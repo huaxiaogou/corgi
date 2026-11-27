@@ -1,4 +1,5 @@
 import type { Action, Entry, Worker } from "../types/api";
+import { isFastSingleAction } from "./decisionCard";
 
 const ROUTINE_EVENT_RE = /(完成了一轮|已退出|回来了|等你确认：|^已停止 )/;
 
@@ -32,12 +33,15 @@ export function isDecisionAction(action: Action | undefined | null): boolean {
 }
 
 /**
- * Router quick-choice (--opt) and review reminder (--check) actions render inline right under
- * their originating Corgi reply bubble instead of floating as a heavy blocking bottom card.
+ * Lightweight review reminders (--check) and fast 1-2 option single-select router choices render
+ * inline right under their originating Corgi reply bubble. Multi-select and >2-option decisions
+ * render in the structured DecisionCard with radio/checkbox selection and explicit submit.
  */
 export function isInlineBubbleAction(action: Action | undefined | null): boolean {
   if (!action || action.status !== "pending") return false;
-  return action.kind === "router_choice" || action.kind === "router_check";
+  if (action.kind === "router_check") return true;
+  if (action.kind === "router_choice") return isFastSingleAction(action);
+  return false;
 }
 
 export interface QuoteVisibilityState {

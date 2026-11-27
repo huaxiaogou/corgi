@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ArrowUpRight, Check, ChevronDown, ChevronUp, Clock, CornerDownRight, MessageSquarePlus, PenLine, X } from "lucide-react";
+import { choiceKeyOf } from "../lib/decisionCard";
 import { normalizeEscapedNewlines } from "../lib/text";
 import type { Action } from "../types/api";
 
@@ -13,7 +14,12 @@ interface Props {
   onOpenWorker?: (workerName: string) => void;
 }
 
-const CHANNEL_LABELS: Record<string, string> = { wecom: "企业微信", web: "Web", router: "Corgi", cli: "命令行" };
+const CHANNEL_LABELS: Record<string, string> = {
+  wecom: "企业微信",
+  web: "Web",
+  router: "Corgi",
+  cli: "命令行",
+};
 
 function formatTime(iso?: string, withDate = false): string {
   if (!iso) return "";
@@ -63,15 +69,23 @@ export function DecisionReceiptCard({
   const isDismissed = action.status === "expired" && action.resolved_by === "dismiss";
   const chosenLabel = action.chosen_label || action.chosen_key || (isDismissed ? "已忽略" : "已处理");
   const choices = action.choices ?? [];
+  const chosenKeySet = new Set(
+    (action.chosen_keys && action.chosen_keys.length > 0
+      ? action.chosen_keys
+      : (action.chosen_key ?? "").split(",")
+    )
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
   const chosenChoice = isCustom
     ? undefined
-    : choices.find(
-        (c) =>
-          (action.chosen_key && c.key && c.key.toLowerCase() === action.chosen_key.toLowerCase()) ||
-          (action.chosen_label && c.label === action.chosen_label)
-      );
-  const otherChoices = choices.filter((c) => c !== chosenChoice);
-  const rawChannel = (action.resolved_by ?? "").trim();
+    : choices.find((c, i) => chosenKeySet.has(choiceKeyOf(c, i).toLowerCase()) || (action.chosen_label && c.label === action.chosen_label));
+  const otherChoices = choices.filter((c, i) => {
+    if (isCustom) return true;
+    const k = choiceKeyOf(c, i).toLowerCase();
+    return !chosenKeySet.has(k) && c !== chosenChoice;
+  });
+  const rawChannel = (action.resolved_channel || action.resolved_by || "").trim();
   const channel = CHANNEL_LABELS[rawChannel.toLowerCase()] ?? rawChannel;
   const needsExpand = question.length > 72 || question.includes("\n");
   const statusLabel = isEsc ? "已取消" : isDismissed ? "已忽略" : "已拍板";
@@ -83,6 +97,7 @@ export function DecisionReceiptCard({
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="w-2 h-2 rounded-full shrink-0" style={{ background: statusDotColor }} />
           <span className="font-medium text-primary">{statusLabel}</span>
+          {action.mode === "multi" && <span className="text-muted">· 多选</span>}
           {isCustom && <span className="text-muted">· 自定义回答</span>}
           {channel && <span className="text-muted">· {channel}</span>}
           {timeText && <span className="font-mono-code text-muted">· {timeText}</span>}
@@ -133,7 +148,7 @@ export function DecisionReceiptCard({
           <div className="min-w-0 flex-1">
             <div className="text-[11px] text-muted">{isCustom ? "你的自定义回答" : isEsc ? "操作结果" : "你的选择"}</div>
             <div className="text-[13.5px] font-semibold text-primary leading-snug whitespace-pre-wrap break-words">{chosenLabel}</div>
-            {chosenChoice?.detail && <div className="mt-0.5 text-xs text-secondary leading-relaxed">{chosenChoice.detail}</div>}
+            {chosenChoice?.detail && action.mode !== "multi" && <div className="mt-0.5 text-xs text-secondary leading-relaxed">{chosenChoice.detail}</div>}
           </div>
         </div>
 

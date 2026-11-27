@@ -342,7 +342,7 @@ func FormatActionResolvedMarkdown(a *model.Action) string {
 	}
 	question := clipRunes(collapseSpaces(firstNonEmpty(a.Title, a.Summary)), 80)
 	worker := collapseSpaces(a.TargetWorker)
-	channel := formatResolvedChannel(a.ResolvedBy)
+	channel := formatResolvedChannel(firstNonEmpty(a.ResolvedChannel, a.ResolvedBy))
 	chosen := clipRunes(collapseSpaces(firstNonEmpty(a.ChosenLabel, a.ChosenKey)), 180)
 
 	var head string

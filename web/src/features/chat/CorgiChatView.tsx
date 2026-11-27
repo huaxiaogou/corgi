@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, Check, Download, ExternalLink, Link2, Pin, X } from "lucide-react";
 import { CorgiButtMark, CorgiMark, StatusDot } from "../../components/CorgiMark";
-import { DecisionCard } from "../../components/DecisionCard";
+import { DecisionCard, type DecisionResolvePayload } from "../../components/DecisionCard";
+import { isFastSingleAction } from "../../lib/decisionCard";
 import { DecisionReceiptCard } from "../../components/DecisionReceiptCard";
 import { MarkdownText } from "../../components/MarkdownText";
 import { PromptQueueTray } from "../../components/PromptQueueTray";
@@ -99,6 +100,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   const [inboxOpen, setInboxOpen] = useState(false);
   const [inboxFilter, setInboxFilter] = useState("all");
   const [inboxSearch, setInboxSearch] = useState("");
+  const [activeFloatingId, setActiveFloatingId] = useState("");
   const [olderEntries, setOlderEntries] = useState<Entry[]>([]);
   const [olderResolvedActions, setOlderResolvedActions] = useState<Record<string, Action>>({});
   const [moreOlder, setMoreOlder] = useState<boolean | null>(null);
@@ -216,7 +218,16 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
     (a) => !(isInlineBubbleAction(a) && a.entry_id && visibleEntryIds.has(a.entry_id))
   );
   const topAction = pendingDecisions[0] ?? pendingChecks[0] ?? null;
-  const topFloatingAction = floatingActions[0] ?? null;
+  const activeFloatingIdx = Math.max(
+    0,
+    floatingActions.findIndex((a) => a.id === activeFloatingId)
+  );
+  const topFloatingAction = floatingActions[activeFloatingIdx] ?? floatingActions[0] ?? null;
+  const switchFloatingQueue = (delta: number) => {
+    if (floatingActions.length <= 1) return;
+    const nextIdx = (activeFloatingIdx + delta + floatingActions.length) % floatingActions.length;
+    setActiveFloatingId(floatingActions[nextIdx].id);
+  };
   const snoozedCount = thread === "chat:main" ? (data?.snoozed_actions ?? 0) : 0;
   const filteredInbox = pendingActions.filter((a) => {
     if (inboxFilter !== "all" && actionCategoryTag(a).key !== inboxFilter) return false;
@@ -564,7 +575,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                         <span className="font-medium text-primary truncate">{act.title}</span>
                       </button>
                       <div className="flex items-center gap-1.5 shrink-0">
-                        {primaryChoice ? (
+                        {primaryChoice && isFastSingleAction(act) ? (
                           <button
                             type="button"
                             onClick={() =>
@@ -576,6 +587,18 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                             className="px-2 py-0.5 rounded-md btn-accent text-[11px] cursor-pointer"
                           >
                             {primaryChoice.label}
+                          </button>
+                        ) : primaryChoice ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActiveFloatingId(act.id);
+                              setInboxOpen(false);
+                              scrollToBottom(true);
+                            }}
+                            className="px-2 py-0.5 rounded-md border border-strong surface-bg surface-hover text-primary text-[11px] cursor-pointer"
+                          >
+                            去选择
                           </button>
                         ) : act.kind === "router_check" ? (
                           <button
@@ -1166,20 +1189,29 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
               <DecisionCard
                 action={topFloatingAction}
                 workerNames={activeWorkers.map((w) => w.name)}
-                onResolve={async (id, key, custom) => {
-                  await api(`/api/super/actions/${encodeURIComponent(id)}/resolve`, {
-                    choice: key,
-                    by: "web",
-                    ...(custom ? { custom: true } : {}),
-                  });
-                  onToast(custom ? "已提交自定义回答并同步" : "已拍板并同步");
+                queuePos={activeFloatingIdx + 1}
+                queueTotal={floatingActions.length}
+                onSwitchQueue={switchFloatingQueue}
+                onResolve={async (id, payload: DecisionResolvePayload) => {
+                  const body: Record<string, unknown> = { by: "web" };
+                  if (payload.choices && payload.choices.length > 0) {
+                    body.choices = payload.choices;
+                  } else {
+                    body.choice = payload.choice ?? "";
+                  }
+                  if (payload.custom) body.custom = true;
+                  await api(`/api/super/actions/${encodeURIComponent(id)}/resolve`, body);
+                  onToast(payload.custom ? "已提交自定义回答并同步" : "已拍板并同步");
                 }}
-                onSnooze={async (id) => {
-                  await api(`/api/super/actions/${encodeURIComponent(id)}/snooze`, {});
-                  onToast("已暂缓至明天晨报再次提醒");
+                onSnooze={async (id, minutes) => {
+                  await api(`/api/super/actions/${encodeURIComponent(id)}/snooze`, {
+                    by: "web",
+                    ...(minutes ? { minutes } : {}),
+                  });
+                  onToast(minutes ? `已暂缓 ${minutes} 分钟后提醒` : "已暂缓至明天晨报再次提醒");
                 }}
                 onDismiss={async (id) => {
-                  await api(`/api/super/actions/${encodeURIComponent(id)}/dismiss`, {});
+                  await api(`/api/super/actions/${encodeURIComponent(id)}/dismiss`, { by: "web" });
                   onToast("已忽略待办");
                 }}
                 onOpenWorker={openWorkerByName}

@@ -6,19 +6,22 @@ import (
 )
 
 type cardEventPayload struct {
-	TaskID          string `json:"task_id"`
-	TaskIDPascal    string `json:"TaskId"`
-	EventKey        string `json:"event_key"`
-	EventKeyPascal  string `json:"EventKey"`
-	ResponseCode    string `json:"response_code"`
-	ResponseCodePas string `json:"ResponseCode"`
-	CardType        string `json:"card_type"`
-	CardTypePascal  string `json:"CardType"`
+	TaskID          string          `json:"task_id"`
+	TaskIDPascal    string          `json:"TaskId"`
+	EventKey        string          `json:"event_key"`
+	EventKeyPascal  string          `json:"EventKey"`
+	ResponseCode    string          `json:"response_code"`
+	ResponseCodePas string          `json:"ResponseCode"`
+	CardType        string          `json:"card_type"`
+	CardTypePascal  string          `json:"CardType"`
+	SelectedItems   json.RawMessage `json:"selected_items"`
+	SelectedPascal  json.RawMessage `json:"SelectedItems"`
 }
 
-// ParseCardEventCallback parses a button_interaction template_card click event.
+// ParseCardEventCallback parses button_interaction and vote_interaction template_card events.
 // It accepts both nested event.template_card_event and flattened event payloads,
-// in either snake_case or PascalCase, while ignoring non-card events (e.g. enter_chat).
+// in either snake_case or PascalCase, including vote_interaction selected_items,
+// while ignoring non-card events (e.g. enter_chat).
 func ParseCardEventCallback(reqID string, raw json.RawMessage) (CardClickEvent, bool) {
 	var b struct {
 		ChatID            string            `json:"chatid"`
@@ -29,6 +32,10 @@ func ParseCardEventCallback(reqID string, raw json.RawMessage) (CardClickEvent, 
 		TaskIDPascal      string            `json:"TaskId"`
 		EventKey          string            `json:"event_key"`
 		EventKeyPascal    string            `json:"EventKey"`
+		CardType          string            `json:"card_type"`
+		CardTypePascal    string            `json:"CardType"`
+		SelectedItems     json.RawMessage   `json:"selected_items"`
+		SelectedPascal    json.RawMessage   `json:"SelectedItems"`
 		TemplateCardEvent *cardEventPayload `json:"template_card_event"`
 		From              struct {
 			UserID  string `json:"userid"`
@@ -42,8 +49,12 @@ func ParseCardEventCallback(reqID string, raw json.RawMessage) (CardClickEvent, 
 			TaskIDPascal      string            `json:"TaskId"`
 			EventKey          string            `json:"event_key"`
 			EventKeyPascal    string            `json:"EventKey"`
+			CardType          string            `json:"card_type"`
+			CardTypePascal    string            `json:"CardType"`
 			ResponseCode      string            `json:"response_code"`
 			ResponseCodePas   string            `json:"ResponseCode"`
+			SelectedItems     json.RawMessage   `json:"selected_items"`
+			SelectedPascal    json.RawMessage   `json:"SelectedItems"`
 			TemplateCardEvent *cardEventPayload `json:"template_card_event"`
 		} `json:"event"`
 	}
@@ -63,24 +74,34 @@ func ParseCardEventCallback(reqID string, raw json.RawMessage) (CardClickEvent, 
 	if nested == nil {
 		nested = b.TemplateCardEvent
 	}
-	var nestedTaskID, nestedEventKey, nestedRespCode string
+	var nestedTaskID, nestedEventKey, nestedRespCode, nestedCardType string
+	var rawSelected json.RawMessage
 	if nested != nil {
 		nestedTaskID = firstNonEmpty(nested.TaskID, nested.TaskIDPascal)
 		nestedEventKey = firstNonEmpty(nested.EventKey, nested.EventKeyPascal)
 		nestedRespCode = firstNonEmpty(nested.ResponseCode, nested.ResponseCodePas)
+		nestedCardType = firstNonEmpty(nested.CardType, nested.CardTypePascal)
+		rawSelected = firstRawJSON(nested.SelectedItems, nested.SelectedPascal)
 	}
+	rawSelected = firstRawJSON(rawSelected, b.Event.SelectedItems, b.Event.SelectedPascal, b.SelectedItems, b.SelectedPascal)
 
 	taskID := firstNonEmpty(nestedTaskID, b.Event.TaskID, b.Event.TaskIDPascal, b.TaskID, b.TaskIDPascal)
 	eventKey := firstNonEmpty(nestedEventKey, b.Event.EventKey, b.Event.EventKeyPascal, b.EventKey, b.EventKeyPascal)
 	respCode := firstNonEmpty(nestedRespCode, b.Event.ResponseCode, b.Event.ResponseCodePas, b.ResponseCode, b.ResponseCodePas)
-	if taskID == "" && eventKey == "" {
+	cardType := firstNonEmpty(nestedCardType, b.Event.CardType, b.Event.CardTypePascal, b.CardType, b.CardTypePascal)
+
+	questionKey, selectedKeys := parseSelectedItems(rawSelected)
+	if taskID == "" && eventKey == "" && questionKey == "" {
 		return CardClickEvent{}, false
 	}
 
-	actionID, choiceKey := parseEventKey(taskID, eventKey)
+	actionID, choiceKey := parseEventKey(firstNonEmpty(questionKey, taskID), eventKey)
 	actionID = strings.TrimSpace(actionID)
 	choiceKey = strings.TrimSpace(choiceKey)
-	if actionID == "" || choiceKey == "" {
+	if choiceKey == "" && len(selectedKeys) > 0 {
+		choiceKey = "submit"
+	}
+	if actionID == "" || (choiceKey == "" && len(selectedKeys) == 0) {
 		return CardClickEvent{}, false
 	}
 
@@ -93,11 +114,110 @@ func ParseCardEventCallback(reqID string, raw json.RawMessage) (CardClickEvent, 
 		ChatType:     strings.TrimSpace(b.ChatType),
 		ChatID:       chatID,
 		FromUser:     fromUser,
+		CardType:     strings.TrimSpace(cardType),
 		TaskID:       firstNonEmpty(taskID, actionID),
 		ActionID:     actionID,
 		ChoiceKey:    choiceKey,
+		QuestionKey:  questionKey,
+		SelectedKeys: selectedKeys,
 		ResponseCode: respCode,
 	}, true
+}
+
+func firstRawJSON(vals ...json.RawMessage) json.RawMessage {
+	for _, v := range vals {
+		t := strings.TrimSpace(string(v))
+		if t != "" && t != "null" {
+			return v
+		}
+	}
+	return nil
+}
+
+type rawSelectedItem struct {
+	QuestionKey       string          `json:"question_key"`
+	QuestionKeyPascal string          `json:"QuestionKey"`
+	OptionIDs         json.RawMessage `json:"option_ids"`
+	OptionIDsPascal   json.RawMessage `json:"OptionIds"`
+}
+
+func parseSelectedItems(raw json.RawMessage) (questionKey string, optionIDs []string) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	var items []rawSelectedItem
+	trimmed := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(trimmed, "[") {
+		_ = json.Unmarshal(raw, &items)
+	} else {
+		var wrapper struct {
+			SelectedItem       []rawSelectedItem `json:"selected_item"`
+			SelectedItemPascal []rawSelectedItem `json:"SelectedItem"`
+		}
+		if json.Unmarshal(raw, &wrapper) == nil {
+			items = append(items, wrapper.SelectedItem...)
+			items = append(items, wrapper.SelectedItemPascal...)
+		}
+	}
+	seen := map[string]bool{}
+	for _, it := range items {
+		if questionKey == "" {
+			questionKey = firstNonEmpty(it.QuestionKey, it.QuestionKeyPascal)
+		}
+		for _, id := range parseOptionIDs(firstRawJSON(it.OptionIDs, it.OptionIDsPascal)) {
+			if id != "" && !seen[id] {
+				seen[id] = true
+				optionIDs = append(optionIDs, id)
+			}
+		}
+	}
+	return questionKey, optionIDs
+}
+
+func parseOptionIDs(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var arr []string
+		if json.Unmarshal(raw, &arr) == nil {
+			return cleanOptionIDList(arr)
+		}
+		return nil
+	}
+	if strings.HasPrefix(trimmed, `"`) {
+		var s string
+		if json.Unmarshal(raw, &s) == nil && strings.TrimSpace(s) != "" {
+			return []string{strings.TrimSpace(s)}
+		}
+		return nil
+	}
+	var obj struct {
+		OptionID       json.RawMessage `json:"option_id"`
+		OptionIDPascal json.RawMessage `json:"OptionId"`
+	}
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	inner := firstRawJSON(obj.OptionID, obj.OptionIDPascal)
+	if len(inner) == 0 {
+		return nil
+	}
+	return parseOptionIDs(inner)
+}
+
+func cleanOptionIDList(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if t := strings.TrimSpace(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func extractCallbackEventType(raw json.RawMessage) string {

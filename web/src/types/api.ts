@@ -55,6 +55,7 @@ export interface ActionChoice {
   label: string;
   detail?: string;
   value?: string;
+  recommended?: boolean;
 }
 
 export interface Action {
@@ -68,11 +69,15 @@ export interface Action {
   title: string;
   summary?: string;
   command?: string;
+  mode?: "single" | "multi";
+  confirm_label?: string;
   choices?: ActionChoice[];
   status: "pending" | "resolved" | "expired" | "snoozed";
   category?: "blocked" | "worktree" | "decision" | "stale" | string;
   resolved_by?: string;
+  resolved_channel?: string;
   chosen_key?: string;
+  chosen_keys?: string[];
   chosen_label?: string;
   pushed_to_wecom?: boolean;
   created_at: string;

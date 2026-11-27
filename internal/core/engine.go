@@ -9,7 +9,6 @@ import (
 	"os"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -687,17 +686,20 @@ func (e *Engine) buildDispatchHint(req SayRequest) string {
 // ReplyRequest describes a Corgi outbound reply with optional quick-choice buttons,
 // review check, digest replacement, work item linkage, or explicit file attachments.
 type ReplyRequest struct {
-	Thread   string
-	Text     string
-	ReID     string
-	Options  []string
-	Files    []string
-	Machine  string
-	WorkID   string
-	Check    bool
-	Digest   bool
-	Worker   string
-	Category string
+	Thread            string
+	Text              string
+	ReID              string
+	Options           []string
+	StructuredChoices []model.ActionChoice
+	Mode              string // single (default) | multi
+	ConfirmLabel      string
+	Files             []string
+	Machine           string
+	WorkID            string
+	Check             bool
+	Digest            bool
+	Worker            string
+	Category          string
 }
 
 // ReplyResult carries the persisted entry, optional action, warning string, and per-file delivery outcomes.
@@ -737,7 +739,7 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 	if text == "" {
 		return nil, fmt.Errorf("empty reply")
 	}
-	opts, err := cleanOptions(req.Options)
+	structuredChoices, opts, err := normalizeStructuredChoices(req.StructuredChoices, req.Options)
 	if err != nil {
 		return nil, err
 	}
@@ -936,13 +938,11 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 		}
 		kind := model.ActionKindRouterChoice
 		var choices []model.ActionChoice
+		actionMode := ""
 		if hasOpts {
-			choices = make([]model.ActionChoice, 0, len(opts))
-			for i, label := range opts {
-				choices = append(choices, model.ActionChoice{
-					Key:   strconv.Itoa(i + 1),
-					Label: label,
-				})
+			choices = structuredChoices
+			if strings.EqualFold(strings.TrimSpace(req.Mode), model.ActionModeMulti) {
+				actionMode = model.ActionModeMulti
 			}
 			if req.Digest {
 				kind = model.ActionKindPatrolDigest
@@ -965,6 +965,10 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 				cat = "decision"
 			}
 		}
+		confirmLabel := strings.TrimSpace(req.ConfirmLabel)
+		if len([]rune(confirmLabel)) > 16 {
+			confirmLabel = oneLineClip(confirmLabel, 16)
+		}
 		action = &model.Action{
 			ID:           aid,
 			Kind:         kind,
@@ -973,6 +977,8 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 			WorkItemID:   workID,
 			TargetWorker: strings.TrimSpace(req.Worker),
 			Category:     cat,
+			Mode:         actionMode,
+			ConfirmLabel: confirmLabel,
 			Title:        oneLineClip(text, 64),
 			Summary:      text,
 			Choices:      choices,
@@ -1247,10 +1253,10 @@ func cleanOptions(raw []string) ([]string, error) {
 			return nil, fmt.Errorf("option %d exceeds %d characters (%d)", i+1, maxOptionRunes, n)
 		}
 		if !slices.Contains(out, s) {
-			out = append(out, s)
-			if len(out) >= 6 {
-				break
+			if len(out) >= maxActionOptions {
+				return nil, fmt.Errorf("too many options (max %d supported without truncation)", maxActionOptions)
 			}
+			out = append(out, s)
 		}
 	}
 	return out, nil

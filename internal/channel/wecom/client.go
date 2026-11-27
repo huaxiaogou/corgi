@@ -28,15 +28,18 @@ type IncomingMessage struct {
 	Attachments []MediaRef
 }
 
-// CardClickEvent is a normalized allowlisted template card button click.
+// CardClickEvent is a normalized allowlisted template card button or vote callback.
 type CardClickEvent struct {
 	ReqID        string
 	ChatType     string // single | group
 	ChatID       string
 	FromUser     string
+	CardType     string // button_interaction | vote_interaction
 	TaskID       string
 	ActionID     string
 	ChoiceKey    string
+	QuestionKey  string
+	SelectedKeys []string
 	ResponseCode string
 }
 
@@ -336,7 +339,7 @@ func (c *Client) handleFrameWithErr(ctx context.Context, data []byte, subReqID s
 			c.lastSingleUser = ev.FromUser
 			c.mu.Unlock()
 		}
-		c.logger.Info("received wecom card click", "req_id", ev.ReqID, "action", ev.ActionID, "task_id", ev.TaskID, "choice", ev.ChoiceKey, "user", ev.FromUser)
+		c.logger.Info("received wecom card click", "req_id", ev.ReqID, "card_type", ev.CardType, "action", ev.ActionID, "task_id", ev.TaskID, "choice", ev.ChoiceKey, "selected", ev.SelectedKeys, "user", ev.FromUser)
 		if c.handlers.OnCardClick != nil {
 			go c.handlers.OnCardClick(ctx, ev)
 		}

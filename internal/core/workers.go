@@ -1041,6 +1041,9 @@ func (e *Engine) resolveAction(ctx context.Context, actionID, resolvedBy, choice
 	if err != nil {
 		return nil, err
 	}
+	if act.Status != model.ActionPending {
+		return nil, store.ErrActionAlreadyResolved
+	}
 	var (
 		chosenKey    string
 		chosenLabel  string
@@ -1056,6 +1059,17 @@ func (e *Engine) resolveAction(ctx context.Context, actionID, resolvedBy, choice
 		(strings.EqualFold(trimmed, "ack") || strings.EqualFold(trimmed, "seen") || trimmed == "已看") {
 		chosenKey = "ack"
 		chosenLabel = "已看"
+	} else if k, lbl, cur, ok := matchStrictActionChoice(act, trimmed); ok {
+		chosenKey, chosenLabel, chosenCursor = k, lbl, cur
+	} else if act.Kind == model.ActionKindWorkerDialog {
+		// Allow label-word match for AnswerWorker CLI convenience, but never send unmatched arbitrary text to a live terminal.
+		var matched bool
+		chosenKey, chosenLabel, chosenCursor, matched = matchLabelSubstringChoice(act, trimmed)
+		if !matched {
+			return nil, fmt.Errorf("invalid choice %q for terminal dialog %s", trimmed, act.ID)
+		}
+	} else if len(act.Choices) > 0 {
+		return nil, fmt.Errorf("invalid choice %q for action %s", trimmed, act.ID)
 	} else {
 		chosenKey, chosenLabel, chosenCursor = matchActionChoice(act, trimmed)
 	}
@@ -1133,7 +1147,12 @@ func buildCustomDecisionPromptContext(a *model.Action) string {
 
 // DismissAction atomically dismisses a pending reminder/choice without sending a reply to Router.
 func (e *Engine) DismissAction(ctx context.Context, actionID string) (*model.Action, error) {
-	act, err := e.store.DismissAction(ctx, actionID)
+	return e.DismissActionBy(ctx, actionID, "")
+}
+
+// DismissActionBy atomically dismisses a pending action and records the originating channel.
+func (e *Engine) DismissActionBy(ctx context.Context, actionID, channel string) (*model.Action, error) {
+	act, err := e.store.DismissActionBy(ctx, actionID, channel)
 	if err != nil {
 		return nil, err
 	}
@@ -1204,6 +1223,19 @@ func (e *Engine) sendDialogAnswer(ctx context.Context, paneID, key string, curso
 		return e.fleet.SendKeys(ctx, paneID, keys...)
 	}
 	return e.fleet.SendText(ctx, paneID, key, true)
+}
+
+func matchLabelSubstringChoice(a *model.Action, raw string) (key, label string, cursor int, ok bool) {
+	low := strings.ToLower(strings.TrimSpace(raw))
+	if low == "" {
+		return "", "", 0, false
+	}
+	for i, c := range a.Choices {
+		if strings.Contains(strings.ToLower(c.Label), low) {
+			return c.Key, c.Label, i + 1, true
+		}
+	}
+	return "", "", 0, false
 }
 
 func matchActionChoice(a *model.Action, raw string) (key, label string, cursor int) {

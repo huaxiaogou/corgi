@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	MainThread          = "chat:main"
@@ -214,41 +217,66 @@ const (
 	ActionResolved = "resolved"
 	ActionExpired  = "expired"
 	ActionSnoozed  = "snoozed"
+
+	ActionModeSingle = "single"
+	ActionModeMulti  = "multi"
 )
 
 // ActionChoice is one selectable button on a unified decision card.
 type ActionChoice struct {
-	Key    string `json:"key"` // "1", "2", "esc", etc.
-	Label  string `json:"label"`
-	Detail string `json:"detail,omitempty"`
-	Value  string `json:"value,omitempty"` // raw input/cursor index when answering a terminal dialog
+	Key         string `json:"key"` // "1", "2", "esc", etc.
+	Label       string `json:"label"`
+	Detail      string `json:"detail,omitempty"`
+	Value       string `json:"value,omitempty"` // raw input/cursor index when answering a terminal dialog
+	Recommended bool   `json:"recommended,omitempty"`
 }
 
 // Action unifies router quick-choice cards, review checks, and blocked worker dialogs
 // so Web/PWA and WeCom template cards stay strictly synchronized without double-submission.
 type Action struct {
-	ID            string         `json:"id"`
-	Kind          string         `json:"kind"`
-	Thread        string         `json:"thread"`
-	EntryID       string         `json:"entry_id,omitempty"`
-	WorkItemID    string         `json:"work_item_id,omitempty"`
-	TargetWorker  string         `json:"target_worker,omitempty"`
-	PaneID        string         `json:"pane_id,omitempty"`
-	Title         string         `json:"title"`
-	Summary       string         `json:"summary,omitempty"`
-	Command       string         `json:"command,omitempty"`
-	Choices       []ActionChoice `json:"choices,omitempty"`
-	Status        string         `json:"status"`                // pending | resolved | expired | snoozed
-	Category      string         `json:"category,omitempty"`    // blocked | worktree | decision | stale
-	ResolvedBy    string         `json:"resolved_by,omitempty"` // web | wecom | router | cli
-	ExpiredReason string         `json:"expired_reason,omitempty"`
-	ChosenKey     string         `json:"chosen_key,omitempty"`
-	ChosenLabel   string         `json:"chosen_label,omitempty"`
-	WeComRespCode string         `json:"wecom_resp_code,omitempty"`
-	PushedToWeCom bool           `json:"pushed_to_wecom,omitempty"`
-	CreatedAt     time.Time      `json:"created_at"`
-	ResolvedAt    *time.Time     `json:"resolved_at,omitempty"`
-	SnoozeUntil   *time.Time     `json:"snooze_until,omitempty"`
+	ID              string         `json:"id"`
+	Kind            string         `json:"kind"`
+	Thread          string         `json:"thread"`
+	EntryID         string         `json:"entry_id,omitempty"`
+	WorkItemID      string         `json:"work_item_id,omitempty"`
+	TargetWorker    string         `json:"target_worker,omitempty"`
+	PaneID          string         `json:"pane_id,omitempty"`
+	Title           string         `json:"title"`
+	Summary         string         `json:"summary,omitempty"`
+	Command         string         `json:"command,omitempty"`
+	Mode            string         `json:"mode,omitempty"` // single (default) | multi
+	ConfirmLabel    string         `json:"confirm_label,omitempty"`
+	Choices         []ActionChoice `json:"choices,omitempty"`
+	Status          string         `json:"status"`                     // pending | resolved | expired | snoozed
+	Category        string         `json:"category,omitempty"`         // blocked | worktree | decision | stale
+	ResolvedBy      string         `json:"resolved_by,omitempty"`      // web | wecom | router | cli | dismiss | expired
+	ResolvedChannel string         `json:"resolved_channel,omitempty"` // web | wecom | router | cli
+	ExpiredReason   string         `json:"expired_reason,omitempty"`
+	ChosenKey       string         `json:"chosen_key,omitempty"`
+	ChosenKeys      []string       `json:"chosen_keys,omitempty"`
+	ChosenLabel     string         `json:"chosen_label,omitempty"`
+	WeComRespCode   string         `json:"wecom_resp_code,omitempty"`
+	PushedToWeCom   bool           `json:"pushed_to_wecom,omitempty"`
+	CreatedAt       time.Time      `json:"created_at"`
+	ResolvedAt      *time.Time     `json:"resolved_at,omitempty"`
+	SnoozeUntil     *time.Time     `json:"snooze_until,omitempty"`
+}
+
+// IsMulti reports whether this Action allows selecting multiple options before confirming.
+func (a *Action) IsMulti() bool {
+	if a == nil || a.Kind == ActionKindWorkerDialog || a.Kind == ActionKindRouterCheck {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(a.Mode), ActionModeMulti)
+}
+
+// IsFastSingle reports whether this Action is a 1-2 choice single-select card that supports
+// instant 1-tap resolution without an explicit submit step.
+func (a *Action) IsFastSingle() bool {
+	if a == nil || a.IsMulti() {
+		return false
+	}
+	return len(a.Choices) <= 2
 }
 
 // IsDecision reports whether this Action represents an actual human decision or blocking terminal

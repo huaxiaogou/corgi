@@ -220,6 +220,8 @@ func cmdReply(dir string, args []string) error {
 	category := fs.String("category", "", "optional action category (morning | patrol | stale | worktree | decision)")
 	machine := fs.String("machine", "", "source machine for --file attachments (default Hub local)")
 	work := fs.String("work", "", "optional work item id to record delivered file artifacts")
+	multi := fs.Bool("multi", false, "allow multi-select checkboxes on --opt decision card")
+	confirmLabel := fs.String("confirm-label", "", "optional submit button label for multi-select or >2-option cards")
 	var opts stringList
 	fs.Var(&opts, "opt", "quick-choice option button (repeatable)")
 	var files stringList
@@ -235,10 +237,15 @@ func cmdReply(dir string, args []string) error {
 	if len(files) > 0 {
 		timeout = 90 * time.Second
 	}
+	mode := ""
+	if *multi {
+		mode = "multi"
+	}
 	out, err := apiCallWithTimeout(dir, http.MethodPost, "/api/super/reply", map[string]any{
 		"thread": *thread, "re": *re, "text": text, "options": []string(opts), "files": []string(files),
 		"machine": *machine, "work_id": *work, "check": *check,
 		"digest": *digest, "worker": *worker, "category": *category,
+		"mode": mode, "confirm_label": *confirmLabel,
 	}, timeout)
 	if err == nil {
 		fmt.Println(strings.TrimSpace(string(out)))

@@ -12,7 +12,6 @@ import (
 	"github.com/kiperjing/corgi/internal/channel/wecom"
 	"github.com/kiperjing/corgi/internal/core"
 	"github.com/kiperjing/corgi/internal/model"
-	"github.com/kiperjing/corgi/internal/store"
 )
 
 type outboxItem struct {
@@ -50,6 +49,7 @@ type Bus struct {
 	lastRouterReplyAt map[string]time.Time
 	seenWeComMsgs     map[string]time.Time
 	pendingWebQuote   map[string]string
+	wecomCardStates   map[string]*wecomDecisionCardState
 	webSeenAt         time.Time
 	wecomActiveAt     time.Time
 }
@@ -71,6 +71,7 @@ func NewBus(eng *core.Engine, wc *wecom.Client, logger *slog.Logger) *Bus {
 		lastRouterReplyAt: map[string]time.Time{},
 		seenWeComMsgs:     map[string]time.Time{},
 		pendingWebQuote:   map[string]string{},
+		wecomCardStates:   map[string]*wecomDecisionCardState{},
 	}
 	if wc != nil {
 		b.sendFn = wc.SendMarkdown
@@ -448,18 +449,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 		if st != nil && st.chatID != "" && chatID == "" {
 			chatID = st.chatID
 		}
-		cardPushed := false
-		if b.wecom != nil && b.wecom.Online() {
-			if err := b.wecom.SendActionCard(ctx, chatID, action); err != nil {
-				b.logger.Warn("push action card to wecom failed", "action", action.ID, "err", err)
-			} else {
-				cardPushed = true
-				action.PushedToWeCom = true
-				if b.engine != nil {
-					_ = b.engine.MarkActionPushedToWeCom(ctx, action.ID)
-				}
-			}
-		}
+		cardPushed := b.pushWeComDecisionCard(ctx, entry.Thread, chatID, action, false)
 		if st != nil {
 			if cardPushed {
 				_, _ = st.seal(ctx, "", "请在下方卡片选择 👇")
@@ -923,27 +913,23 @@ func (b *Bus) drainChatOutboxLocked(ctx context.Context, chatID string, force bo
 }
 
 func (b *Bus) OnActionCreated(ctx context.Context, action *model.Action) {
-	if action == nil || b.wecom == nil || !b.wecom.Online() {
+	if action == nil || !action.IsDecision() || b.wecom == nil || !b.wecom.Online() {
 		return
 	}
 	if suppress, _ := b.wecomDeliveryState(action.Thread, time.Now()); suppress {
 		return
 	}
 	chatID := threadToWeComChat(action.Thread)
-	if err := b.wecom.SendActionCard(ctx, chatID, action); err != nil {
-		b.logger.Warn("push worker action card to wecom failed", "action", action.ID, "err", err)
-		return
-	}
-	action.PushedToWeCom = true
-	if b.engine != nil {
-		_ = b.engine.MarkActionPushedToWeCom(ctx, action.ID)
-	}
+	_ = b.pushWeComDecisionCard(ctx, action.Thread, chatID, action, false)
 }
 
 // OnActionResolved synchronizes non-WeCom action resolutions (Web, CLI, Router, dismiss, snooze)
 // back to WeCom via a compact status receipt ONLY when the original card was actually pushed to WeCom.
 func (b *Bus) OnActionResolved(ctx context.Context, action *model.Action) {
-	if action == nil || !action.PushedToWeCom || strings.EqualFold(strings.TrimSpace(action.ResolvedBy), "wecom") {
+	if action == nil || !action.PushedToWeCom {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(action.ResolvedBy), "wecom") || strings.EqualFold(strings.TrimSpace(action.ResolvedChannel), "wecom") {
 		return
 	}
 	if action.Status == model.ActionExpired && strings.EqualFold(strings.TrimSpace(action.ResolvedBy), "expired") {
@@ -1060,29 +1046,7 @@ func (b *Bus) HandleWeComCardClick(ctx context.Context, ev wecom.CardClickEvent)
 	if b.handleNavCardClick(ctx, ev) {
 		return
 	}
-
-	act, err := b.engine.ResolveAction(ctx, ev.ActionID, "wecom", ev.ChoiceKey)
-	if err != nil {
-		if errors.Is(err, store.ErrActionAlreadyResolved) {
-			existing, gErr := b.engine.GetAction(ctx, ev.ActionID)
-			if gErr != nil || existing == nil {
-				b.logger.Info("wecom card click ignored (already resolved)", "action", ev.ActionID, "err", gErr)
-				return
-			}
-			act = existing
-			b.logger.Info("refreshing already-resolved wecom action card", "action", act.ID, "status", act.Status, "resolved_by", act.ResolvedBy)
-		} else {
-			b.logger.Warn("wecom card click failed", "action", ev.ActionID, "choice", ev.ChoiceKey, "err", err)
-			return
-		}
-	} else {
-		b.logger.Info("resolved action from wecom card click", "action", act.ID, "choice_key", act.ChosenKey, "choice_label", act.ChosenLabel)
-	}
-	if b.wecom != nil {
-		if err := b.wecom.UpdateCardResolvedWithTask(ctx, ev.ReqID, ev.TaskID, act); err != nil {
-			b.logger.Warn("update wecom template card failed", "action", act.ID, "req_id", ev.ReqID, "err", err)
-		}
-	}
+	b.handleDecisionCardClick(ctx, ev)
 }
 
 func threadToWeComChat(thread string) string {

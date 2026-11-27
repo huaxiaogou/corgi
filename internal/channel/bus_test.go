@@ -333,8 +333,8 @@ func TestHandleWeComCardClickResolvesAndUpdatesCard(t *testing.T) {
 	}
 	srvConn := <-serverConnCh
 
-	// 1. Reply with long summary + 3 choices triggers immediate WeCom template card push
-	// with full options in horizontal_content_list and compact buttons (选1/选2/选3).
+	// 1. Reply with long summary + 3 choices triggers immediate Scheme 3 WeCom vote_interaction card
+	// (radio options + snooze option + explicit submit button).
 	longSummary := "登录接口并发刷新 token 存在竞态。建议先加分布式锁并补充并发回归测试，确认按哪种方案推进？"
 	opts := []string{
 		"先加分布式锁并补齐并发回归测试（推荐）",
@@ -349,27 +349,19 @@ func TestHandleWeComCardClickResolvesAndUpdatesCard(t *testing.T) {
 	select {
 	case f := <-sentCh:
 		tc, _ := f.Body["template_card"].(map[string]any)
-		if tc["card_type"] != "button_interaction" || tc["task_id"] != act.ID {
+		if tc["card_type"] != "vote_interaction" || tc["task_id"] != act.ID {
 			t.Fatalf("unexpected pushed card: %+v", tc)
 		}
-		if _, ok := tc["horizontal_content_list"]; !ok {
-			t.Fatalf("expected expanded options in horizontal_content_list, got %+v", tc)
-		}
-		rawBtns, _ := tc["button_list"].([]any)
-		if len(rawBtns) != 3 {
-			t.Fatalf("expected 3 compact buttons, got %+v", tc["button_list"])
-		}
-		b0, _ := rawBtns[0].(map[string]any)
-		b1, _ := rawBtns[1].(map[string]any)
-		b2, _ := rawBtns[2].(map[string]any)
-		if b0["text"] != "选1" || b1["text"] != "选2" || b2["text"] != "选3" {
-			t.Fatalf("expected compact buttons 选1/选2/选3, got %+v", rawBtns)
+		cb, _ := tc["checkbox"].(map[string]any)
+		rawOpts, _ := cb["option_list"].([]any)
+		if len(rawOpts) != 4 { // 3 choices + 稍后处理
+			t.Fatalf("expected 4 vote options (3 choices + snooze), got %+v", cb["option_list"])
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for pushed action card")
 	}
 
-	// 2. User clicks option 2 via aibot_event_callback -> Action resolved in DB + card updated in-place.
+	// 2. User selects option 2 and submits via vote_interaction callback -> Action resolved in DB + card updated in-place.
 	click1, _ := json.Marshal(map[string]any{
 		"cmd":     "aibot_event_callback",
 		"headers": map[string]any{"req_id": "cb-click-1"},
@@ -379,8 +371,12 @@ func TestHandleWeComCardClickResolvesAndUpdatesCard(t *testing.T) {
 			"event": map[string]any{
 				"eventtype": "template_card_event",
 				"template_card_event": map[string]any{
+					"card_type": "vote_interaction",
 					"task_id":   act.ID,
-					"event_key": act.ID + ":2",
+					"event_key": act.ID + ":submit",
+					"selected_items": []map[string]any{
+						{"question_key": act.ID, "option_ids": []string{"2"}},
+					},
 				},
 			},
 		},
@@ -399,7 +395,7 @@ func TestHandleWeComCardClickResolvesAndUpdatesCard(t *testing.T) {
 		}
 		tc, _ := upd.Body["template_card"].(map[string]any)
 		src, _ := tc["source"].(map[string]any)
-		if tc["card_type"] != "button_interaction" || tc["task_id"] != act.ID || src["desc"] != "Corgi · 已拍板" {
+		if tc["card_type"] != "vote_interaction" || tc["task_id"] != act.ID || src["desc"] != "Corgi · 已拍板" {
 			t.Fatalf("unexpected updated template_card: %+v", tc)
 		}
 		if rt, _ := tc["replace_text"].(string); !strings.Contains(rt, "仅记录告警") {
@@ -884,8 +880,8 @@ func TestWeComWebActiveSuppressionAndPreciseReceipts(t *testing.T) {
 	case f := <-cardCh:
 		tc, _ := f.Body["template_card"].(map[string]any)
 		btns, _ := tc["button_list"].([]any)
-		if len(btns) != 2 {
-			t.Fatalf("expected 2 decision buttons, got %+v", btns)
+		if len(btns) != 3 { // 2 fast decision buttons + 稍后处理
+			t.Fatalf("expected 3 buttons (2 choices + snooze), got %+v", btns)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected real --opt decision card pushed immediately even with 18 pending router_check reminders")

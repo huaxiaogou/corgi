@@ -80,7 +80,15 @@ func (s *Server) handleSuperTriggers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDismissAction(w http.ResponseWriter, r *http.Request) {
-	act, err := s.Engine.DismissAction(r.Context(), r.PathValue("id"))
+	var body struct {
+		By string `json:"by"`
+	}
+	_ = decodeJSON(w, r, &body)
+	by := strings.TrimSpace(body.By)
+	if by == "" {
+		by = "web"
+	}
+	act, err := s.Engine.DismissActionBy(r.Context(), r.PathValue("id"), by)
 	if err != nil {
 		code := http.StatusBadRequest
 		if errors.Is(err, store.ErrNotFound) {
@@ -96,16 +104,24 @@ func (s *Server) handleDismissAction(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSnoozeAction(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Until string `json:"until"`
+		Until   string `json:"until"`
+		Minutes int    `json:"minutes"`
+		By      string `json:"by"`
 	}
 	_ = decodeJSON(w, r, &body)
+	by := strings.TrimSpace(body.By)
+	if by == "" {
+		by = "web"
+	}
 	var until time.Time
 	if s := strings.TrimSpace(body.Until); s != "" {
 		if parsed, err := time.Parse(time.RFC3339, s); err == nil {
 			until = parsed
 		}
+	} else if body.Minutes > 0 {
+		until = time.Now().Add(time.Duration(body.Minutes) * time.Minute)
 	}
-	act, err := s.Engine.SnoozeAction(r.Context(), r.PathValue("id"), until)
+	act, err := s.Engine.SnoozeActionBy(r.Context(), r.PathValue("id"), by, until)
 	if err != nil {
 		code := http.StatusBadRequest
 		if errors.Is(err, store.ErrNotFound) {

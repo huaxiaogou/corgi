@@ -88,6 +88,18 @@ func isWorkerPickerCommand(text string) bool {
 	}
 }
 
+func parseDecisionListCommand(text string) (query string, ok bool) {
+	s := strings.TrimSpace(text)
+	low := strings.ToLower(s)
+	if low == "/d" || low == "待拍板" || low == "待办" {
+		return "", true
+	}
+	if strings.HasPrefix(low, "/d ") {
+		return strings.TrimSpace(s[3:]), true
+	}
+	return "", false
+}
+
 func parseDirectSwitchTarget(text string) (string, bool) {
 	s := strings.TrimSpace(text)
 	if strings.HasPrefix(strings.ToLower(s), "/w ") {
@@ -163,6 +175,7 @@ func (b *Bus) formatWeComHelp(ctx context.Context, focusKey string) string {
 	return fmt.Sprintf(
 		"**当前对话**：%s\n\n"+
 			"**快捷命令**\n"+
+			"- `/d`：查看所有待拍板事项并唤起拍板卡（`/d <编号>` 唤起指定项）\n"+
 			"- `/w`：弹出事项卡片切换直聊（也支持 `/w 1` 或 `/w 关键词`）\n"+
 			"- `/back`：返回 Corgi 主对话\n"+
 			"- `/help`：查看当前状态与命令\n\n"+
@@ -181,6 +194,12 @@ func (b *Bus) handleWeComControlOrDirect(ctx context.Context, msg wecom.Incoming
 	// 0. Instant help & current conversation status.
 	if isHelpCommand(text) {
 		b.sendInstantWeComText(ctx, replyChatID, msg.ReqID, b.formatWeComHelp(ctx, focusKey))
+		return true
+	}
+
+	// 0.5 Pending real decision list & on-demand card re-surface (`/d`, `/d <编号>`, `待拍板`).
+	if q, ok := parseDecisionListCommand(text); ok {
+		b.handleWeComDecisionListCommand(ctx, thread, replyChatID, msg.ReqID, q)
 		return true
 	}
 

@@ -319,6 +319,16 @@ func (s *Store) ListPendingActions(ctx context.Context) ([]*model.Action, error)
 // ResolveAction atomically transitions a pending action to resolved.
 // Returns ErrActionAlreadyResolved if another channel (Web or WeCom) resolved it first.
 func (s *Store) ResolveAction(ctx context.Context, id, resolvedBy, chosenKey, chosenLabel string) (*model.Action, error) {
+	var keys []string
+	if k := strings.TrimSpace(chosenKey); k != "" {
+		keys = []string{k}
+	}
+	return s.ResolveActionWithKeys(ctx, id, resolvedBy, chosenKey, chosenLabel, keys)
+}
+
+// ResolveActionWithKeys atomically transitions a pending action to resolved while persisting
+// structured multi-select keys and channel attribution.
+func (s *Store) ResolveActionWithKeys(ctx context.Context, id, resolvedBy, chosenKey, chosenLabel string, chosenKeys []string) (*model.Action, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin resolve action: %w", err)
@@ -344,7 +354,13 @@ func (s *Store) ResolveAction(ctx context.Context, id, resolvedBy, chosenKey, ch
 	now := time.Now()
 	a.Status = model.ActionResolved
 	a.ResolvedBy = resolvedBy
+	a.ResolvedChannel = strings.TrimSpace(resolvedBy)
 	a.ChosenKey = chosenKey
+	if len(chosenKeys) > 0 {
+		a.ChosenKeys = append([]string(nil), chosenKeys...)
+	} else {
+		a.ChosenKeys = nil
+	}
 	a.ChosenLabel = chosenLabel
 	a.ResolvedAt = &now
 	updated, err := mustJSON(&a)
@@ -369,6 +385,11 @@ func (s *Store) ResolveAction(ctx context.Context, id, resolvedBy, chosenKey, ch
 
 // DismissAction atomically transitions a pending action to expired with resolved_by="dismiss".
 func (s *Store) DismissAction(ctx context.Context, id string) (*model.Action, error) {
+	return s.DismissActionBy(ctx, id, "")
+}
+
+// DismissActionBy atomically dismisses a pending action and records the originating channel.
+func (s *Store) DismissActionBy(ctx context.Context, id, channel string) (*model.Action, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin dismiss action: %w", err)
@@ -393,6 +414,7 @@ func (s *Store) DismissAction(ctx context.Context, id string) (*model.Action, er
 	now := time.Now()
 	a.Status = model.ActionExpired
 	a.ResolvedBy = "dismiss"
+	a.ResolvedChannel = strings.TrimSpace(channel)
 	a.ResolvedAt = &now
 	updated, err := mustJSON(&a)
 	if err != nil {
@@ -454,6 +476,11 @@ func (s *Store) ExpireWorkerActions(ctx context.Context, workerName string) erro
 
 // SnoozeAction atomically transitions a pending action to snoozed until the given time.
 func (s *Store) SnoozeAction(ctx context.Context, id string, until time.Time) (*model.Action, error) {
+	return s.SnoozeActionBy(ctx, id, "", until)
+}
+
+// SnoozeActionBy atomically snoozes a pending action and records the originating channel.
+func (s *Store) SnoozeActionBy(ctx context.Context, id, channel string, until time.Time) (*model.Action, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin snooze action: %w", err)
@@ -475,16 +502,19 @@ func (s *Store) SnoozeAction(ctx context.Context, id string, until time.Time) (*
 	if err := json.Unmarshal([]byte(raw), &a); err != nil {
 		return nil, fmt.Errorf("decode action %s: %w", id, err)
 	}
+	now := time.Now()
 	a.Status = model.ActionSnoozed
+	a.ResolvedChannel = strings.TrimSpace(channel)
+	a.ResolvedAt = &now
 	a.SnoozeUntil = &until
 	updated, err := mustJSON(&a)
 	if err != nil {
 		return nil, fmt.Errorf("encode action %s: %w", id, err)
 	}
 	res, err := tx.ExecContext(ctx, `
-		UPDATE actions SET status = ?, data = ?
+		UPDATE actions SET status = ?, data = ?, resolved_at = ?
 		WHERE id = ? AND status = ?
-	`, model.ActionSnoozed, updated, id, model.ActionPending)
+	`, model.ActionSnoozed, updated, now.Unix(), id, model.ActionPending)
 	if err != nil {
 		return nil, fmt.Errorf("snooze action %s: %w", id, err)
 	}
@@ -531,11 +561,14 @@ func (s *Store) WakeDueSnoozedActions(ctx context.Context, now time.Time) ([]*mo
 		}
 		a.Status = model.ActionPending
 		a.SnoozeUntil = nil
+		a.ResolvedChannel = ""
+		a.ResolvedAt = nil
+		a.PushedToWeCom = false
 		updated, err := mustJSON(a)
 		if err != nil {
 			continue
 		}
-		res, err := s.db.ExecContext(ctx, `UPDATE actions SET status = ?, data = ? WHERE id = ? AND status = ?`,
+		res, err := s.db.ExecContext(ctx, `UPDATE actions SET status = ?, data = ?, resolved_at = 0 WHERE id = ? AND status = ?`,
 			model.ActionPending, updated, a.ID, model.ActionSnoozed)
 		if err == nil {
 			if n, _ := res.RowsAffected(); n > 0 {

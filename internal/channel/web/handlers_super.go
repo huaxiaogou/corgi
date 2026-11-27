@@ -117,19 +117,22 @@ func (s *Server) handleStopRouter(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSuperReply(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Text     string   `json:"text"`
-		Thread   string   `json:"thread"`
-		Re       string   `json:"re"`
-		Options  []string `json:"options"`
-		File     string   `json:"file"`
-		Files    []string `json:"files"`
-		Machine  string   `json:"machine"`
-		WorkID   string   `json:"work_id"`
-		Work     string   `json:"work"`
-		Check    bool     `json:"check"`
-		Digest   bool     `json:"digest"`
-		Worker   string   `json:"worker"`
-		Category string   `json:"category"`
+		Text         string               `json:"text"`
+		Thread       string               `json:"thread"`
+		Re           string               `json:"re"`
+		Options      []string             `json:"options"`
+		Choices      []model.ActionChoice `json:"choices"`
+		Mode         string               `json:"mode"`
+		ConfirmLabel string               `json:"confirm_label"`
+		File         string               `json:"file"`
+		Files        []string             `json:"files"`
+		Machine      string               `json:"machine"`
+		WorkID       string               `json:"work_id"`
+		Work         string               `json:"work"`
+		Check        bool                 `json:"check"`
+		Digest       bool                 `json:"digest"`
+		Worker       string               `json:"worker"`
+		Category     string               `json:"category"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -143,17 +146,20 @@ func (s *Server) handleSuperReply(w http.ResponseWriter, r *http.Request) {
 		workID = strings.TrimSpace(body.Work)
 	}
 	out, err := s.Engine.ReplyDetailed(r.Context(), core.ReplyRequest{
-		Thread:   body.Thread,
-		Text:     body.Text,
-		ReID:     body.Re,
-		Options:  body.Options,
-		Files:    files,
-		Machine:  body.Machine,
-		WorkID:   workID,
-		Check:    body.Check,
-		Digest:   body.Digest,
-		Worker:   body.Worker,
-		Category: body.Category,
+		Thread:            body.Thread,
+		Text:              body.Text,
+		ReID:              body.Re,
+		Options:           body.Options,
+		StructuredChoices: body.Choices,
+		Mode:              body.Mode,
+		ConfirmLabel:      body.ConfirmLabel,
+		Files:             files,
+		Machine:           body.Machine,
+		WorkID:            workID,
+		Check:             body.Check,
+		Digest:            body.Digest,
+		Worker:            body.Worker,
+		Category:          body.Category,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -227,9 +233,10 @@ func (s *Server) handleResumeWorker(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleResolveAction(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
-		Choice string `json:"choice"`
-		By     string `json:"by"`
-		Custom bool   `json:"custom"`
+		Choice  string   `json:"choice"`
+		Choices []string `json:"choices"`
+		By      string   `json:"by"`
+		Custom  bool     `json:"custom"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -244,6 +251,8 @@ func (s *Server) handleResolveAction(w http.ResponseWriter, r *http.Request) {
 	)
 	if body.Custom {
 		act, err = s.Engine.ResolveActionCustom(r.Context(), id, by, body.Choice)
+	} else if len(body.Choices) > 0 {
+		act, err = s.Engine.ResolveActionChoices(r.Context(), id, by, body.Choices)
 	} else {
 		act, err = s.Engine.ResolveAction(r.Context(), id, by, body.Choice)
 	}

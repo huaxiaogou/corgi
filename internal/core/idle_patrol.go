@@ -457,10 +457,15 @@ func (e *Engine) tryEmitMorningDigest(
 
 // SnoozeAction atomically snoozes a pending action until the specified time (default: next morning activeHours start).
 func (e *Engine) SnoozeAction(ctx context.Context, actionID string, until time.Time) (*model.Action, error) {
+	return e.SnoozeActionBy(ctx, actionID, "", until)
+}
+
+// SnoozeActionBy atomically snoozes a pending action and records the originating channel.
+func (e *Engine) SnoozeActionBy(ctx context.Context, actionID, channel string, until time.Time) (*model.Action, error) {
 	if until.IsZero() {
 		until = NextMorningStart(e.Settings().EffectiveActiveHours(), time.Now())
 	}
-	act, err := e.store.SnoozeAction(ctx, actionID, until)
+	act, err := e.store.SnoozeActionBy(ctx, actionID, channel, until)
 	if err != nil {
 		return nil, err
 	}
