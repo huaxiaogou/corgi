@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	apiDreamDeadline            = 3 * time.Minute
+	apiDreamDeadline            = 6 * time.Minute
 	maxAPIDreamSteps            = 8
 	maxAPIDreamToolCalls        = 12
 	maxAPIDreamInputRunes       = 36000
@@ -149,13 +149,17 @@ func (e *Engine) runAPIDream(d *dreamRun, _ model.Settings) {
 			errMsg = oneLineClip(dreamCtx.Err().Error(), 120)
 			return
 		}
-		resp, err := ChatCompletion(dreamCtx, cfg, LLMChatRequest{
+		stepCtx, stepCancel := context.WithTimeout(dreamCtx, apiRouterStepDeadline)
+		resp, err := ChatCompletion(stepCtx, cfg, LLMChatRequest{
 			Model:           modelName,
 			Messages:        messages,
 			Tools:           tools,
 			ReasoningEffort: effort,
 			PromptCacheKey:  cacheKey + ":dream",
+			Stream:          true,
+			StreamOptions:   &LLMStreamOptions{IncludeUsage: true},
 		})
+		stepCancel()
 		if err != nil {
 			errMsg = oneLineClip(err.Error(), 140)
 			if e.logger != nil {

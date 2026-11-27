@@ -165,6 +165,8 @@ type Engine struct {
 	apiConfigEpoch         uint64
 	apiBackoffUntil        time.Time
 	apiFailCount           int
+	apiLastFailTriggerID   string
+	apiSameTriggerFails    int
 	apiAuthPaused          bool
 	apiLastErr             string
 	apiAllowPrivateForTest bool
@@ -437,6 +439,8 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 			e.apiConfigEpoch++
 			e.apiBackoffUntil = time.Time{}
 			e.apiFailCount = 0
+			e.apiLastFailTriggerID = ""
+			e.apiSameTriggerFails = 0
 			e.apiAuthPaused = false
 			e.apiLastErr = ""
 		}

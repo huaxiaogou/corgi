@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,7 +12,9 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +30,8 @@ const (
 	TokenHubDefaultModel = "hy4"
 	// TokenHubDefaultEffort is the default reasoning effort for hy4.
 	TokenHubDefaultEffort = "high"
+
+	defaultLLMStreamIdleTimeout = 60 * time.Second
 )
 
 var (
@@ -85,18 +90,25 @@ type LLMToolDef struct {
 	Function LLMToolFunctionSpec `json:"function"`
 }
 
-// LLMChatRequest is the JSON request body sent to POST <base_url>/chat/completions.
-type LLMChatRequest struct {
-	Model           string       `json:"model"`
-	Messages        []LLMMessage `json:"messages"`
-	Tools           []LLMToolDef `json:"tools,omitempty"`
-	ToolChoice      any          `json:"tool_choice,omitempty"`
-	MaxTokens       int          `json:"max_tokens,omitempty"`
-	ReasoningEffort string       `json:"reasoning_effort,omitempty"`
-	PromptCacheKey  string       `json:"prompt_cache_key,omitempty"`
+// LLMStreamOptions requests token usage accounting on the final SSE chunk.
+type LLMStreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
-// LLMUsage captures token accounting (including prompt cache hits when reported).
+// LLMChatRequest is the JSON request body sent to POST <base_url>/chat/completions.
+type LLMChatRequest struct {
+	Model           string            `json:"model"`
+	Messages        []LLMMessage      `json:"messages"`
+	Tools           []LLMToolDef      `json:"tools,omitempty"`
+	ToolChoice      any               `json:"tool_choice,omitempty"`
+	MaxTokens       int               `json:"max_tokens,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
+	PromptCacheKey  string            `json:"prompt_cache_key,omitempty"`
+	Stream          bool              `json:"stream,omitempty"`
+	StreamOptions   *LLMStreamOptions `json:"stream_options,omitempty"`
+}
+
+// LLMUsage captures token accounting (including prompt cache hits and reasoning tokens when reported).
 type LLMUsage struct {
 	PromptTokens        int `json:"prompt_tokens"`
 	CompletionTokens    int `json:"completion_tokens"`
@@ -104,6 +116,9 @@ type LLMUsage struct {
 	PromptTokensDetails *struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details,omitempty"`
 }
 
 // LLMChatChoice is one candidate completion returned by the provider.
@@ -125,6 +140,7 @@ type LLMChatResponse struct {
 	Usage     LLMUsage        `json:"usage"`
 	RequestID string          `json:"-"`
 	Latency   time.Duration   `json:"-"`
+	TTFT      time.Duration   `json:"-"`
 }
 
 // LLMClientConfig configures one pure-Go OpenAI-compatible API call.
@@ -132,7 +148,8 @@ type LLMClientConfig struct {
 	Provider            string
 	BaseURL             string
 	APIKey              string
-	AllowPrivateForTest bool // test-only hook for httptest.Server on loopback
+	AllowPrivateForTest bool          // test-only hook for httptest.Server on loopback
+	StreamIdleTimeout   time.Duration // optional per-chunk idle timeout when Stream=true (default 60s)
 }
 
 // NormalizeRouterAPIProvider returns "tokenhub" or "openai".
@@ -276,7 +293,8 @@ func newLLMHTTPClient(endpointURL string, allowPrivateForTest bool) *http.Client
 	}
 }
 
-// ChatCompletion executes one OpenAI-compatible Chat Completions call with bounded retries on 429/5xx.
+// ChatCompletion executes one OpenAI-compatible Chat Completions call (supporting both SSE
+// streaming with per-chunk idle stall detection and standard JSON responses) with bounded retries.
 func ChatCompletion(ctx context.Context, cfg LLMClientConfig, reqBody LLMChatRequest) (*LLMChatResponse, error) {
 	baseURL, _, err := NormalizeRouterAPIBaseURL(cfg.Provider, cfg.BaseURL, cfg.AllowPrivateForTest)
 	if err != nil {
@@ -296,92 +314,339 @@ func ChatCompletion(ctx context.Context, cfg LLMClientConfig, reqBody LLMChatReq
 		}
 	}
 
-	payload, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("encode llm request: %w", err)
-	}
 	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
 	client := newLLMHTTPClient(endpoint, cfg.AllowPrivateForTest)
 	defer client.CloseIdleConnections()
+
+	idleTimeout := cfg.StreamIdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = defaultLLMStreamIdleTimeout
+	}
+	useStream := reqBody.Stream
 
 	const maxAttempts = 3
 	backoff := 600 * time.Millisecond
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		start := time.Now()
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-		if err != nil {
-			return nil, fmt.Errorf("build llm request: %w", err)
+		curReq := reqBody
+		if !useStream {
+			curReq.Stream = false
+			curReq.StreamOptions = nil
 		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Accept", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-
-		resp, err := client.Do(httpReq)
+		payload, err := json.Marshal(curReq)
 		if err != nil {
+			return nil, fmt.Errorf("encode llm request: %w", err)
+		}
+
+		out, retryable, disableStream, callErr := doChatCompletionAttempt(ctx, client, endpoint, apiKey, payload, useStream, idleTimeout)
+		if callErr == nil {
+			return out, nil
+		}
+		if disableStream && useStream {
+			useStream = false
+			continue
+		}
+		if !retryable || ctx.Err() != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			lastErr = fmt.Errorf("llm network error: %w", err)
-			if attempt < maxAttempts {
-				if !sleepContext(ctx, backoff) {
-					return nil, ctx.Err()
-				}
-				backoff *= 2
-				continue
+			return nil, callErr
+		}
+		lastErr = callErr
+		if attempt < maxAttempts {
+			if !sleepContext(ctx, backoff) {
+				return nil, ctx.Err()
 			}
-			return nil, lastErr
+			backoff *= 2
 		}
-
-		reqID := sanitizeRequestID(resp.Header.Get("X-Request-Id"))
-		if reqID == "" {
-			reqID = sanitizeRequestID(resp.Header.Get("X-Trace-Id"))
-		}
-		rawBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		_ = resp.Body.Close()
-		latency := time.Since(start)
-		if readErr != nil {
-			lastErr = fmt.Errorf("read llm response: %w", readErr)
-			if attempt < maxAttempts && sleepContext(ctx, backoff) {
-				backoff *= 2
-				continue
-			}
-			return nil, lastErr
-		}
-
-		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-			return nil, fmt.Errorf("%w: 上游返回重定向 HTTP %d（已禁用跳转）", ErrLLMBadRequest, resp.StatusCode)
-		}
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			return nil, fmt.Errorf("%w: HTTP %d (%s)", ErrLLMAuth, resp.StatusCode, extractSanitizedProviderError(rawBody, apiKey))
-		}
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			lastErr = fmt.Errorf("上游服务暂不可用 HTTP %d (%s)", resp.StatusCode, extractSanitizedProviderError(rawBody, apiKey))
-			if attempt < maxAttempts {
-				if !sleepContext(ctx, backoff) {
-					return nil, ctx.Err()
-				}
-				backoff *= 2
-				continue
-			}
-			return nil, lastErr
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("%w: HTTP %d (%s)", ErrLLMBadRequest, resp.StatusCode, extractSanitizedProviderError(rawBody, apiKey))
-		}
-
-		var out LLMChatResponse
-		if err := json.Unmarshal(rawBody, &out); err != nil {
-			return nil, fmt.Errorf("decode llm response: %w", err)
-		}
-		out.RequestID = reqID
-		out.Latency = latency
-		if len(out.Choices) == 0 {
-			return nil, fmt.Errorf("llm returned empty choices")
-		}
-		return &out, nil
 	}
 	return nil, lastErr
+}
+
+func doChatCompletionAttempt(
+	ctx context.Context,
+	client *http.Client,
+	endpoint, apiKey string,
+	payload []byte,
+	useStream bool,
+	idleTimeout time.Duration,
+) (out *LLMChatResponse, retryable bool, disableStream bool, err error) {
+	start := time.Now()
+	reqCtx := ctx
+	var (
+		attemptCancel context.CancelFunc
+		idleTimer     *time.Timer
+		stalled       atomic.Bool
+	)
+	if useStream && idleTimeout > 0 {
+		reqCtx, attemptCancel = context.WithCancel(ctx)
+		idleTimer = time.AfterFunc(idleTimeout, func() {
+			stalled.Store(true)
+			attemptCancel()
+		})
+		defer func() {
+			idleTimer.Stop()
+			attemptCancel()
+		}()
+	}
+
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, false, false, fmt.Errorf("build llm request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if useStream {
+		httpReq.Header.Set("Accept", "text/event-stream, application/json")
+	} else {
+		httpReq.Header.Set("Accept", "application/json")
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		if stalled.Load() && ctx.Err() == nil {
+			return nil, true, false, fmt.Errorf("上游响应超时（%s 无新输出）", idleTimeout.Round(time.Second))
+		}
+		if ctx.Err() != nil {
+			return nil, false, false, ctx.Err()
+		}
+		return nil, true, false, fmt.Errorf("llm network error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	reqID := sanitizeRequestID(resp.Header.Get("X-Request-Id"))
+	if reqID == "" {
+		reqID = sanitizeRequestID(resp.Header.Get("X-Trace-Id"))
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		rawBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if readErr != nil && len(rawBody) == 0 {
+			return nil, true, false, fmt.Errorf("read llm error response: %w", readErr)
+		}
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			return nil, false, false, fmt.Errorf("%w: 上游返回重定向 HTTP %d（已禁用跳转）", ErrLLMBadRequest, resp.StatusCode)
+		}
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, false, false, fmt.Errorf("%w: HTTP %d (%s)", ErrLLMAuth, resp.StatusCode, extractSanitizedProviderError(rawBody, apiKey))
+		}
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			return nil, true, false, fmt.Errorf("上游服务暂不可用 HTTP %d (%s)", resp.StatusCode, extractSanitizedProviderError(rawBody, apiKey))
+		}
+		errMsg := extractSanitizedProviderError(rawBody, apiKey)
+		low := strings.ToLower(errMsg)
+		if resp.StatusCode == http.StatusBadRequest && useStream && (strings.Contains(low, "stream_options") || strings.Contains(low, "stream")) {
+			return nil, true, true, fmt.Errorf("provider rejected stream options: %s", errMsg)
+		}
+		return nil, false, false, fmt.Errorf("%w: HTTP %d (%s)", ErrLLMBadRequest, resp.StatusCode, errMsg)
+	}
+
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(contentType, "text/event-stream") {
+		onActivity := func() {
+			if idleTimer != nil {
+				idleTimer.Reset(idleTimeout)
+			}
+		}
+		onActivity()
+		streamed, sErr := parseLLMStreamResponse(resp.Body, start, onActivity)
+		if sErr != nil {
+			if stalled.Load() && ctx.Err() == nil {
+				return nil, true, false, fmt.Errorf("上游流式输出卡顿（%s 无新分片）", idleTimeout.Round(time.Second))
+			}
+			if ctx.Err() != nil {
+				return nil, false, false, ctx.Err()
+			}
+			return nil, true, false, sErr
+		}
+		streamed.RequestID = reqID
+		return streamed, false, false, nil
+	}
+
+	rawBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	latency := time.Since(start)
+	if readErr != nil {
+		if stalled.Load() && ctx.Err() == nil {
+			return nil, true, false, fmt.Errorf("上游响应超时（%s 无新输出）", idleTimeout.Round(time.Second))
+		}
+		if ctx.Err() != nil {
+			return nil, false, false, ctx.Err()
+		}
+		return nil, true, false, fmt.Errorf("read llm response: %w", readErr)
+	}
+	var parsed LLMChatResponse
+	if err := json.Unmarshal(rawBody, &parsed); err != nil {
+		return nil, false, false, fmt.Errorf("decode llm response: %w", err)
+	}
+	parsed.RequestID = reqID
+	parsed.Latency = latency
+	parsed.TTFT = latency
+	if len(parsed.Choices) == 0 {
+		return nil, false, false, fmt.Errorf("llm returned empty choices")
+	}
+	return &parsed, false, false, nil
+}
+
+func parseLLMStreamResponse(body io.Reader, start time.Time, onActivity func()) (*LLMChatResponse, error) {
+	reader := bufio.NewReaderSize(io.LimitReader(body, 16<<20), 64<<10)
+
+	type toolAcc struct {
+		id   string
+		typ  string
+		name strings.Builder
+		args strings.Builder
+	}
+	var (
+		out          LLMChatResponse
+		contentBuf   strings.Builder
+		finishReason string
+		sawDone      bool
+		sawAnyChunk  bool
+		tcByIdx      = map[int]*toolAcc{}
+		lastIdx      = -1
+	)
+
+	type streamDeltaToolCall struct {
+		Index    *int   `json:"index"`
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	type streamChunk struct {
+		ID      string    `json:"id"`
+		Model   string    `json:"model"`
+		Usage   *LLMUsage `json:"usage"`
+		Error   *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Choices []struct {
+			Index        int    `json:"index"`
+			FinishReason string `json:"finish_reason"`
+			Delta        struct {
+				Role             string                `json:"role"`
+				Content          string                `json:"content"`
+				ReasoningContent string                `json:"reasoning_content"`
+				Reasoning        string                `json:"reasoning"`
+				ToolCalls        []streamDeltaToolCall `json:"tool_calls"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 && onActivity != nil {
+			onActivity()
+		}
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "data:") {
+			payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if payload == "[DONE]" {
+				sawDone = true
+				break
+			}
+			if payload != "" {
+				var chunk streamChunk
+				if jErr := json.Unmarshal([]byte(payload), &chunk); jErr == nil {
+					if chunk.Error != nil && strings.TrimSpace(chunk.Error.Message) != "" {
+						return nil, fmt.Errorf("上游流式返回错误：%s", oneLineClip(chunk.Error.Message, 160))
+					}
+					if !sawAnyChunk {
+						sawAnyChunk = true
+						out.TTFT = time.Since(start)
+					}
+					if chunk.ID != "" {
+						out.ID = chunk.ID
+					}
+					if chunk.Model != "" {
+						out.Model = chunk.Model
+					}
+					if chunk.Usage != nil {
+						out.Usage = *chunk.Usage
+					}
+					for _, ch := range chunk.Choices {
+						if ch.Index != 0 {
+							continue
+						}
+						if ch.FinishReason != "" {
+							finishReason = ch.FinishReason
+						}
+						if ch.Delta.Content != "" {
+							contentBuf.WriteString(ch.Delta.Content)
+						}
+						for _, dtc := range ch.Delta.ToolCalls {
+							idx := lastIdx
+							if dtc.Index != nil {
+								idx = *dtc.Index
+							} else if dtc.ID != "" || idx < 0 {
+								idx = len(tcByIdx)
+							}
+							lastIdx = idx
+							acc := tcByIdx[idx]
+							if acc == nil {
+								acc = &toolAcc{typ: "function"}
+								tcByIdx[idx] = acc
+							}
+							if dtc.ID != "" {
+								acc.id = dtc.ID
+							}
+							if dtc.Type != "" {
+								acc.typ = dtc.Type
+							}
+							if dtc.Function.Name != "" {
+								acc.name.WriteString(dtc.Function.Name)
+							}
+							if dtc.Function.Arguments != "" {
+								acc.args.WriteString(dtc.Function.Arguments)
+							}
+						}
+					}
+				}
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("read llm stream: %w", err)
+		}
+	}
+
+	if !sawAnyChunk {
+		return nil, fmt.Errorf("llm stream returned no data")
+	}
+	if !sawDone && finishReason == "" {
+		return nil, fmt.Errorf("llm stream interrupted before completion")
+	}
+
+	var choice LLMChatChoice
+	choice.Index = 0
+	choice.FinishReason = finishReason
+	choice.Message.Role = "assistant"
+	choice.Message.Content = contentBuf.String()
+	if len(tcByIdx) > 0 {
+		idxs := make([]int, 0, len(tcByIdx))
+		for idx := range tcByIdx {
+			idxs = append(idxs, idx)
+		}
+		sort.Ints(idxs)
+		for _, idx := range idxs {
+			acc := tcByIdx[idx]
+			choice.Message.ToolCalls = append(choice.Message.ToolCalls, LLMToolCall{
+				ID:   acc.id,
+				Type: acc.typ,
+				Function: LLMToolFunctionCall{
+					Name:      acc.name.String(),
+					Arguments: acc.args.String(),
+				},
+			})
+		}
+	}
+	out.Choices = []LLMChatChoice{choice}
+	out.Latency = time.Since(start)
+	return &out, nil
 }
 
 func sleepContext(ctx context.Context, d time.Duration) bool {

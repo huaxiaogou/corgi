@@ -1006,6 +1006,8 @@ func (e *Engine) RestartRouter(ctx context.Context) error {
 		e.mu.Lock()
 		e.apiBackoffUntil = time.Time{}
 		e.apiFailCount = 0
+		e.apiLastFailTriggerID = ""
+		e.apiSameTriggerFails = 0
 		e.apiAuthPaused = false
 		e.apiLastErr = ""
 		e.mu.Unlock()

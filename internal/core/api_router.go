@@ -16,10 +16,12 @@ import (
 
 const (
 	apiRouterInflightKVKey = "api_router_inflight"
-	apiRouterTurnDeadline  = 120 * time.Second
+	apiRouterTurnDeadline  = 420 * time.Second
+	apiRouterStepDeadline  = 210 * time.Second
 	maxAPIRouterSteps      = 8
 	maxAPIRouterToolCalls  = 12
 	maxAPIToolOutputBytes  = 8192
+	maxSameAPITriggerFails = 3
 )
 
 type apiRouterTurn struct {
@@ -284,6 +286,8 @@ func (e *Engine) SetRouterAPIKey(ctx context.Context, provider, baseURL, apiKey 
 	e.apiAuthPaused = false
 	e.apiBackoffUntil = time.Time{}
 	e.apiFailCount = 0
+	e.apiLastFailTriggerID = ""
+	e.apiSameTriggerFails = 0
 	e.apiLastErr = ""
 	e.mu.Unlock()
 	e.wake()
@@ -656,7 +660,7 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 
 	cfg, modelName, effort, cacheKey, err := e.resolveActiveRouterAPIConfig(ctx)
 	if err != nil {
-		e.handleAPIRouterFailure(bg, turn, trig, configEpoch, err)
+		e.handleAPIRouterFailure(bg, turn, trig, configEpoch, 0, modelName, effort, err)
 		sealReason = "error"
 		return
 	}
@@ -675,19 +679,23 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 				// Mode switch or shutdown cancellation before any mutation: preserve trigger in queue.
 				sealReason = ""
 			} else {
-				e.handleAPIRouterFailure(bg, turn, trig, configEpoch, ctx.Err())
+				e.handleAPIRouterFailure(bg, turn, trig, configEpoch, step+1, modelName, effort, ctx.Err())
 				sealReason = "error"
 			}
 			return
 		}
 
-		resp, err := ChatCompletion(ctx, cfg, LLMChatRequest{
+		stepCtx, stepCancel := context.WithTimeout(ctx, apiRouterStepDeadline)
+		resp, err := ChatCompletion(stepCtx, cfg, LLMChatRequest{
 			Model:           modelName,
 			Messages:        messages,
 			Tools:           tools,
 			ReasoningEffort: effort,
 			PromptCacheKey:  cacheKey,
+			Stream:          true,
+			StreamOptions:   &LLMStreamOptions{IncludeUsage: true},
 		})
+		stepCancel()
 		if err != nil {
 			if turn.isStopped() {
 				e.ackAPITriggerOnce(bg, turn, trig)
@@ -698,7 +706,7 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 				sealReason = ""
 				return
 			}
-			e.handleAPIRouterFailure(bg, turn, trig, configEpoch, err)
+			e.handleAPIRouterFailure(bg, turn, trig, configEpoch, step+1, modelName, effort, err)
 			sealReason = "error"
 			return
 		}
@@ -706,6 +714,8 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		e.mu.Lock()
 		if e.apiConfigEpoch == configEpoch {
 			e.apiFailCount = 0
+			e.apiLastFailTriggerID = ""
+			e.apiSameTriggerFails = 0
 			e.apiBackoffUntil = time.Time{}
 			e.apiAuthPaused = false
 			e.apiLastErr = ""
@@ -716,11 +726,17 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		if resp.Usage.PromptTokensDetails != nil {
 			cached = resp.Usage.PromptTokensDetails.CachedTokens
 		}
+		reasoning := 0
+		if resp.Usage.CompletionTokensDetails != nil {
+			reasoning = resp.Usage.CompletionTokensDetails.ReasoningTokens
+		}
 		e.logger.Info("api router step",
 			"trigger", trig.ID, "thread", turn.thread, "step", step+1,
-			"model", modelName, "latency_ms", resp.Latency.Milliseconds(),
+			"model", modelName, "effort", effort,
+			"ttft_ms", resp.TTFT.Milliseconds(), "latency_ms", resp.Latency.Milliseconds(),
 			"prompt_tokens", resp.Usage.PromptTokens, "cached_tokens", cached,
-			"completion_tokens", resp.Usage.CompletionTokens, "request_id", resp.RequestID)
+			"completion_tokens", resp.Usage.CompletionTokens, "reasoning_tokens", reasoning,
+			"request_id", resp.RequestID)
 
 		choice := resp.Choices[0].Message
 		if len(choice.ToolCalls) == 0 {
@@ -819,9 +835,16 @@ func isDeliberateSilenceText(trig *model.Trigger, text string) bool {
 	return trig.Policy == "candidate" && (upper == "IGNORE" || upper == "[IGNORE]")
 }
 
-func (e *Engine) handleAPIRouterFailure(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, configEpoch uint64, err error) {
+func (e *Engine) handleAPIRouterFailure(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, configEpoch uint64, step int, modelName, effort string, err error) {
 	msg := err.Error()
-	e.logger.Warn("api router turn failed", "trigger", trig.ID, "thread", turn.thread, "mutated", turn.hasMutated(), "err", msg)
+	elapsedMS := int64(0)
+	if turn != nil && !turn.startedAt.IsZero() {
+		elapsedMS = time.Since(turn.startedAt).Milliseconds()
+	}
+	e.logger.Warn("api router turn failed",
+		"trigger", trig.ID, "thread", turn.thread, "step", step,
+		"model", modelName, "effort", effort, "elapsed_ms", elapsedMS,
+		"mutated", turn.hasMutated(), "err", msg)
 
 	if turn.hasMutated() {
 		// Never replay after a side-effect already landed; surface concise partial progress.
@@ -860,6 +883,23 @@ func (e *Engine) handleAPIRouterFailure(ctx context.Context, turn *apiRouterTurn
 	e.mu.Lock()
 	if e.apiConfigEpoch != configEpoch {
 		e.mu.Unlock()
+		return
+	}
+	if e.apiLastFailTriggerID == trig.ID {
+		e.apiSameTriggerFails++
+	} else {
+		e.apiLastFailTriggerID = trig.ID
+		e.apiSameTriggerFails = 1
+	}
+	if e.apiSameTriggerFails >= maxSameAPITriggerFails {
+		e.apiSameTriggerFails = 0
+		e.apiLastFailTriggerID = ""
+		e.apiFailCount = 0
+		e.apiBackoffUntil = time.Time{}
+		e.apiLastErr = msg
+		e.mu.Unlock()
+		e.ackAPITriggerOnce(ctx, turn, trig)
+		e.addEvent(ctx, turn.thread, fmt.Sprintf("本条消息连续 %d 次调用模型失败（已跳过以免阻塞后续对话，可重新发送）：%s", maxSameAPITriggerFails, oneLineClip(msg, 120)), trig.ID, "error")
 		return
 	}
 	e.apiFailCount++

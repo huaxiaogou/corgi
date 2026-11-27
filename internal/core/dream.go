@@ -501,7 +501,7 @@ func (e *Engine) driveDream(ctx context.Context, d *dreamRun, live map[string]li
 			e.finishDream(ctx, d, apiOK)
 			return
 		}
-		if time.Since(d.at) > 5*time.Minute {
+		if time.Since(d.at) > 8*time.Minute {
 			e.finishDream(ctx, d, journalFresh)
 		}
 		return

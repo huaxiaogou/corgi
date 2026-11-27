@@ -582,3 +582,224 @@ func TestAPIRouterReviewRegressions(t *testing.T) {
 		t.Fatalf("glm-5.3 max should stay max, got %q", got)
 	}
 }
+
+func TestLLMClientSSEStreamingToolsStallAndFallback(t *testing.T) {
+	// 1. SSE streaming with reasoning_content (excluded from Content), multi-chunk tool_calls,
+	//    usage (cached + reasoning tokens), and active chunks exceeding StreamIdleTimeout.
+	sseSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req LLMChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		if !req.Stream || req.StreamOptions == nil || !req.StreamOptions.IncludeUsage {
+			t.Errorf("expected stream=true & stream_options.include_usage=true, got %+v", req)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Request-Id", "req-sse-1")
+		flusher, _ := w.(http.Flusher)
+		chunks := []string{
+			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"深度思考1"}}]}`,
+			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"reasoning_content":"深度思考2"}}]}`,
+			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"reasoning_content":"深度思考3"}}]}`,
+			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"reply_user","arguments":""}}]}}]}`,
+			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"purpose\":\"answer\","}}]}}]}`,
+			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"text\":\"好了\"}"}}]}}]}`,
+			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":45,"total_tokens":145,"prompt_tokens_details":{"cached_tokens":64},"completion_tokens_details":{"reasoning_tokens":30}}}`,
+		}
+		for _, c := range chunks {
+			_, _ = w.Write([]byte("data: " + c + "\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			// 45ms * 7 = 315ms total (> 140ms StreamIdleTimeout) — active streaming must NOT stall!
+			time.Sleep(45 * time.Millisecond)
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer sseSrv.Close()
+
+	resp, err := ChatCompletion(context.Background(), LLMClientConfig{
+		Provider:            RouterAPIProviderTokenHub,
+		BaseURL:             sseSrv.URL + "/v1",
+		APIKey:              "sk-sse-test",
+		AllowPrivateForTest: true,
+		StreamIdleTimeout:   140 * time.Millisecond,
+	}, LLMChatRequest{
+		Model:           "hy4",
+		ReasoningEffort: "high",
+		Stream:          true,
+		StreamOptions:   &LLMStreamOptions{IncludeUsage: true},
+		Messages:        []LLMMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("active SSE streaming failed: %v", err)
+	}
+	if resp.RequestID != "req-sse-1" || resp.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("unexpected SSE response meta: %+v", resp)
+	}
+	if resp.Choices[0].Message.Content != "" {
+		t.Fatalf("reasoning_content must NOT leak into Message.Content, got %q", resp.Choices[0].Message.Content)
+	}
+	if len(resp.Choices[0].Message.ToolCalls) != 1 || resp.Choices[0].Message.ToolCalls[0].Function.Name != "reply_user" ||
+		resp.Choices[0].Message.ToolCalls[0].Function.Arguments != `{"purpose":"answer","text":"好了"}` {
+		t.Fatalf("unexpected assembled tool calls: %+v", resp.Choices[0].Message.ToolCalls)
+	}
+	if resp.Usage.PromptTokensDetails == nil || resp.Usage.PromptTokensDetails.CachedTokens != 64 ||
+		resp.Usage.CompletionTokensDetails == nil || resp.Usage.CompletionTokensDetails.ReasoningTokens != 30 {
+		t.Fatalf("unexpected usage details: %+v", resp.Usage)
+	}
+
+	// 2. Stalled SSE stream (0 chunks for > StreamIdleTimeout) aborts fast and recovers on retry.
+	var stallAttempts int
+	stallSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stallAttempts++
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		if stallAttempts == 1 {
+			_, _ = w.Write([]byte("data: {\"id\":\"s-stall\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"卡住前\"}}]}\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+			case <-time.After(2 * time.Second):
+			}
+			return
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"s-ok\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"恢复成功\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer stallSrv.Close()
+
+	t0 := time.Now()
+	resp2, err := ChatCompletion(context.Background(), LLMClientConfig{
+		Provider:            RouterAPIProviderTokenHub,
+		BaseURL:             stallSrv.URL + "/v1",
+		APIKey:              "sk-stall-test",
+		AllowPrivateForTest: true,
+		StreamIdleTimeout:   100 * time.Millisecond,
+	}, LLMChatRequest{
+		Model:    "hy4",
+		Stream:   true,
+		Messages: []LLMMessage{{Role: "user", Content: "test stall"}},
+	})
+	if err != nil {
+		t.Fatalf("expected stall retry to succeed, got %v", err)
+	}
+	if resp2.Choices[0].Message.Content != "恢复成功" || stallAttempts != 2 || time.Since(t0) > 1800*time.Millisecond {
+		t.Fatalf("unexpected stall recovery: attempts=%d elapsed=%s content=%q", stallAttempts, time.Since(t0), resp2.Choices[0].Message.Content)
+	}
+
+	// 3. Custom OpenAI gateway returning HTTP 400 on stream_options falls back cleanly to non-streaming.
+	var fbAttempts int
+	fbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fbAttempts++
+		var req LLMChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Stream {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"unsupported parameter: stream_options"}}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "cmpl-fb", "model": "custom",
+			"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": "ok-fallback"}}},
+		})
+	}))
+	defer fbSrv.Close()
+
+	resp3, err := ChatCompletion(context.Background(), LLMClientConfig{
+		Provider:            RouterAPIProviderOpenAI,
+		BaseURL:             fbSrv.URL + "/v1",
+		APIKey:              "sk-fb",
+		AllowPrivateForTest: true,
+	}, LLMChatRequest{
+		Model:         "custom",
+		Stream:        true,
+		StreamOptions: &LLMStreamOptions{IncludeUsage: true},
+		Messages:      []LLMMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil || fbAttempts != 2 || resp3.Choices[0].Message.Content != "ok-fallback" {
+		t.Fatalf("stream_options fallback failed: attempts=%d err=%v resp=%+v", fbAttempts, err, resp3)
+	}
+}
+
+func TestAPIRouterSameTriggerCircuitBreakerUnblocksQueue(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		reqCount int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []LLMMessage `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		last, _ := req.Messages[len(req.Messages)-1].Content.(string)
+		mu.Lock()
+		reqCount++
+		mu.Unlock()
+		if strings.Contains(last, "卡死消息") {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"message":"upstream timeout"}}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "cmpl-next", "model": "hy4",
+			"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": "后续消息已正常回复"}}},
+		})
+	}))
+	defer srv.Close()
+
+	eng, st, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	ctx := context.Background()
+
+	_, trigBad, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "卡死消息"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, trigGood, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "正常后续消息"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate 3 consecutive failures on trigBad (clearing backoff between ticks to keep test fast).
+	for attempt := 1; attempt <= maxSameAPITriggerFails; attempt++ {
+		eng.mu.Lock()
+		eng.apiBackoffUntil = time.Time{}
+		eng.mu.Unlock()
+		eng.tick(ctx)
+		waitUntil(t, 5*time.Second, func() bool {
+			return !eng.isRouterWorking(ctx)
+		}, "bad trigger attempt settled")
+	}
+
+	gotBad, _ := st.GetTrigger(ctx, trigBad.ID)
+	if gotBad.Status != "delivered" {
+		t.Fatalf("expected poison trigger skipped after %d consecutive failures, got status=%s", maxSameAPITriggerFails, gotBad.Status)
+	}
+
+	// Next tick immediately delivers trigGood without any backoff delay!
+	eng.tick(ctx)
+	waitUntil(t, 5*time.Second, func() bool {
+		sink.mu.Lock()
+		defer sink.mu.Unlock()
+		return len(sink.replies) >= 1
+	}, "good trigger delivered after circuit break")
+	waitUntil(t, 3*time.Second, func() bool {
+		return !eng.isRouterWorking(ctx)
+	}, "good trigger settled")
+
+	gotGood, _ := st.GetTrigger(ctx, trigGood.ID)
+	if gotGood.Status != "delivered" {
+		t.Fatalf("expected trigGood delivered, got %s", gotGood.Status)
+	}
+	sink.mu.Lock()
+	replyText := sink.replies[0].Text
+	sink.mu.Unlock()
+	if !strings.Contains(replyText, "后续消息已正常回复") {
+		t.Fatalf("unexpected reply text for trigGood: %q", replyText)
+	}
+}
