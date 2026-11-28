@@ -340,11 +340,7 @@ func (a *AgyAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Messag
 			out = append(out, &model.Message{Kind: "assistant", Text: t})
 		}
 		for _, tc := range rec.ToolCalls {
-			out = append(out, &model.Message{
-				Kind:  "tool",
-				Name:  tc.Name,
-				Input: summarizeAgyToolArgs(tc.Args),
-			})
+			out = append(out, buildAgyToolMessage(tc.Name, tc.Args))
 		}
 		return out, len(out) > 0
 	case "GENERIC":
@@ -401,18 +397,6 @@ func detectAgyCommandExitError(raw string) bool {
 		return m[1] != "0"
 	}
 	return false
-}
-
-func summarizeAgyToolArgs(raw json.RawMessage) string {
-	var m map[string]any
-	if json.Unmarshal(raw, &m) == nil {
-		for _, k := range []string{"CommandLine", "Path", "query", "toolSummary"} {
-			if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
-				return clipText(v, 300)
-			}
-		}
-	}
-	return clipText(string(raw), 300)
 }
 
 func cleanAgyToolOutput(raw string) string {

@@ -162,16 +162,26 @@ func (u ContextUsage) Pct() int {
 	return u.Used * 100 / u.Window
 }
 
+// SubagentCall carries structured metadata for subagent/swarm delegation tool calls.
+type SubagentCall struct {
+	Type   string `json:"type,omitempty"`
+	Role   string `json:"role,omitempty"`
+	Prompt string `json:"prompt,omitempty"`
+	Model  string `json:"model,omitempty"`
+}
+
 // Message is a structured turn parsed from an agent's JSONL transcript.
 type Message struct {
-	Kind    string   `json:"kind"` // user | assistant | thinking | tool | ask
-	Text    string   `json:"text,omitempty"`
-	Name    string   `json:"name,omitempty"`
-	Options []string `json:"options,omitempty"`
-	Input   string   `json:"input,omitempty"`
-	Output  string   `json:"output,omitempty"`
-	Error   bool     `json:"error,omitempty"`
-	At      int64    `json:"-"` // byte offset in transcript log for pagination
+	Kind     string        `json:"kind"` // user | assistant | thinking | tool | ask
+	Text     string        `json:"text,omitempty"`
+	Name     string        `json:"name,omitempty"`
+	Options  []string      `json:"options,omitempty"`
+	Input    string        `json:"input,omitempty"`
+	Detail   string        `json:"detail,omitempty"`
+	Subagent *SubagentCall `json:"subagent,omitempty"`
+	Output   string        `json:"output,omitempty"`
+	Error    bool          `json:"error,omitempty"`
+	At       int64         `json:"-"` // byte offset in transcript log for pagination
 }
 
 // MsgPatch delivers an incremental transcript update over SSE.

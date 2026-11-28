@@ -464,12 +464,21 @@ export interface MsgPatch {
   earlier?: number;
 }
 
+export interface SubagentCall {
+  type?: string;
+  role?: string;
+  prompt?: string;
+  model?: string;
+}
+
 export interface ChatMessage {
   kind: "user" | "assistant" | "thinking" | "tool" | "ask";
   text?: string;
   name?: string;
   options?: string[];
   input?: string;
+  detail?: string;
+  subagent?: SubagentCall;
   output?: string;
   error?: boolean;
 }

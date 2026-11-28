@@ -3,6 +3,7 @@ import { AgentGlyph, StatusDot } from "../../components/CorgiMark";
 import { MarkdownText } from "../../components/MarkdownText";
 import { formatAgentSpeakerLabel } from "../../lib/agentIdentity";
 import type { Approval, ChatMessage } from "../../types/api";
+import { ToolMessageItem } from "./ToolMessageItem";
 
 export interface PendingPrompt {
   id: string;
@@ -119,19 +120,7 @@ export function AgentChatThread({
           );
         }
         if (m.kind === "tool") {
-          return (
-            <details key={idx} className="text-xs font-mono-code text-muted">
-              <summary className="cursor-pointer truncate hover:text-secondary">
-                • {m.name} {m.input || (m.output ? m.output.split("\n")[0] : "")}
-              </summary>
-              {(m.input || m.output) && (
-                <pre className="mt-1.5 p-2.5 rounded-lg surface-rail border border-hairline text-[11px] whitespace-pre-wrap overflow-x-auto text-secondary">
-                  {m.input ? `${m.input}\n` : ""}
-                  {m.output ?? ""}
-                </pre>
-              )}
-            </details>
-          );
+          return <ToolMessageItem key={idx} message={m} />;
         }
         if (m.kind === "ask") {
           return (
