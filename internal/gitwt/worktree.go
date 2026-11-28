@@ -17,6 +17,7 @@ var unsafeSegRe = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 // InspectResult summarizes whether a directory belongs to a Git repository.
 type InspectResult struct {
 	IsGit     bool   `json:"is_git"`
+	NotFound  bool   `json:"not_found,omitempty"`
 	RepoRoot  string `json:"repo_root,omitempty"`
 	CommonDir string `json:"common_dir,omitempty"`
 	RelPath   string `json:"rel_path,omitempty"`
@@ -90,7 +91,13 @@ func Inspect(ctx context.Context, dir string) InspectResult {
 		return InspectResult{}
 	}
 	fi, err := os.Stat(cleanDir)
-	if err != nil || !fi.IsDir() {
+	if err != nil {
+		if os.IsNotExist(err) {
+			return InspectResult{NotFound: true}
+		}
+		return InspectResult{}
+	}
+	if !fi.IsDir() {
 		return InspectResult{}
 	}
 	inside, err := runGit(ctx, cleanDir, "rev-parse", "--is-inside-work-tree")

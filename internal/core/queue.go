@@ -91,6 +91,13 @@ func (e *Engine) SubmitPanePrompt(ctx context.Context, target, text, mode string
 		return false, nil, fmt.Errorf("prompt is required")
 	}
 	paneID, status := e.resolvePaneTarget(ctx, target)
+	workerName, ok := e.beginWorkerOpByTarget(ctx, target, paneID)
+	if !ok {
+		return false, nil, fmt.Errorf("worker is hibernating; retry or resume session")
+	}
+	if workerName != "" {
+		defer e.endWorkerOp(workerName)
+	}
 	e.invalidateWorkerAutoVerifyByTarget(ctx, target, paneID)
 	mode = strings.ToLower(strings.TrimSpace(mode))
 
@@ -104,6 +111,9 @@ func (e *Engine) SubmitPanePrompt(ctx context.Context, target, text, mode string
 		}
 		if hadConstraint {
 			e.markConstraintDelivered(paneID)
+		}
+		if workerName != "" {
+			e.resetWorkerIdleByName(ctx, workerName)
 		}
 		e.setQueuePaused(paneID, false)
 		e.markDrainCooldown(paneID)
@@ -144,6 +154,9 @@ func (e *Engine) SubmitPanePrompt(ctx context.Context, target, text, mode string
 	if hadConstraint {
 		e.markConstraintDelivered(paneID)
 	}
+	if workerName != "" {
+		e.resetWorkerIdleByName(ctx, workerName)
+	}
 	e.setQueuePaused(paneID, false)
 	e.markDrainCooldown(paneID)
 	e.notifyChanged()
@@ -153,6 +166,13 @@ func (e *Engine) SubmitPanePrompt(ctx context.Context, target, text, mode string
 // SteerPanePrompt pops a single queued prompt and immediately soft-steers the pane.
 func (e *Engine) SteerPanePrompt(ctx context.Context, target, qid string) (*model.QueuedPrompt, error) {
 	paneID, _ := e.resolvePaneTarget(ctx, target)
+	workerName, ok := e.beginWorkerOpByTarget(ctx, target, paneID)
+	if !ok {
+		return nil, fmt.Errorf("worker is hibernating; retry or resume session")
+	}
+	if workerName != "" {
+		defer e.endWorkerOp(workerName)
+	}
 	item, err := e.store.GetQueuedPrompt(ctx, qid)
 	if err != nil {
 		return nil, err
@@ -170,6 +190,9 @@ func (e *Engine) SteerPanePrompt(ctx context.Context, target, qid string) (*mode
 	}
 	if hadConstraint {
 		e.markConstraintDelivered(paneID)
+	}
+	if workerName != "" {
+		e.resetWorkerIdleByName(ctx, workerName)
 	}
 	_ = e.store.DeleteQueuedPrompt(ctx, item.ID)
 	e.setQueuePaused(item.Scope, false)
@@ -574,10 +597,18 @@ func (e *Engine) drainPanePrompts(ctx context.Context, rawAgents []model.Agent) 
 		if !alive || (st != "idle" && st != "done") {
 			continue
 		}
+		workerName, ok := e.beginWorkerOpByTarget(ctx, "", paneID)
+		if !ok {
+			continue
+		}
 		first := items[0]
 		e.invalidateWorkerAutoVerifyByTarget(ctx, "", paneID)
 		sendText, hadConstraint := e.decorateDirectPrompt(ctx, paneID, first.Text)
-		if err := e.fleet.Prompt(ctx, paneID, sendText); err != nil {
+		err := e.fleet.Prompt(ctx, paneID, sendText)
+		if err != nil {
+			if workerName != "" {
+				e.endWorkerOp(workerName)
+			}
 			var he *herdr.Error
 			if errors.As(err, &he) && (he.Code == "agent_blocked" || he.Code == "agent_not_ready") {
 				continue
@@ -587,6 +618,10 @@ func (e *Engine) drainPanePrompts(ctx context.Context, rawAgents []model.Agent) 
 		}
 		if hadConstraint {
 			e.markConstraintDelivered(paneID)
+		}
+		if workerName != "" {
+			e.resetWorkerIdleByName(ctx, workerName)
+			e.endWorkerOp(workerName)
 		}
 		_ = e.store.DeleteQueuedPrompt(ctx, first.ID)
 		e.markDrainCooldown(paneID)

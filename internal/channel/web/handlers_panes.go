@@ -415,7 +415,13 @@ func (s *Server) handleSendText(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if err := s.Fleet.SendText(r.Context(), r.PathValue("id"), body.Text, body.Enter); err != nil {
+	var err error
+	if s.Engine != nil {
+		err = s.Engine.SendPaneText(r.Context(), r.PathValue("id"), body.Text, body.Enter)
+	} else {
+		err = s.Fleet.SendText(r.Context(), r.PathValue("id"), body.Text, body.Enter)
+	}
+	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}
@@ -430,7 +436,13 @@ func (s *Server) handleSendKeys(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "keys required"})
 		return
 	}
-	if err := s.Fleet.SendKeys(r.Context(), r.PathValue("id"), body.Keys...); err != nil {
+	var err error
+	if s.Engine != nil {
+		err = s.Engine.SendPaneKeys(r.Context(), r.PathValue("id"), body.Keys...)
+	} else {
+		err = s.Fleet.SendKeys(r.Context(), r.PathValue("id"), body.Keys...)
+	}
+	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}

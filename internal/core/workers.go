@@ -30,6 +30,12 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		sessionID        string
 		resumeWorkID     string
 		resumeBranch     string
+		resumeMachineSet bool
+		resumeCreatedBy  string
+		resumeTitle      string
+		resumeKeep       bool
+		resumeWtPrep     *worktreePrep
+		resumeSubs       []string
 		workerConstraint = reqConstraint
 	)
 	if req.Resume != "" {
@@ -49,10 +55,40 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		}
 		workerConstraint = oldConstraint
 		req.Kind, req.Cwd, req.Machine, sessionID = old.Kind, old.Cwd, old.Machine, old.Session
+		resumeMachineSet = true
 		resumeWorkID = old.WorkItemID
 		resumeBranch = old.WorktreeBranch
+		resumeCreatedBy = old.CreatedBy
+		resumeTitle = old.Title
+		resumeKeep = old.Keep
+		fellBack := false
 		if old.RepoRoot != "" {
-			req.Cwd = e.resolveResumeCwd(ctx, old.Machine, old.Cwd, old.RepoRoot)
+			req.Cwd, fellBack = e.resolveResumeCwd(ctx, old.Machine, old.Cwd, old.RepoRoot)
+		}
+		if old.RepoRoot != "" || old.WorktreePath != "" || old.WorktreeBranch != "" {
+			wtPath := old.WorktreePath
+			wtBranch := old.WorktreeBranch
+			if fellBack {
+				wtPath = ""
+				wtBranch = ""
+			}
+			resumeWtPrep = &worktreePrep{
+				RepoRoot:       old.RepoRoot,
+				CommonDir:      old.RepoCommonDir,
+				WorktreePath:   wtPath,
+				WorktreeBranch: wtBranch,
+				BaseCommit:     old.WorktreeBase,
+			}
+		}
+		if req.Subscribe == nil {
+			if ended, eErr := e.store.ListEndedSessions(ctx, store.EndedSessionRetentionLimit); eErr == nil {
+				for _, es := range ended {
+					if es.Session == old.Session && es.Machine == old.Machine {
+						resumeSubs = append([]string(nil), es.Subscribers...)
+						break
+					}
+				}
+			}
 		}
 		if req.Name == "" {
 			req.Name = old.Name
@@ -73,7 +109,9 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		return nil, err
 	}
 	machine := st.WorkerMachine
-	if req.Machine != "" {
+	if resumeMachineSet {
+		machine = e.fleet.ResolveMachine(req.Machine)
+	} else if req.Machine != "" {
 		machine = e.fleet.ResolveMachine(req.Machine)
 	}
 	mc, ok := e.fleet.Machine(machine)
@@ -181,8 +219,11 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		}
 		cwd = effCwd
 		wtPrep = prep
+	} else if resumeWtPrep != nil {
+		wtPrep = resumeWtPrep
 	}
 
+	createdBy := orStr(req.By, orStr(resumeCreatedBy, model.RouterName))
 	wk := &model.Worker{
 		Name:        name,
 		Kind:        kind,
@@ -190,8 +231,10 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		Cwd:         cwd,
 		Task:        req.Task,
 		Thread:      thread,
-		CreatedBy:   orStr(req.By, model.RouterName),
+		CreatedBy:   createdBy,
 		CreatedAt:   time.Now(),
+		Title:       resumeTitle,
+		Keep:        resumeKeep,
 		Model:       modelName,
 		Effort:      effort,
 		ModelSource: modelSource,
@@ -243,6 +286,12 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	if sub {
 		_ = e.Subscribe(ctx, name, thread, false)
 	}
+	for _, subThread := range resumeSubs {
+		if subThread != "" && subThread != model.MainThread {
+			_ = e.Subscribe(ctx, name, subThread, false)
+		}
+	}
+	e.touchWorkerActivity(name)
 	verb := "派出"
 	if sessionID != "" {
 		verb = "续接"
@@ -307,6 +356,9 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 			wk.Status = "blocked"
 		}
 		_ = e.store.UpsertWorker(lctx, wk)
+		if sessionID != "" {
+			_ = e.store.ForgetEndedSession(lctx, kind, machine, sessionID)
+		}
 		e.notifyChanged()
 
 		select {
@@ -345,66 +397,56 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 
 // LaunchManagedRequest describes a user-initiated agent launch from the `+` modal or History/Card resume.
 type LaunchManagedRequest struct {
-	Kind       string
-	Machine    string
-	Cwd        string
-	Name       string
-	Label      string
-	Model      string
-	Effort     string
-	Prompt     string
-	SessionID  string
-	WorkItemID string
-	ProjectID  string
-	Worktree   string // auto (default) | on | off
-	Constraint string
-	ExtraArgs  []string
+	Kind           string
+	Machine        string
+	Cwd            string
+	Name           string
+	Label          string
+	Model          string
+	Effort         string
+	Prompt         string
+	SessionID      string
+	WorkItemID     string
+	ProjectID      string
+	Worktree       string // auto (default) | on | off
+	Constraint     string
+	ExtraArgs      []string
+	CreatedBy      string
+	Thread         string
+	Keep           bool
+	RepoRoot       string
+	RepoCommonDir  string
+	WorktreePath   string
+	WorktreeBranch string
+	WorktreeBase   string
+	Subscribers    []string
 }
 
 // ResumeWorkerRequest identifies a specific historical worker session to reopen for direct follow-up.
 type ResumeWorkerRequest struct {
-	Name       string `json:"name"`
-	Machine    string `json:"machine,omitempty"`
-	Session    string `json:"session,omitempty"`
-	Kind       string `json:"kind,omitempty"`
-	Cwd        string `json:"cwd,omitempty"`
-	WorkItemID string `json:"work_item_id,omitempty"`
-	Constraint string `json:"constraint,omitempty"`
+	EndedSessionID string `json:"ended_session_id,omitempty"`
+	Name           string `json:"name"`
+	Machine        string `json:"machine,omitempty"`
+	MachineSet     bool   `json:"-"`
+	Session        string `json:"session,omitempty"`
+	Kind           string `json:"kind,omitempty"`
+	Cwd            string `json:"cwd,omitempty"`
+	WorkItemID     string `json:"work_item_id,omitempty"`
+	Constraint     string `json:"constraint,omitempty"`
 }
 
 // ResumeWorkerSession returns the existing live pane if the exact worker session is already running,
-// or reopens the archived session on its original machine while preserving its WorkItem linkage.
+// or reopens the archived session on its original machine while preserving its WorkItem linkage,
+// ownership, worktree metadata, and thread subscriptions.
 func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerRequest) (*model.Worker, bool, error) {
 	name := strings.TrimSpace(req.Name)
 	sess := strings.TrimSpace(req.Session)
+	machineSet := req.MachineSet || strings.TrimSpace(req.Machine) != ""
 	machine := strings.TrimSpace(req.Machine)
 	if machine != "" && e.fleet != nil {
 		machine = e.fleet.ResolveMachine(machine)
 	}
 
-	// 1. Check live workers first by exact session match, then by name+machine.
-	if all, err := e.store.ListWorkers(ctx); err == nil {
-		for _, w := range all {
-			if w.Ended || w.PaneID == "" {
-				continue
-			}
-			if sess != "" && w.Session == sess && (machine == "" || w.Machine == machine) {
-				return w, false, nil
-			}
-		}
-		if name != "" {
-			for _, w := range all {
-				if w.Ended || w.PaneID == "" {
-					continue
-				}
-				if w.Name == name && (machine == "" || w.Machine == machine) && (sess == "" || w.Session == "" || w.Session == sess) {
-					return w, false, nil
-				}
-			}
-		}
-	}
-
-	// 2. Recover saved metadata from Worker table and EndedSessions.
 	kind := agent.NormalizeKind(req.Kind)
 	cwd := strings.TrimSpace(req.Cwd)
 	workID := strings.TrimSpace(req.WorkItemID)
@@ -412,20 +454,91 @@ func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerReques
 	if cErr != nil {
 		return nil, false, cErr
 	}
-	modelName, effort, title, savedConstraint := "", "", "", ""
-	var repoRoot string
+	var (
+		modelName, effort, title, savedConstraint string
+		createdBy, thread                         string
+		keep                                      bool
+		repoRoot, repoCommonDir                   string
+		worktreePath, worktreeBranch, wtBase      string
+		subscribers                               []string
+		exactEnded                                *model.EndedSession
+	)
 
+	// 0. If an exact EndedSession archive ID was requested (e.g. Web History click), load it first
+	// so machine/session/metadata match that exact archive row without ambiguity.
+	if eid := strings.TrimSpace(req.EndedSessionID); eid != "" {
+		es, err := e.store.GetEndedSession(ctx, eid)
+		if err != nil {
+			return nil, false, fmt.Errorf("历史会话不存在")
+		}
+		exactEnded = es
+		if name == "" {
+			name = es.Name
+		}
+		if sess == "" {
+			sess = es.Session
+		}
+		if kind == "" {
+			kind = agent.NormalizeKind(es.Kind)
+		}
+		if !machineSet {
+			machine = es.Machine
+			machineSet = true
+		}
+		if cwd == "" {
+			cwd = es.Cwd
+		}
+		if workID == "" {
+			workID = es.WorkItemID
+		}
+		modelName, effort, title, savedConstraint = es.Model, es.Effort, es.Title, es.Constraint
+		createdBy, thread, keep = es.CreatedBy, es.Thread, es.Keep
+		repoRoot, repoCommonDir = es.RepoRoot, es.RepoCommonDir
+		worktreePath, worktreeBranch, wtBase = es.WorktreePath, es.WorktreeBranch, es.WorktreeBase
+		subscribers = append([]string(nil), es.Subscribers...)
+	}
+
+	// Wait briefly if GC is currently finalizing hibernation of this worker so we resume cleanly.
+	if name != "" {
+		e.waitWorkerGCIdle(ctx, name, 3*time.Second)
+	}
+
+	// 1. Check live workers first by exact session match, then by name+machine.
+	if all, err := e.store.ListWorkers(ctx); err == nil {
+		for _, w := range all {
+			if w.Ended || w.Hibernating || w.PaneID == "" {
+				continue
+			}
+			if sess != "" && w.Session == sess && (!machineSet || w.Machine == machine) {
+				return w, false, nil
+			}
+		}
+		if name != "" {
+			for _, w := range all {
+				if w.Ended || w.Hibernating || w.PaneID == "" {
+					continue
+				}
+				if w.Name == name && (!machineSet || w.Machine == machine) && (sess == "" || w.Session == "" || w.Session == sess) {
+					return w, false, nil
+				}
+			}
+		}
+	}
+
+	// 2. Recover saved metadata from Worker table and EndedSessions.
 	if name != "" {
 		if old, err := e.store.GetWorker(ctx, name); err == nil {
-			if sess == "" || old.Session == sess || old.Session == "" {
+			machineOK := !machineSet || old.Machine == machine
+			if machineOK && (sess == "" || old.Session == sess || old.Session == "") {
 				if sess == "" {
 					sess = old.Session
 				}
 				if kind == "" {
 					kind = agent.NormalizeKind(old.Kind)
 				}
-				if machine == "" {
+				if !machineSet {
 					machine = old.Machine
+					machineSet = true
 				}
 				if cwd == "" {
 					cwd = old.Cwd
@@ -433,48 +546,113 @@ func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerReques
 				if workID == "" {
 					workID = old.WorkItemID
 				}
-				modelName, effort, title, repoRoot, savedConstraint = old.Model, old.Effort, old.Title, old.RepoRoot, old.Constraint
+				if modelName == "" {
+					modelName = old.Model
+				}
+				if effort == "" {
+					effort = old.Effort
+				}
+				if title == "" {
+					title = old.Title
+				}
+				if savedConstraint == "" {
+					savedConstraint = old.Constraint
+				}
+				if createdBy == "" {
+					createdBy = old.CreatedBy
+				}
+				if thread == "" {
+					thread = old.Thread
+				}
+				if !keep {
+					keep = old.Keep
+				}
+				if repoRoot == "" {
+					repoRoot = old.RepoRoot
+				}
+				if repoCommonDir == "" {
+					repoCommonDir = old.RepoCommonDir
+				}
+				if worktreePath == "" {
+					worktreePath = old.WorktreePath
+				}
+				if worktreeBranch == "" {
+					worktreeBranch = old.WorktreeBranch
+				}
+				if wtBase == "" {
+					wtBase = old.WorktreeBase
+				}
 			}
 		}
 	}
-	if ended, err := e.store.ListEndedSessions(ctx, 100); err == nil {
-		for _, es := range ended {
-			matchSess := sess != "" && es.Session == sess
-			matchName := sess == "" && name != "" && es.Name == name && (machine == "" || es.Machine == machine)
-			if !matchSess && !matchName {
-				continue
+	if exactEnded == nil {
+		if ended, err := e.store.ListEndedSessions(ctx, store.EndedSessionRetentionLimit); err == nil {
+			for _, es := range ended {
+				matchSess := sess != "" && es.Session == sess && (!machineSet || es.Machine == machine)
+				matchName := sess == "" && name != "" && es.Name == name && (!machineSet || es.Machine == machine)
+				if !matchSess && !matchName {
+					continue
+				}
+				if sess == "" {
+					sess = es.Session
+				}
+				if kind == "" {
+					kind = agent.NormalizeKind(es.Kind)
+				}
+				if !machineSet {
+					machine = es.Machine
+					machineSet = true
+				}
+				if cwd == "" {
+					cwd = es.Cwd
+				}
+				if workID == "" {
+					workID = es.WorkItemID
+				}
+				if modelName == "" {
+					modelName = es.Model
+				}
+				if effort == "" {
+					effort = es.Effort
+				}
+				if title == "" {
+					title = es.Title
+				}
+				if name == "" {
+					name = es.Name
+				}
+				if savedConstraint == "" {
+					savedConstraint = es.Constraint
+				}
+				if createdBy == "" {
+					createdBy = es.CreatedBy
+				}
+				if thread == "" {
+					thread = es.Thread
+				}
+				if !keep {
+					keep = es.Keep
+				}
+				if repoRoot == "" {
+					repoRoot = es.RepoRoot
+				}
+				if repoCommonDir == "" {
+					repoCommonDir = es.RepoCommonDir
+				}
+				if worktreePath == "" {
+					worktreePath = es.WorktreePath
+				}
+				if worktreeBranch == "" {
+					worktreeBranch = es.WorktreeBranch
+				}
+				if wtBase == "" {
+					wtBase = es.WorktreeBase
+				}
+				if len(subscribers) == 0 && len(es.Subscribers) > 0 {
+					subscribers = append([]string(nil), es.Subscribers...)
+				}
+				break
 			}
-			if sess == "" {
-				sess = es.Session
-			}
-			if kind == "" {
-				kind = agent.NormalizeKind(es.Kind)
-			}
-			if machine == "" {
-				machine = es.Machine
-			}
-			if cwd == "" {
-				cwd = es.Cwd
-			}
-			if workID == "" {
-				workID = es.WorkItemID
-			}
-			if modelName == "" {
-				modelName = es.Model
-			}
-			if effort == "" {
-				effort = es.Effort
-			}
-			if title == "" {
-				title = es.Title
-			}
-			if name == "" {
-				name = es.Name
-			}
-			if savedConstraint == "" {
-				savedConstraint = es.Constraint
-			}
-			break
 		}
 	}
 	savedConstraint, _ = NormalizeConstraint(savedConstraint)
@@ -489,28 +667,39 @@ func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerReques
 		return nil, false, fmt.Errorf("无法确定该会话对应的 Agent 类型")
 	}
 	if repoRoot != "" {
-		cwd = e.resolveResumeCwd(ctx, machine, cwd, repoRoot)
+		resolvedCwd, fellBack := e.resolveResumeCwd(ctx, machine, cwd, repoRoot)
+		cwd = resolvedCwd
+		if fellBack {
+			worktreePath = ""
+			worktreeBranch = ""
+		}
 	}
 	if workID != "" {
 		if wi, err := e.store.GetWorkItem(ctx, workID); err != nil || wi.ClosedAt != nil {
-			// Keep workID only if the WorkItem still exists and is open.
-			if err != nil || wi.ClosedAt != nil {
-				workID = ""
-			}
+			workID = ""
 		}
 	}
 
 	wk, err := e.LaunchManaged(ctx, LaunchManagedRequest{
-		Kind:       kind,
-		Machine:    machine,
-		Cwd:        cwd,
-		Name:       name,
-		Label:      title,
-		Model:      modelName,
-		Effort:     effort,
-		SessionID:  sess,
-		WorkItemID: workID,
-		Constraint: savedConstraint,
+		Kind:           kind,
+		Machine:        machine,
+		Cwd:            cwd,
+		Name:           name,
+		Label:          title,
+		Model:          modelName,
+		Effort:         effort,
+		SessionID:      sess,
+		WorkItemID:     workID,
+		Constraint:     savedConstraint,
+		CreatedBy:      createdBy,
+		Thread:         thread,
+		Keep:           keep,
+		RepoRoot:       repoRoot,
+		RepoCommonDir:  repoCommonDir,
+		WorktreePath:   worktreePath,
+		WorktreeBranch: worktreeBranch,
+		WorktreeBase:   wtBase,
+		Subscribers:    subscribers,
 	})
 	if err != nil {
 		return nil, false, err
@@ -644,17 +833,31 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 	if cErr != nil {
 		return nil, cErr
 	}
+	thread := strings.TrimSpace(req.Thread)
+	if thread == "" {
+		thread = model.MainThread
+	}
+	createdBy := strings.TrimSpace(req.CreatedBy)
+	if createdBy == "" {
+		createdBy = "you"
+	}
+	savedTitle := strings.TrimSpace(req.Label)
+	if savedTitle == "corgi · "+name {
+		savedTitle = ""
+	}
 	wk := &model.Worker{
 		Name:        name,
 		Kind:        kind,
 		Machine:     machine,
 		Cwd:         cwd,
 		Task:        taskDesc,
-		Thread:      model.MainThread,
+		Thread:      thread,
 		PaneID:      paneID,
 		WorkspaceID: wsID,
-		CreatedBy:   "you",
+		CreatedBy:   createdBy,
 		CreatedAt:   time.Now(),
+		Title:       savedTitle,
+		Keep:        req.Keep,
 		Model:       effModel,
 		Effort:      effEffort,
 		ModelSource: modelSource,
@@ -674,6 +877,12 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 		wk.WorktreePath = wtPrep.WorktreePath
 		wk.WorktreeBranch = wtPrep.WorktreeBranch
 		wk.WorktreeBase = wtPrep.BaseCommit
+	} else if req.SessionID != "" {
+		wk.RepoRoot = req.RepoRoot
+		wk.RepoCommonDir = req.RepoCommonDir
+		wk.WorktreePath = req.WorktreePath
+		wk.WorktreeBranch = req.WorktreeBranch
+		wk.WorktreeBase = req.WorktreeBase
 	}
 	if wk.WorkItemID != "" {
 		if _, err := e.store.AttachWorkerAndUpsert(ctx, wk, wk.WorkItemID, "", oneLineClip(taskDesc, 90), ""); err != nil {
@@ -684,6 +893,12 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 	} else if err := e.store.UpsertWorker(ctx, wk); err != nil {
 		return nil, err
 	}
+	for _, subThread := range req.Subscribers {
+		if subThread != "" && subThread != model.MainThread {
+			_ = e.Subscribe(ctx, wk.Name, subThread, false)
+		}
+	}
+	e.touchWorkerActivity(wk.Name)
 	e.invalidateWorkerAutoVerify(wk.Name, true)
 
 	verb := "新建受管任务"
@@ -758,8 +973,14 @@ func (e *Engine) SendToWorkerWithWorkTitle(ctx context.Context, workerName, thre
 }
 
 func (e *Engine) sendToWorkerInternal(ctx context.Context, workerName, thread, text, workID, workTitle string, markImplement, keepAutoVerifyGen bool) (*model.Trigger, string, error) {
+	e.waitWorkerGCIdle(ctx, workerName, 3*time.Second)
+	if !e.beginWorkerOp(workerName) {
+		return nil, "", fmt.Errorf("worker %q is hibernating; retry or resume session", workerName)
+	}
+	defer e.endWorkerOp(workerName)
+
 	wk, err := e.store.GetWorker(ctx, workerName)
-	if err != nil || wk.Ended {
+	if err != nil || wk.Ended || wk.Hibernating {
 		adopted, adoptErr := e.adoptLiveAgent(ctx, workerName, thread, text)
 		if adoptErr != nil {
 			return nil, "", fmt.Errorf("no running worker or live agent named %q", workerName)
@@ -920,8 +1141,11 @@ func (e *Engine) Report(ctx context.Context, workerName, paneID, text string) (*
 		thread = wk.Thread
 		wk.LastReport = text
 		wk.ReportAt = time.Now()
+		wk.HadTurn = true
 		wk.FaultError = ""
 		wk.FaultPaneID = ""
+		wk.FaultAt = nil
+		wk.StartupFailed = false
 		_ = e.store.UpsertWorker(ctx, wk)
 		e.disarmWorkerStartupCheck(wk.Name)
 		if id := e.captureWorkerReportSnapshot(ctx, wk, text, 500); id != "" {
@@ -973,6 +1197,12 @@ func (e *Engine) Subscribe(ctx context.Context, workerName, thread string, off b
 
 // StopWorker closes a worker's herdr workspace while preserving its session ID for --resume.
 func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
+	e.waitWorkerGCIdle(ctx, workerName, 3*time.Second)
+	if !e.beginWorkerOp(workerName) {
+		return fmt.Errorf("worker %q is currently hibernating; retry shortly", workerName)
+	}
+	defer e.endWorkerOp(workerName)
+
 	wk, err := e.store.GetWorker(ctx, workerName)
 	if err != nil {
 		return fmt.Errorf("worker %q not found", workerName)
@@ -996,13 +1226,46 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 	if wk.WorkspaceID != "" && e.fleet != nil {
 		_ = e.fleet.CloseWorkspace(ctx, wk.WorkspaceID)
 	}
+	if wk.PaneID != "" {
+		e.recordRecentlyClosedPane(wk.PaneID, time.Now())
+	}
+	subs := e.collectWorkerSubscribers(ctx, wk.Name)
 	if wk.WorkItemID != "" && wk.WorktreeBranch != "" {
 		_ = e.store.RecordWorkItemBranch(ctx, wk.WorkItemID, wk.WorktreeBranch)
 	}
+	wtNote := ""
+	if wk.WorktreePath != "" && wk.RepoRoot != "" {
+		if clRes, clErr := e.cleanupWorktreeOnMachine(ctx, wk.Machine, wk.RepoRoot, wk.WorktreePath, wk.WorktreeBranch, wk.WorktreeBase); clErr != nil {
+			wtNote = "；Worktree 清理跳过：" + clErr.Error()
+		} else {
+			if clRes.RemovedDir {
+				wk.WorktreePath = ""
+				wk.Cwd = wk.RepoRoot
+			}
+			if clRes.DeletedBranch {
+				wk.WorktreeBranch = ""
+			}
+			if clRes.Note != "" {
+				wtNote = "；" + clRes.Note
+			}
+		}
+	}
+	if wk.Session != "" {
+		histCwd := wk.Cwd
+		if wk.WorktreePath != "" && wk.RepoRoot != "" {
+			histCwd, _ = e.resolveResumeCwd(ctx, wk.Machine, wk.Cwd, wk.RepoRoot)
+		}
+		if es := e.buildWorkerEndedSession(ctx, wk, histCwd, subs, time.Now()); es != nil {
+			_ = e.store.SaveEndedSession(ctx, es, store.EndedSessionRetentionLimit)
+		}
+	}
 	wk.Ended = true
+	wk.Hibernating = false
 	wk.Status = "done"
 	wk.FaultError = ""
 	wk.FaultPaneID = ""
+	wk.FaultAt = nil
+	wk.StartupFailed = false
 	if err := e.store.UpsertWorker(ctx, wk); err != nil {
 		return err
 	}
@@ -1022,27 +1285,6 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 		e.clearConstraintDelivered(wk.PaneID)
 	}
 	e.clearWorkerTurnState(wk.Name)
-	wtNote := ""
-	if wk.WorktreePath != "" && wk.RepoRoot != "" {
-		if clRes, clErr := e.cleanupWorktreeOnMachine(ctx, wk.Machine, wk.RepoRoot, wk.WorktreePath, wk.WorktreeBranch, wk.WorktreeBase); clErr != nil {
-			wtNote = "；Worktree 清理跳过：" + clErr.Error()
-		} else if clRes.Note != "" {
-			wtNote = "；" + clRes.Note
-		}
-	}
-	if wk.Session != "" {
-		histCwd := wk.Cwd
-		if wk.WorktreePath != "" && wk.RepoRoot != "" {
-			// If worktree dir was cleaned up, History resume uses repo root cleanly.
-			histCwd = e.resolveResumeCwd(ctx, wk.Machine, wk.Cwd, wk.RepoRoot)
-		}
-		eid, _, _ := e.store.NextID(ctx, "h")
-		_ = e.store.SaveEndedSession(ctx, &model.EndedSession{
-			ID: eid, Kind: wk.Kind, Machine: wk.Machine, Cwd: histCwd,
-			Name: wk.Name, Title: orStr(wk.Title, wk.Name), Session: wk.Session,
-			WorkItemID: wk.WorkItemID, Model: wk.Model, Effort: wk.Effort, Constraint: wk.Constraint, EndedAt: time.Now(),
-		}, 40)
-	}
 	e.addEvent(ctx, wk.Thread, "已停止 "+wk.Name+"（会话已保留，可随时续接"+wtNote+"）", wk.Name, "info")
 	e.notifyChanged()
 	return nil

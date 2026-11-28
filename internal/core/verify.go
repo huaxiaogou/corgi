@@ -43,6 +43,11 @@ func (e *Engine) VerifyWorker(ctx context.Context, req VerifyWorkerRequest) (*Ve
 	if name == "" {
 		return nil, fmt.Errorf("worker name is required")
 	}
+	e.waitWorkerGCIdle(ctx, name, 3*time.Second)
+	if !e.beginWorkerOp(name) {
+		return nil, fmt.Errorf("worker %q is currently hibernating; retry shortly", name)
+	}
+	defer e.endWorkerOp(name)
 
 	var machine, dir, brief, thread, workItemID string
 	if w, err := e.store.GetWorker(ctx, name); err == nil && w != nil {

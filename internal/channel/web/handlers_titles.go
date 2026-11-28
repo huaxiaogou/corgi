@@ -13,6 +13,7 @@ import (
 	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
+	"github.com/kiperjing/corgi/internal/store"
 )
 
 var sessionUUIDRe = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
@@ -225,9 +226,10 @@ func (s *Server) WatchEndings(ctx context.Context) {
 				continue
 			}
 			kind := agent.NormalizeKind(a.Kind)
+			prevTracked := prev[a.PaneID]
 			constraint := strings.TrimSpace(a.Constraint)
-			if constraint == "" && prev[a.PaneID] != nil {
-				constraint = prev[a.PaneID].sess.Constraint
+			if constraint == "" && prevTracked != nil {
+				constraint = prevTracked.sess.Constraint
 			}
 			prev[a.PaneID] = &tracked{
 				sess: model.EndedSession{
@@ -240,7 +242,9 @@ func (s *Server) WatchEndings(ctx context.Context) {
 					Constraint: constraint,
 				},
 			}
-			_ = s.Store.ForgetEndedSession(ctx, kind, a.Machine, a.Session)
+			if prevTracked == nil || prevTracked.sess.Session != a.Session {
+				_ = s.Store.ForgetEndedSessionIfLive(ctx, kind, a.Machine, a.Session, a.Name)
+			}
 		}
 		for paneID, tr := range prev {
 			if nowLive[paneID] || !online[tr.sess.Machine] {
@@ -251,11 +255,29 @@ func (s *Server) WatchEndings(ctx context.Context) {
 				continue
 			}
 			delete(prev, paneID)
-			if tr.sess.Constraint == "" && tr.sess.Name != "" {
+			if tr.sess.Name != "" {
 				if wk, wErr := s.Store.GetWorker(ctx, tr.sess.Name); wErr == nil && wk != nil && (wk.Session == "" || wk.Session == tr.sess.Session) {
-					tr.sess.Constraint = wk.Constraint
+					if tr.sess.Constraint == "" {
+						tr.sess.Constraint = wk.Constraint
+					}
 					if tr.sess.WorkItemID == "" {
 						tr.sess.WorkItemID = wk.WorkItemID
+					}
+					if tr.sess.CreatedBy == "" {
+						tr.sess.CreatedBy = wk.CreatedBy
+					}
+					if tr.sess.Thread == "" {
+						tr.sess.Thread = wk.Thread
+					}
+					if tr.sess.RepoRoot == "" {
+						tr.sess.RepoRoot = wk.RepoRoot
+						tr.sess.RepoCommonDir = wk.RepoCommonDir
+						tr.sess.WorktreePath = wk.WorktreePath
+						tr.sess.WorktreeBranch = wk.WorktreeBranch
+						tr.sess.WorktreeBase = wk.WorktreeBase
+					}
+					if !tr.sess.Keep {
+						tr.sess.Keep = wk.Keep
 					}
 				}
 			}
@@ -268,7 +290,7 @@ func (s *Server) WatchEndings(ctx context.Context) {
 			if tr.sess.Title == "" {
 				tr.sess.Title = tr.sess.Name
 			}
-			_ = s.Store.SaveEndedSession(ctx, &tr.sess, 40)
+			_ = s.Store.SaveEndedSessionIfAbsent(ctx, &tr.sess, store.EndedSessionRetentionLimit)
 		}
 	}
 }

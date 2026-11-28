@@ -351,6 +351,27 @@ func (f *Fleet) Workspaces(ctx context.Context) ([]model.Workspace, error) {
 	return merged, localErr
 }
 
+// PanesOnMachine queries pane.list strictly on the single specified machine ("" for local Hub)
+// and returns any transport/RPC error directly instead of swallowing it.
+func (f *Fleet) PanesOnMachine(ctx context.Context, machine string) ([]model.Pane, error) {
+	cl, err := f.clientFor(machine)
+	if err != nil {
+		return nil, err
+	}
+	if cl == nil {
+		return nil, fmt.Errorf("herdr client unavailable for machine %q", machine)
+	}
+	ps, err := cl.Panes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range ps {
+		ps[i].ID = JoinID(ps[i].ID, machine)
+		ps[i].WorkspaceID = JoinID(ps[i].WorkspaceID, machine)
+	}
+	return ps, nil
+}
+
 // Panes fans out pane.list across all online machines.
 func (f *Fleet) Panes(ctx context.Context) ([]model.Pane, error) {
 	clients := f.allClients()

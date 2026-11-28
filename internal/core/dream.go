@@ -14,6 +14,7 @@ import (
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
 	"github.com/kiperjing/corgi/internal/runtime/herdr"
+	"github.com/kiperjing/corgi/internal/store"
 )
 
 const (
@@ -369,7 +370,7 @@ func (e *Engine) launchDreamAsync(d *dreamRun, st model.Settings) {
 						ID: eid, Kind: kind, Cwd: e.memory.RouterDir(), Name: model.RouterName,
 						Session: sid, EndedAt: time.Now(),
 						Title: "Corgi · 做梦前的会话（" + time.Now().Format("01-02 15:04") + "）",
-					}, 40)
+					}, store.EndedSessionRetentionLimit)
 					e.mu.Lock()
 					if e.dream == d {
 						d.archivedRef = "h:" + eid
@@ -849,7 +850,7 @@ func (e *Engine) writeDreamInput(ctx context.Context) error {
 	b.WriteString(strings.Join(lines, "\n"))
 	b.WriteString("\n\n## Corgi's own sessions (reasoning & commands)\n")
 
-	ended, _ := e.store.ListEndedSessions(ctx, 40)
+	ended, _ := e.store.ListEndedSessions(ctx, store.EndedSessionRetentionLimit)
 	var routerSess []*model.EndedSession
 	for _, h := range ended {
 		if h.Name == model.RouterName && (since.IsZero() || h.EndedAt.After(since)) {

@@ -13,6 +13,7 @@ import (
 	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
+	"github.com/kiperjing/corgi/internal/store"
 )
 
 // DirectTurnResult delivers a Worker's direct reply back to an interactive channel (e.g. WeCom)
@@ -315,7 +316,7 @@ func (e *Engine) ListSelectableWorkers(ctx context.Context, limit int) []WorkerP
 		}
 	}
 
-	if ended, err := e.store.ListEndedSessions(ctx, 40); err == nil {
+	if ended, err := e.store.ListEndedSessions(ctx, store.EndedSessionRetentionLimit); err == nil {
 		for _, es := range ended {
 			name := strings.TrimSpace(es.Name)
 			if name == "" || es.Session == "" || seen[name] {
@@ -560,6 +561,11 @@ func (e *Engine) SendDirectWorkerMessage(ctx context.Context, req DirectWorkerRe
 	if err != nil {
 		return nil, false, err
 	}
+	e.waitWorkerGCIdle(ctx, w.Name, 3*time.Second)
+	if !e.beginWorkerOp(w.Name) {
+		return w, resumed, fmt.Errorf("worker %q 正在休眠，请稍后重试", w.Name)
+	}
+	defer e.endWorkerOp(w.Name)
 	e.invalidateWorkerAutoVerify(w.Name, true)
 
 	var slot *pendingDirectTurn

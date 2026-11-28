@@ -12,6 +12,7 @@ import (
 
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
+	"github.com/kiperjing/corgi/internal/store"
 )
 
 // handingOver reports whether a Router context handover is currently active.
@@ -178,7 +179,7 @@ func (e *Engine) finishHandover(ctx context.Context, h *handoverState) {
 			Session: h.session,
 			EndedAt: time.Now(),
 			Title:   "Corgi · 交接前的会话（" + h.at.Format("01-02 15:04") + "）",
-		}, 40)
+		}, store.EndedSessionRetentionLimit)
 	}
 	if err := e.RestartRouter(ctx); err != nil {
 		e.logger.Warn("handover restart router failed", "err", err)

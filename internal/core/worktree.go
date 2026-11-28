@@ -24,35 +24,45 @@ type worktreePrep struct {
 }
 
 func (e *Engine) inspectGitOnMachine(ctx context.Context, machine, dir string) gitwt.InspectResult {
+	res, _ := e.inspectGitOnMachineErr(ctx, machine, dir)
+	return res
+}
+
+func (e *Engine) inspectGitOnMachineErr(ctx context.Context, machine, dir string) (gitwt.InspectResult, error) {
 	if strings.TrimSpace(dir) == "" {
-		return gitwt.InspectResult{}
+		return gitwt.InspectResult{}, fmt.Errorf("empty dir")
 	}
 	if machine == "" {
-		return gitwt.Inspect(ctx, dir)
+		return gitwt.Inspect(ctx, dir), nil
 	}
 	if e.fleet == nil {
-		return gitwt.InspectResult{}
+		return gitwt.InspectResult{}, fmt.Errorf("fleet unavailable")
 	}
 	hc, err := e.fleet.HTTPClient(machine)
 	if err != nil {
-		return gitwt.InspectResult{}
+		return gitwt.InspectResult{}, err
 	}
 	tctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	body, _ := json.Marshal(map[string]string{"cwd": dir})
 	req, err := http.NewRequestWithContext(tctx, http.MethodPost, "http://node/api/git/inspect", bytes.NewReader(body))
 	if err != nil {
-		return gitwt.InspectResult{}
+		return gitwt.InspectResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := hc.Do(req)
 	if err != nil {
-		return gitwt.InspectResult{}
+		return gitwt.InspectResult{}, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return gitwt.InspectResult{}, fmt.Errorf("remote git inspect HTTP %d", resp.StatusCode)
+	}
 	var res gitwt.InspectResult
-	_ = json.NewDecoder(resp.Body).Decode(&res)
-	return res
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return gitwt.InspectResult{}, err
+	}
+	return res, nil
 }
 
 func (e *Engine) createWorktreeOnMachine(ctx context.Context, machine, repoRoot, name, branch, relPath string) (gitwt.CreateResult, error) {
@@ -262,20 +272,26 @@ func (e *Engine) prepareWorktree(ctx context.Context, machine, cwd, name, mode s
 }
 
 func worktreePromptNote(prep *worktreePrep) string {
-	if prep == nil || prep.WorktreeBranch == "" {
+	if prep == nil || prep.WorktreeBranch == "" || prep.WorktreePath == "" {
 		return ""
 	}
 	return fmt.Sprintf("\n- Git Worktree Isolation: you are working in an isolated git worktree on branch `%s` (branched from `%s`). Before reporting completion, run the repository's build/test checks, commit your verified changes on this branch, and include the branch name and verification result in your report; do not modify the primary checkout.",
 		prep.WorktreeBranch, prep.RepoRoot)
 }
 
-func (e *Engine) resolveResumeCwd(ctx context.Context, machine, savedCwd, repoRoot string) string {
+// resolveResumeCwd verifies whether a saved worktree directory still exists before resuming.
+// It falls back to repoRoot ONLY when the machine explicitly confirms os.IsNotExist (NotFound=true),
+// never on transient RPC/permission failures that could otherwise redirect edits to the primary checkout.
+func (e *Engine) resolveResumeCwd(ctx context.Context, machine, savedCwd, repoRoot string) (cwd string, fellBack bool) {
 	if savedCwd == "" || repoRoot == "" || path.Clean(savedCwd) == path.Clean(repoRoot) {
-		return savedCwd
+		return savedCwd, false
 	}
-	if insp := e.inspectGitOnMachine(ctx, machine, savedCwd); insp.IsGit {
-		return savedCwd
+	insp, err := e.inspectGitOnMachineErr(ctx, machine, savedCwd)
+	if err != nil {
+		return savedCwd, false
 	}
-	// Worktree directory was already cleaned up on stop; fall back to primary repo root so resume succeeds.
-	return repoRoot
+	if insp.NotFound {
+		return repoRoot, true
+	}
+	return savedCwd, false
 }

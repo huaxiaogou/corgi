@@ -18,6 +18,7 @@ import (
 	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/herdr"
+	"github.com/kiperjing/corgi/internal/store"
 )
 
 const (
@@ -85,7 +86,7 @@ func (s *Server) handleListHistory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"sessions": []any{}})
 		return
 	}
-	list, err := s.Store.ListEndedSessions(r.Context(), 40)
+	list, err := s.Store.ListEndedSessions(r.Context(), store.EndedSessionRetentionLimit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -99,20 +100,13 @@ func (s *Server) handleResumeHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	list, err := s.Store.ListEndedSessions(r.Context(), 100)
+	target, err := s.Store.GetEndedSession(r.Context(), id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	var target *model.EndedSession
-	for _, sess := range list {
-		if sess.ID == id {
-			target = sess
-			break
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "历史会话不存在"})
+			return
 		}
-	}
-	if target == nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "历史会话不存在"})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
 	ad, err := s.Agents.Get(target.Kind)
@@ -121,48 +115,14 @@ func (s *Server) handleResumeHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.Engine != nil {
-		workID := strings.TrimSpace(target.WorkItemID)
-		modelName, effort := strings.TrimSpace(target.Model), strings.TrimSpace(target.Effort)
-		constraint := strings.TrimSpace(target.Constraint)
-		if (workID == "" || constraint == "") && target.Name != "" {
-			if old, wErr := s.Store.GetWorker(r.Context(), target.Name); wErr == nil && (old.Session == "" || old.Session == target.Session) {
-				if workID == "" {
-					workID = old.WorkItemID
-				}
-				if modelName == "" {
-					modelName = old.Model
-				}
-				if effort == "" {
-					effort = old.Effort
-				}
-				if constraint == "" {
-					constraint = old.Constraint
-				}
-			}
-		}
-		if workID != "" {
-			if wi, wErr := s.Store.GetWorkItem(r.Context(), workID); wErr != nil || wi.ClosedAt != nil {
-				workID = ""
-			}
-		}
-		wk, lErr := s.Engine.LaunchManaged(r.Context(), core.LaunchManagedRequest{
-			Kind:       target.Kind,
-			Machine:    target.Machine,
-			Cwd:        target.Cwd,
-			Name:       target.Name,
-			Label:      target.Title,
-			Model:      modelName,
-			Effort:     effort,
-			SessionID:  target.Session,
-			WorkItemID: workID,
-			Constraint: constraint,
+		wk, _, lErr := s.Engine.ResumeWorkerSession(r.Context(), core.ResumeWorkerRequest{
+			EndedSessionID: id,
 		})
 		if lErr != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": lErr.Error()})
 			return
 		}
 		s.markStarted(wk.PaneID)
-		_ = s.Store.ForgetEndedSession(r.Context(), target.Kind, target.Machine, target.Session)
 		writeJSON(w, http.StatusOK, map[string]any{"pane_id": wk.PaneID, "workspace_id": wk.WorkspaceID, "name": wk.Name, "worker": wk.Name, "work_item_id": wk.WorkItemID})
 		return
 	}

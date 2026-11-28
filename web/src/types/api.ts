@@ -366,6 +366,8 @@ export interface Settings {
   idle_patrol_minutes?: number;
   active_hours?: string;
   stale_archive_days?: number;
+  worker_idle_gc_minutes?: number;
+  worker_max_live_per_machine?: number;
   morning_digest?: boolean;
   rotate_pct?: number;
   dream_at?: string;

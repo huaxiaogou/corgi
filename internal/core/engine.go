@@ -200,6 +200,20 @@ type Engine struct {
 	workerStartupProbeDelay    time.Duration
 	workerStartupProbeInterval time.Duration
 	workerStartupCheckWindow   time.Duration
+
+	// Universal Worker Process Hibernation GC runtime state (protected by mu).
+	startedAt                time.Time
+	lastGCScan               time.Time
+	gcRunning                bool
+	gcClosing                map[string]bool
+	gcClosingPane            map[string]string
+	workerOps                map[string]int
+	workerActivity           map[string]time.Time
+	gcFailBackoff            map[string]time.Time
+	recentlyClosedPanes      map[string]time.Time
+	workerGCInterval         time.Duration
+	workerGCGracePeriod      time.Duration
+	workerGCActivityCooldown time.Duration
 }
 
 // NewEngine constructs a Super-Agent Engine initialized from SQLite.
@@ -255,9 +269,16 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		directTurns:        map[string][]*pendingDirectTurn{},
 		watchdogMarks:      map[string]*watchdogMark{},
 		constraintRemindAt: map[string]time.Time{},
-		workerTurns:        map[string]*workerTurnWatermark{},
-		autoVerify:         map[string]*workerAutoVerify{},
-		autoVerifyReleased: map[string]bool{},
+		workerTurns:         map[string]*workerTurnWatermark{},
+		autoVerify:          map[string]*workerAutoVerify{},
+		autoVerifyReleased:  map[string]bool{},
+		startedAt:           time.Now(),
+		gcClosing:           map[string]bool{},
+		gcClosingPane:       map[string]string{},
+		workerOps:           map[string]int{},
+		workerActivity:      map[string]time.Time{},
+		gcFailBackoff:       map[string]time.Time{},
+		recentlyClosedPanes: map[string]time.Time{},
 	}
 	eng.loadActiveDreamMarker(ctx)
 	return eng, nil
@@ -361,6 +382,22 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 			ns.StaleArchiveDays = 3
 		} else if ns.StaleArchiveDays > 60 {
 			ns.StaleArchiveDays = 60
+		}
+		if ns.WorkerIdleGCMinutes < 0 {
+			ns.WorkerIdleGCMinutes = -1
+		} else if ns.WorkerIdleGCMinutes == 0 {
+			ns.WorkerIdleGCMinutes = 120
+		} else if ns.WorkerIdleGCMinutes < 15 {
+			ns.WorkerIdleGCMinutes = 15
+		} else if ns.WorkerIdleGCMinutes > 1440 {
+			ns.WorkerIdleGCMinutes = 1440
+		}
+		if ns.WorkerMaxLivePerMachine < 0 {
+			ns.WorkerMaxLivePerMachine = -1
+		} else if ns.WorkerMaxLivePerMachine == 0 {
+			ns.WorkerMaxLivePerMachine = 6
+		} else if ns.WorkerMaxLivePerMachine > 50 {
+			ns.WorkerMaxLivePerMachine = 50
 		}
 		if ns.NotifyLevel != "normal" {
 			ns.NotifyLevel = "quiet"

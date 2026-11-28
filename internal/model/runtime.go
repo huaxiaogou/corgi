@@ -217,18 +217,27 @@ type ToolStats struct {
 
 // EndedSession remembers a closed agent session for review or --resume.
 type EndedSession struct {
-	ID         string    `json:"id"`
-	Kind       string    `json:"kind"`
-	Machine    string    `json:"machine,omitempty"`
-	Cwd        string    `json:"cwd"`
-	Title      string    `json:"title,omitempty"`
-	Name       string    `json:"name,omitempty"`
-	Session    string    `json:"session"`
-	WorkItemID string    `json:"work_item_id,omitempty"`
-	Model      string    `json:"model,omitempty"`
-	Effort     string    `json:"effort,omitempty"`
-	Constraint string    `json:"constraint,omitempty"`
-	EndedAt    time.Time `json:"ended_at"`
+	ID             string    `json:"id"`
+	Kind           string    `json:"kind"`
+	Machine        string    `json:"machine,omitempty"`
+	Cwd            string    `json:"cwd"`
+	Title          string    `json:"title,omitempty"`
+	Name           string    `json:"name,omitempty"`
+	Session        string    `json:"session"`
+	WorkItemID     string    `json:"work_item_id,omitempty"`
+	Model          string    `json:"model,omitempty"`
+	Effort         string    `json:"effort,omitempty"`
+	Constraint     string    `json:"constraint,omitempty"`
+	CreatedBy      string    `json:"created_by,omitempty"`
+	Thread         string    `json:"thread,omitempty"`
+	Keep           bool      `json:"keep,omitempty"`
+	RepoRoot       string    `json:"repo_root,omitempty"`
+	RepoCommonDir  string    `json:"repo_common_dir,omitempty"`
+	WorktreePath   string    `json:"worktree_path,omitempty"`
+	WorktreeBranch string    `json:"worktree_branch,omitempty"`
+	WorktreeBase   string    `json:"worktree_base,omitempty"`
+	Subscribers    []string  `json:"subscribers,omitempty"`
+	EndedAt        time.Time `json:"ended_at"`
 }
 
 // RouterView summarizes the live state of Corgi's resident Router session.

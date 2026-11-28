@@ -281,35 +281,97 @@ func (s *Store) DeleteDevice(ctx context.Context, id string) (*model.Device, err
 	return &d, nil
 }
 
+// EndedSessionRetentionLimit is the canonical retention limit for archived ended sessions.
+const EndedSessionRetentionLimit = 200
+
 // SaveEndedSession stores an archived session and trims old rows beyond maxKeep.
 func (s *Store) SaveEndedSession(ctx context.Context, e *model.EndedSession, maxKeep int) error {
 	if maxKeep <= 0 {
-		maxKeep = 40
+		maxKeep = EndedSessionRetentionLimit
 	}
 	data, err := mustJSON(e)
 	if err != nil {
 		return fmt.Errorf("encode ended session: %w", err)
 	}
-	_, _ = s.db.ExecContext(ctx, `DELETE FROM ended_sessions WHERE kind = ? AND machine = ? AND session_id = ?`,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin save ended session: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, _ = tx.ExecContext(ctx, `DELETE FROM ended_sessions WHERE kind = ? AND machine = ? AND session_id = ?`,
 		e.Kind, e.Machine, e.Session)
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO ended_sessions(id, kind, machine, session_id, data, ended_at)
 		VALUES(?, ?, ?, ?, ?, ?)
 	`, e.ID, e.Kind, e.Machine, e.Session, data, e.EndedAt.Unix()); err != nil {
 		return fmt.Errorf("insert ended session: %w", err)
 	}
-	_, _ = s.db.ExecContext(ctx, `
+	_, _ = tx.ExecContext(ctx, `
 		DELETE FROM ended_sessions WHERE id NOT IN (
 			SELECT id FROM ended_sessions ORDER BY ended_at DESC LIMIT ?
 		)
 	`, maxKeep)
-	return nil
+	return tx.Commit()
+}
+
+// SaveEndedSessionIfAbsent inserts e only when no archived row already exists for
+// (kind, machine, session_id), preventing background watchers from overwriting richer
+// managed archives saved by HibernateWorker or StopWorker.
+func (s *Store) SaveEndedSessionIfAbsent(ctx context.Context, e *model.EndedSession, maxKeep int) error {
+	if maxKeep <= 0 {
+		maxKeep = EndedSessionRetentionLimit
+	}
+	data, err := mustJSON(e)
+	if err != nil {
+		return fmt.Errorf("encode ended session: %w", err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin save ended session if absent: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var existing int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM ended_sessions WHERE kind = ? AND machine = ? AND session_id = ? LIMIT 1`,
+		e.Kind, e.Machine, e.Session).Scan(&existing); err == nil {
+		return tx.Commit()
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("check ended session: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO ended_sessions(id, kind, machine, session_id, data, ended_at)
+		VALUES(?, ?, ?, ?, ?, ?)
+	`, e.ID, e.Kind, e.Machine, e.Session, data, e.EndedAt.Unix()); err != nil {
+		return fmt.Errorf("insert ended session: %w", err)
+	}
+	_, _ = tx.ExecContext(ctx, `
+		DELETE FROM ended_sessions WHERE id NOT IN (
+			SELECT id FROM ended_sessions ORDER BY ended_at DESC LIMIT ?
+		)
+	`, maxKeep)
+	return tx.Commit()
+}
+
+// GetEndedSession loads one archived ended session by ID.
+func (s *Store) GetEndedSession(ctx context.Context, id string) (*model.EndedSession, error) {
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT data FROM ended_sessions WHERE id = ?`, id).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get ended session %s: %w", id, err)
+	}
+	var e model.EndedSession
+	if err := json.Unmarshal([]byte(raw), &e); err != nil {
+		return nil, fmt.Errorf("decode ended session %s: %w", id, err)
+	}
+	return &e, nil
 }
 
 // ListEndedSessions returns archived ended sessions newest first.
 func (s *Store) ListEndedSessions(ctx context.Context, limit int) ([]*model.EndedSession, error) {
 	if limit <= 0 {
-		limit = 40
+		limit = EndedSessionRetentionLimit
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT data FROM ended_sessions ORDER BY ended_at DESC LIMIT ?`, limit)
 	if err != nil {
@@ -344,4 +406,63 @@ func (s *Store) ForgetEndedSession(ctx context.Context, kind, machine, session s
 	_, err := s.db.ExecContext(ctx, `DELETE FROM ended_sessions WHERE kind = ? AND machine = ? AND session_id = ?`,
 		kind, machine, session)
 	return err
+}
+
+// ForgetEndedSessionIfLive removes an archived session inside a transaction only when
+// the corresponding managed worker (if any) is still live and not hibernating/ended.
+// This prevents a stale WatchEndings poll from deleting a freshly written GC archive.
+func (s *Store) ForgetEndedSessionIfLive(ctx context.Context, kind, machine, session, workerName string) error {
+	if session == "" {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if workerName != "" {
+		var ended int
+		var raw string
+		err := tx.QueryRowContext(ctx, `SELECT ended, data FROM workers WHERE name = ?`, workerName).Scan(&ended, &raw)
+		if err == nil {
+			var w model.Worker
+			_ = json.Unmarshal([]byte(raw), &w)
+			if ended != 0 || w.Ended || w.Hibernating {
+				return tx.Commit()
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT ended, data FROM workers WHERE machine = ?`, machine)
+	if err != nil {
+		return err
+	}
+	hasEndedMatch := false
+	hasLiveMatch := false
+	for rows.Next() {
+		var ended int
+		var raw string
+		if rows.Scan(&ended, &raw) != nil {
+			continue
+		}
+		var w model.Worker
+		if json.Unmarshal([]byte(raw), &w) != nil || w.Session != session {
+			continue
+		}
+		if ended != 0 || w.Ended || w.Hibernating {
+			hasEndedMatch = true
+		} else {
+			hasLiveMatch = true
+		}
+	}
+	_ = rows.Close()
+	if hasEndedMatch && !hasLiveMatch {
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ended_sessions WHERE kind = ? AND machine = ? AND session_id = ?`,
+		kind, machine, session); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

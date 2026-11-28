@@ -15,6 +15,8 @@ export function TimersTab({ timers, settings, onAdd, onDelete, onSaveSettingsPat
   const [idlePatrolMinutes, setIdlePatrolMinutes] = useState(settings?.idle_patrol_minutes ?? 30);
   const [activeHours, setActiveHours] = useState(settings?.active_hours ?? "09:00-22:30");
   const [staleArchiveDays, setStaleArchiveDays] = useState(settings?.stale_archive_days ?? 3);
+  const [workerIdleGCMinutes, setWorkerIdleGCMinutes] = useState(settings?.worker_idle_gc_minutes ?? 120);
+  const [workerMaxLivePerMachine, setWorkerMaxLivePerMachine] = useState(settings?.worker_max_live_per_machine ?? 6);
   const [morningDigest, setMorningDigest] = useState(settings?.morning_digest !== false);
 
   useEffect(() => {
@@ -22,6 +24,8 @@ export function TimersTab({ timers, settings, onAdd, onDelete, onSaveSettingsPat
     setIdlePatrolMinutes(settings.idle_patrol_minutes ?? 30);
     setActiveHours(settings.active_hours ?? "09:00-22:30");
     setStaleArchiveDays(settings.stale_archive_days ?? 3);
+    setWorkerIdleGCMinutes(settings.worker_idle_gc_minutes ?? 120);
+    setWorkerMaxLivePerMachine(settings.worker_max_live_per_machine ?? 6);
     setMorningDigest(settings.morning_digest !== false);
   }, [settings]);
 
@@ -114,6 +118,30 @@ export function TimersTab({ timers, settings, onAdd, onDelete, onSaveSettingsPat
               />
             </label>
           </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+            <label className="space-y-1">
+              <span className="text-muted">Worker 空闲自动休眠 (分钟，-1 关闭全部自动 GC)</span>
+              <input
+                type="number"
+                min={-1}
+                max={1440}
+                value={workerIdleGCMinutes}
+                onChange={(e) => setWorkerIdleGCMinutes(Number(e.target.value))}
+                className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-muted">单机受管 Worker 常驻上限 (个，-1 不限)</span>
+              <input
+                type="number"
+                min={-1}
+                max={50}
+                value={workerMaxLivePerMachine}
+                onChange={(e) => setWorkerMaxLivePerMachine(Number(e.target.value))}
+                className="w-full px-3 py-2 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
+              />
+            </label>
+          </div>
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={morningDigest} onChange={(e) => setMorningDigest(e.target.checked)} />
             <span>开启每日晨间汇总简报（在活跃时段起点汇总跨天待办与超期旧会话，全部干净时自动跳过）</span>
@@ -131,6 +159,17 @@ export function TimersTab({ timers, settings, onAdd, onDelete, onSaveSettingsPat
               <span className="font-mono-code text-primary">{(activeHours || "09:00-22:30").split("-")[0] || "09:00"}</span>{" "}
               发唯一 1 条晨报；手动会话与常驻保留会话永久豁免归档
             </div>
+            <div>
+              无损休眠：仅针对 Corgi 派出且空闲满{" "}
+              <span className="font-mono-code text-primary">
+                {workerIdleGCMinutes < 0 ? "已关闭" : `${workerIdleGCMinutes || 120}m`}
+              </span>{" "}
+              或超单机上限（
+              <span className="font-mono-code text-primary">
+                {workerMaxLivePerMachine < 0 ? "不限" : `${workerMaxLivePerMachine || 6} 个`}
+              </span>
+              ）的进程，只收进程、绝不删 Worktree 目录，随时原地续聊
+            </div>
           </div>
           <button
             type="button"
@@ -140,9 +179,11 @@ export function TimersTab({ timers, settings, onAdd, onDelete, onSaveSettingsPat
                   idle_patrol_minutes: idlePatrolMinutes,
                   active_hours: activeHours.trim() || "09:00-22:30",
                   stale_archive_days: staleArchiveDays,
+                  worker_idle_gc_minutes: workerIdleGCMinutes,
+                  worker_max_live_per_machine: workerMaxLivePerMachine,
                   morning_digest: morningDigest,
                 },
-                "巡检与晨报设置已保存"
+                "巡检与自动休眠设置已保存"
               )
             }
             className="px-4 py-1.5 rounded-lg btn-accent font-medium cursor-pointer"

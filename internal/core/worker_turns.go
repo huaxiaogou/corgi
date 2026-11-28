@@ -415,13 +415,18 @@ func (e *Engine) hasWorkerStartupCheck(workerName string) bool {
 	return wm != nil && wm.startupCheckActive
 }
 
-func (e *Engine) markWorkerFaulted(ctx context.Context, w *model.Worker, paneID, errMsg string) {
+func (e *Engine) markWorkerFaulted(ctx context.Context, w *model.Worker, paneID, errMsg string, initialStartup bool) {
 	if w == nil || strings.TrimSpace(errMsg) == "" {
 		return
 	}
+	now := time.Now()
 	w.Status = "failed"
 	w.FaultError = strings.TrimSpace(errMsg)
 	w.FaultPaneID = orStr(paneID, w.PaneID)
+	w.FaultAt = &now
+	if initialStartup && !w.HadTurn && w.Session == "" && strings.TrimSpace(w.LastReport) == "" && w.ReportAt.IsZero() {
+		w.StartupFailed = true
+	}
 	_ = e.store.UpsertWorker(ctx, w)
 }
 
@@ -533,7 +538,7 @@ func (e *Engine) checkWorkerStartupHealth(ctx context.Context, w *model.Worker, 
 					}
 					go dt.callback(context.WithoutCancel(ctx), res)
 				}
-				e.markWorkerFaulted(ctx, w, paneID, errMsg)
+				e.markWorkerFaulted(ctx, w, paneID, errMsg, preUserAt == 0 && preAssistAt == 0 && preReportAt.IsZero())
 				batchDesc := strings.Join(batchIDs, ", ")
 				wiTag := ""
 				if w.WorkItemID != "" {

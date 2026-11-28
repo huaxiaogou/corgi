@@ -90,7 +90,10 @@ func (e *Engine) invalidateBypassCheck(paneID string) {
 // bypass-permissions flag (e.g. bare `agy --conversation <id>` after a herdr server restart)
 // while AskPermissions is false, and seamlessly relaunches the same session in-place when idle.
 func (e *Engine) maybeHealWorkerBypass(ctx context.Context, w *model.Worker, li liveInfo, now time.Time) {
-	if e.fleet == nil || w == nil || w.Ended || w.PaneID == "" || w.Session == "" || li.kind == "" {
+	if e.fleet == nil || w == nil || w.Ended || w.Hibernating || w.PaneID == "" || w.Session == "" || li.kind == "" {
+		return
+	}
+	if e.isWorkerGCClosing(w.Name) {
 		return
 	}
 	if e.Settings().AskPermissions {

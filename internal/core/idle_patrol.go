@@ -509,9 +509,16 @@ func (e *Engine) SnoozeActionBy(ctx context.Context, actionID, channel string, u
 	return act, nil
 }
 
-// SetWorkerKeep marks or unmarks a worker as permanently exempt from stale-session archival prompts.
+// SetWorkerKeep marks or unmarks a worker as permanently exempt from stale-session archival and GC hibernation.
 func (e *Engine) SetWorkerKeep(ctx context.Context, workerName string, keep bool) (*model.Worker, error) {
-	wk, err := e.store.GetWorker(ctx, strings.TrimSpace(workerName))
+	name := strings.TrimSpace(workerName)
+	e.waitWorkerGCIdle(ctx, name, 3*time.Second)
+	if !e.beginWorkerOp(name) {
+		return nil, fmt.Errorf("worker %q is currently hibernating; retry shortly", name)
+	}
+	defer e.endWorkerOp(name)
+
+	wk, err := e.store.GetWorker(ctx, name)
 	if err != nil {
 		return nil, err
 	}

@@ -197,6 +197,10 @@ type Worker struct {
 	Status               string     `json:"status"` // starting | working | waiting | idle | done | blocked | gone | failed
 	FaultError           string     `json:"fault_error,omitempty"`
 	FaultPaneID          string     `json:"fault_pane_id,omitempty"`
+	FaultAt              *time.Time `json:"fault_at,omitempty"`
+	HadTurn              bool       `json:"had_turn,omitempty"`
+	StartupFailed        bool       `json:"startup_failed,omitempty"`
+	Hibernating          bool       `json:"hibernating,omitempty"`
 	LastReport           string     `json:"last_report,omitempty"`
 	LastReportArtifactID string     `json:"last_report_artifact_id,omitempty"`
 	LastReportAttachedID string     `json:"last_report_attached_id,omitempty"`
@@ -373,10 +377,12 @@ type Settings struct {
 	WorkerMachine        string                                `json:"worker_machine,omitempty"`
 	ReplyChars           int                                   `json:"reply_chars"`
 	StallMinutes         int                                   `json:"stall_minutes"`
-	IdlePatrolMinutes    int                                   `json:"idle_patrol_minutes,omitempty"` // 0 = default 30, -1 = off
-	ActiveHours          string                                `json:"active_hours,omitempty"`        // "" = default "09:00-22:30", "24h" = always
-	StaleArchiveDays     int                                   `json:"stale_archive_days,omitempty"`  // 0 = default 3, -1 = off
-	MorningDigest        *bool                                 `json:"morning_digest,omitempty"`      // nil = default true
+	IdlePatrolMinutes       int                                   `json:"idle_patrol_minutes,omitempty"`        // 0 = default 30, -1 = off
+	ActiveHours             string                                `json:"active_hours,omitempty"`               // "" = default "09:00-22:30", "24h" = always
+	StaleArchiveDays        int                                   `json:"stale_archive_days,omitempty"`         // 0 = default 3, -1 = off
+	WorkerIdleGCMinutes     int                                   `json:"worker_idle_gc_minutes,omitempty"`     // 0 = default 120, -1 = off (disables all auto worker GC)
+	WorkerMaxLivePerMachine int                                   `json:"worker_max_live_per_machine,omitempty"` // 0 = default 6, -1 = unlimited
+	MorningDigest           *bool                                 `json:"morning_digest,omitempty"`             // nil = default true
 	RotatePct            int                                   `json:"rotate_pct,omitempty"`          // 0 = default 90, -1 = never
 	DreamAt              string                                `json:"dream_at,omitempty"`            // "HH:MM", "" = "04:00", "off" = disabled
 	AutoUpdate           bool                                  `json:"auto_update,omitempty"`         // opt-in overnight idle auto-update (default false)
@@ -426,6 +432,28 @@ func (s Settings) EffectiveStaleArchiveDays() int {
 	return s.StaleArchiveDays
 }
 
+// EffectiveWorkerIdleGCMinutes returns the idle hibernation threshold in minutes (default 120, <=0 disables all auto GC).
+func (s Settings) EffectiveWorkerIdleGCMinutes() int {
+	if s.WorkerIdleGCMinutes < 0 {
+		return 0
+	}
+	if s.WorkerIdleGCMinutes == 0 {
+		return 120
+	}
+	return s.WorkerIdleGCMinutes
+}
+
+// EffectiveWorkerMaxLivePerMachine returns the per-machine soft cap on live Corgi-dispatched workers (default 6, <=0 means unlimited).
+func (s Settings) EffectiveWorkerMaxLivePerMachine() int {
+	if s.WorkerMaxLivePerMachine < 0 {
+		return 0
+	}
+	if s.WorkerMaxLivePerMachine == 0 {
+		return 6
+	}
+	return s.WorkerMaxLivePerMachine
+}
+
 // EffectiveActiveHours returns normalized active hours (defaults to "09:00-22:30").
 func (s Settings) EffectiveActiveHours() string {
 	if s.ActiveHours == "" {
@@ -438,19 +466,21 @@ func (s Settings) EffectiveActiveHours() string {
 func DefaultSettings(_ string) Settings {
 	on := true
 	return Settings{
-		RouterKind:        "claude",
-		RouterEffort:      "low",
-		WorkerKind:        "claude",
-		WorkerCwd:         "~",
-		ReplyChars:        DefaultReplyChars,
-		StallMinutes:      12,
-		IdlePatrolMinutes: 30,
-		ActiveHours:       "09:00-22:30",
-		StaleArchiveDays:  3,
-		MorningDigest:     &on,
-		RotatePct:         DefaultRotatePct,
-		DreamAt:           "04:00",
-		NotifyLevel:       "quiet",
+		RouterKind:              "claude",
+		RouterEffort:            "low",
+		WorkerKind:              "claude",
+		WorkerCwd:               "~",
+		ReplyChars:              DefaultReplyChars,
+		StallMinutes:            12,
+		IdlePatrolMinutes:       30,
+		ActiveHours:             "09:00-22:30",
+		StaleArchiveDays:        3,
+		WorkerIdleGCMinutes:     120,
+		WorkerMaxLivePerMachine: 6,
+		MorningDigest:           &on,
+		RotatePct:               DefaultRotatePct,
+		DreamAt:                 "04:00",
+		NotifyLevel:             "quiet",
 	}
 }
 
