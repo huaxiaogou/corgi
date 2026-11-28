@@ -315,10 +315,11 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		earlyExit, stepHadErr := false, false
 		for _, tc := range choice.ToolCalls {
 			totalCalls++
+			isClosing := tc.Function.Name == "reply_user" || tc.Function.Name == "no_action"
 			var toolOut string
-			if totalCalls > maxAPIRouterToolCalls {
-				toolOut, stepHadErr = toolErr("本轮工具调用次数已达上限（12次），请立刻用 reply_user 汇总结论。"), true
-			} else if (tc.Function.Name == "reply_user" || tc.Function.Name == "no_action") && stepHadErr {
+			if totalCalls > maxAPIRouterToolCalls && !isClosing {
+				toolOut, stepHadErr = toolErr(condStr(allowSilent, "本轮工具调用次数已达上限（12次），请立刻用 reply_user 汇总结论，或调用 no_action 静默结束。", "本轮工具调用次数已达上限（12次），请立刻用 reply_user 汇总结论。")), true
+			} else if isClosing && stepHadErr {
 				toolOut = toolErr("同一步前置工具执行失败，请先查看报错并处理后再决定回复或结束。")
 			} else {
 				e.pushToolProgress(ctx, bg, turn, tc, &progress)
