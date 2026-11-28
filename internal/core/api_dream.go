@@ -13,7 +13,7 @@ const (
 	maxAPIDreamSteps           = 16
 	maxAPIDreamToolCalls       = 24
 	maxAPIDreamInputRunes      = 36000
-	maxAPIDreamToolOutputRunes = 4000
+	maxAPIDreamToolOutputRunes = 24000
 	apiDreamSystemPromptV1     = `你是 Corgi 的夜间记忆整理助手（Dream），在 Hub 进程内于后台异步运行。职责是复盘上次做梦以来的对话与事件，整理 memory/ 持久记忆，并在最后调用 finish_dream 落盘本次做梦日志。
 
 整理原则：
@@ -37,7 +37,7 @@ func apiDreamToolDefs() []LLMToolDef {
 		toolSpec("read_memory", "按需分页读取 memory/ 或 dreams/ 下的单个 .md 记忆文件。", map[string]any{
 			"path":   prop("string", "相对路径，如 'instructions.md'、'notes/agents.md' 或 'dreams/2026-11-27-0400.md'"),
 			"offset": prop("integer", "字符分页偏移量（默认 0）"),
-			"limit":  prop("integer", "最大返回字符数（默认 4000，上限 7000）"),
+			"limit":  prop("integer", "最大返回字符数（默认 12000，上限 16000）"),
 		}, "path"),
 		toolSpec("write_memory", "原子写入 memory/instructions.md 或单层 memory/notes/<slug>.md（≤32KB）。", map[string]any{
 			"path":    prop("string", "相对路径，仅允许 'instructions.md' 或 'notes/<slug>.md'"),

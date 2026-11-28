@@ -4,12 +4,15 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/kiperjing/corgi/internal/model"
+	"github.com/kiperjing/corgi/internal/runtime/agent"
+	"github.com/kiperjing/corgi/internal/store"
 )
 
 func TestReplyUserTextStreamExtractor(t *testing.T) {
@@ -155,5 +158,79 @@ func TestAPIRouterLiveProgressAndStreamingReplyDraft(t *testing.T) {
 	}
 	if !sawProgress || !sawDraft || !sawInactive {
 		t.Fatalf("expected progress=%v draft=%v inactive=%v; got events=%+v", sawProgress, sawDraft, sawInactive, events)
+	}
+}
+
+func TestPaginateRunesMetadataFirstAndFitsToolOutputLimit(t *testing.T) {
+	t.Parallel()
+	// 27k-rune markdown report with newlines & quotes to exercise JSON escaping overhead.
+	line := "## 标题\n- 项目：\"corgi-hub\" `internal/core/api_router.go`\n"
+	big := strings.Repeat(line, 600)
+	total := len([]rune(big))
+	if total < 25000 {
+		t.Fatalf("expected >25k runes test fixture, got %d", total)
+	}
+
+	page1 := paginateRunes(big, 0, 0)
+	if !page1.OK || !page1.HasMore || page1.Offset != 0 || page1.NextOffset != 12000 || page1.TotalChars != total {
+		t.Fatalf("unexpected default page1: %+v", page1)
+	}
+	raw1 := toolJSON(page1)
+	if idxMeta, idxContent := strings.Index(raw1, `"has_more":true`), strings.Index(raw1, `"content":"`); idxMeta < 0 || idxContent < 0 || idxMeta > idxContent {
+		t.Fatalf("expected metadata fields before content in JSON: meta=%d content=%d", idxMeta, idxContent)
+	}
+	if n := len([]rune(raw1)); n > maxAPIToolOutputRunes {
+		t.Fatalf("default 12k page JSON (%d runes) exceeded maxAPIToolOutputRunes (%d)", n, maxAPIToolOutputRunes)
+	}
+
+	pageMax := paginateRunes(big, 12000, 99999)
+	if pageMax.Offset != 12000 || len([]rune(pageMax.Content)) > 16000 {
+		t.Fatalf("expected cap at 16000 runes, got %d", len([]rune(pageMax.Content)))
+	}
+	if n := len([]rune(toolJSON(pageMax))); n > maxAPIToolOutputRunes {
+		t.Fatalf("max 16k page JSON (%d runes) exceeded maxAPIToolOutputRunes (%d)", n, maxAPIToolOutputRunes)
+	}
+}
+
+func TestAPIRouterLiveSubjectAndPaginatedProgress(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	eng, err := NewEngine(context.Background(), st, nil, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := st.CreateWorkItem(ctx, &model.WorkItem{ID: "wi4840", Thread: model.MainThread, Title: "重建Hub结构知识笔记"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := eng.formatAPIRouterTurnSubject(ctx, &model.Trigger{Source: "chat", Thread: model.MainThread}); got != "" {
+		t.Fatalf("expected empty subject for human chat, got %q", got)
+	}
+	if got := eng.formatAPIRouterTurnSubject(ctx, &model.Trigger{Source: "worker", Thread: model.MainThread, WorkItemID: "wi4840"}); got != "「重建Hub结构知识笔记」汇报" {
+		t.Fatalf("unexpected worker subject: %q", got)
+	}
+	if got := eng.formatAPIRouterTurnSubject(ctx, &model.Trigger{Source: "timer", Thread: model.MainThread}); got != "定时提醒" {
+		t.Fatalf("unexpected timer subject: %q", got)
+	}
+
+	turn := &apiRouterTurn{thread: model.MainThread, triggerID: "t1", startedAt: time.Now()}
+	var lines []string
+	eng.pushToolProgress(ctx, ctx, turn, LLMToolCall{Function: LLMToolFunctionCall{
+		Name: "read_detail", Arguments: `{"kind":"artifact","target":"art_1","offset":0}`,
+	}}, &lines)
+	eng.pushToolProgress(ctx, ctx, turn, LLMToolCall{Function: LLMToolFunctionCall{
+		Name: "read_detail", Arguments: `{"kind":"artifact","target":"art_1","offset":12000}`,
+	}}, &lines)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 distinct progress lines across paginated offsets, got %v", lines)
+	}
+	if !strings.Contains(lines[1], "12000+") {
+		t.Fatalf("expected offset label in second progress line, got %q", lines[1])
 	}
 }

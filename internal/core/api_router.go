@@ -21,7 +21,7 @@ const (
 	maxAPIRouterSteps                  = 10
 	maxAPIRouterToolCalls              = 16
 	maxAPIRouterBareTextRetries        = 2
-	maxAPIToolOutputRunes              = 4000
+	maxAPIToolOutputRunes              = 24000
 	maxSameAPITriggerFails             = 3
 	turnFlagMutated             uint32 = 1 << iota
 	turnFlagReplied
@@ -60,6 +60,7 @@ type apiRouterTurn struct {
 	replyText         string
 	toolTraces        []string
 	workItemIDs       []string
+	subject           string
 	liveProgress      []string
 	liveDraft         string
 	lastLivePush      time.Time
@@ -133,6 +134,23 @@ func (t *apiRouterTurn) liveSnapshot() model.RouterLiveView {
 		Active:        true,
 		Thread:        t.thread,
 		TriggerID:     t.triggerID,
+		Subject:       t.subject,
+		Progress:      append([]string(nil), t.liveProgress...),
+		DraftText:     t.liveDraft,
+		ThinkingSince: &started,
+	}
+}
+func (t *apiRouterTurn) setSubject(subject string) model.RouterLiveView {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.subject = strings.TrimSpace(subject)
+	t.lastLivePush = time.Now()
+	started := t.startedAt
+	return model.RouterLiveView{
+		Active:        true,
+		Thread:        t.thread,
+		TriggerID:     t.triggerID,
+		Subject:       t.subject,
 		Progress:      append([]string(nil), t.liveProgress...),
 		DraftText:     t.liveDraft,
 		ThinkingSince: &started,
@@ -148,6 +166,7 @@ func (t *apiRouterTurn) setLiveProgress(lines []string) model.RouterLiveView {
 		Active:        true,
 		Thread:        t.thread,
 		TriggerID:     t.triggerID,
+		Subject:       t.subject,
 		Progress:      append([]string(nil), t.liveProgress...),
 		DraftText:     t.liveDraft,
 		ThinkingSince: &started,
@@ -170,6 +189,7 @@ func (t *apiRouterTurn) setLiveDraft(draft string, minGap time.Duration) (model.
 		Active:        true,
 		Thread:        t.thread,
 		TriggerID:     t.triggerID,
+		Subject:       t.subject,
 		Progress:      append([]string(nil), t.liveProgress...),
 		DraftText:     t.liveDraft,
 		ThinkingSince: &started,
@@ -188,6 +208,7 @@ func (t *apiRouterTurn) clearLiveDraft() (model.RouterLiveView, bool) {
 		Active:        true,
 		Thread:        t.thread,
 		TriggerID:     t.triggerID,
+		Subject:       t.subject,
 		Progress:      append([]string(nil), t.liveProgress...),
 		ThinkingSince: &started,
 	}, true
@@ -379,6 +400,13 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		}
 		trig = fresh
 	}
+	emitLive := func(live model.RouterLiveView) {
+		e.mu.Lock()
+		sink := e.sink
+		e.mu.Unlock()
+		sink.OnAPIRouterLive(bg, live)
+	}
+	emitLive(turn.setSubject(e.formatAPIRouterTurnSubject(ctx, trig)))
 	cfg, modelName, effort, cacheKey, err := e.resolveActiveRouterAPIConfig(ctx)
 	if err != nil {
 		sealReason = e.handleAPIRouterFailure(bg, turn, trig, 0, modelName, effort, err)
@@ -388,12 +416,6 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 	epoch, messages, peekedBgNotes := e.buildThreadContextMessages(ctx, turn.thread, trig, turnMeta)
 	tools := apiRouterToolDefs()
 	var progress []string
-	emitLive := func(live model.RouterLiveView) {
-		e.mu.Lock()
-		sink := e.sink
-		e.mu.Unlock()
-		sink.OnAPIRouterLive(bg, live)
-	}
 	runLoop := func(curEpoch int, curMsgs []LLMMessage) llmToolLoopResult {
 		var (
 			replyParser     *replyUserTextStreamExtractor

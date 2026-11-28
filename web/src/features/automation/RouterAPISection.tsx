@@ -247,6 +247,11 @@ export function RouterAPISection({ draft, setDraft, routerAPISecret, onUpdateAPI
             <option value={80000}>80K tokens（默认均衡）</option>
             <option value={160000}>160K tokens（超长连续）</option>
             <option value={300000}>300K tokens（极限长会话）</option>
+            {![32000, 80000, 160000, 300000].includes(draft.router_context_budget_tokens ?? 80000) && (
+              <option value={draft.router_context_budget_tokens}>
+                {Math.round((draft.router_context_budget_tokens ?? 80000) / 1000)}K tokens（自定义）
+              </option>
+            )}
           </select>
         </label>
 

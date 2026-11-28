@@ -258,12 +258,16 @@ func (e *Engine) shouldEmitWorkerTurnSummary(wk *model.Worker, snap workerTurnSn
 	}
 	// Suppress duplicate automatic turn-done notifications when the worker already filed an
 	// explicit non-progress `corgi report` for this exact turn (e.g. closing prose written
-	// seconds after `corgi report`). New turns, progress reports, and newer Router deliveries
-	// are never suppressed.
+	// after `corgi report`, or after a Hub restart where in-memory workerTurns were cleared
+	// while wk.LastReport/wk.ReportAt remained persisted in SQLite). New turns, progress
+	// reports, and newer Router deliveries are never suppressed.
 	if !wm.reportedAt.IsZero() && !wm.reportedIsProgress && wm.deliveredSeq <= wm.reportedSeq {
 		sameTranscriptTurn := snap.FromTranscript && snap.LastUserAt > 0 && wm.reportedUserAt > 0 && snap.LastUserAt == wm.reportedUserAt
-		sameRecentReport := now.Sub(wm.reportedAt) <= 90*time.Second && (snap.LastUserAt == 0 || wm.reportedUserAt == 0 || snap.LastUserAt <= wm.reportedUserAt)
-		if sameTranscriptTurn || sameRecentReport {
+		noNewerUserTurn := (snap.LastUserAt == 0 || wm.reportedUserAt == 0 || snap.LastUserAt <= wm.reportedUserAt) &&
+			(snap.LastUserSeq == 0 || wm.reportedSeq == 0 || snap.LastUserSeq <= wm.reportedSeq)
+		sameRecentReport := noNewerUserTurn && now.Sub(wm.reportedAt) <= 5*time.Minute
+		sameReportContent := noNewerUserTurn && matchesExplicitReportText(wk.LastReport, snap.Text)
+		if sameTranscriptTurn || sameRecentReport || sameReportContent {
 			if snap.AssistantAt > wm.lastNotifiedAt {
 				wm.lastNotifiedAt = snap.AssistantAt
 			}
@@ -273,6 +277,16 @@ func (e *Engine) shouldEmitWorkerTurnSummary(wk *model.Worker, snap workerTurnSn
 			wm.settleSince = time.Time{}
 			return false
 		}
+	} else if wm.reportedAt.IsZero() && wm.deliveredSeq == 0 && !wk.ReportAt.IsZero() &&
+		!isProgressReportText(wk.LastReport) && matchesExplicitReportText(wk.LastReport, snap.Text) {
+		if snap.AssistantAt > wm.lastNotifiedAt {
+			wm.lastNotifiedAt = snap.AssistantAt
+		}
+		wm.pendingCheck = false
+		wm.pendingSince = time.Time{}
+		wm.settleKey = ""
+		wm.settleSince = time.Time{}
+		return false
 	}
 	// Quiet-settle debounce in API Router mode: intermediate mid-run pauses (e.g. brief progress
 	// notes between tool steps) settle silently until the worker stays continuously idle for
@@ -309,6 +323,34 @@ func isProgressReportText(text string) bool {
 		strings.HasPrefix(trimmed, "进度:") ||
 		strings.HasPrefix(trimmed, "进度更新：") ||
 		strings.HasPrefix(trimmed, "进度更新:")
+}
+
+// matchesExplicitReportText detects when a transcript's final assistant message duplicates
+// an explicit `corgi report` payload persisted in wk.LastReport (including across Hub restarts).
+func matchesExplicitReportText(report, snapText string) bool {
+	nr := strings.Join(strings.Fields(report), " ")
+	ns := strings.Join(strings.Fields(snapText), " ")
+	if nr == "" || ns == "" {
+		return false
+	}
+	if nr == ns {
+		return true
+	}
+	rr, rs := []rune(nr), []rune(ns)
+	if min(len(rr), len(rs)) < 80 {
+		return false
+	}
+	prefixLen := min(160, len(rr), len(rs))
+	if string(rr[:prefixLen]) == string(rs[:prefixLen]) {
+		return true
+	}
+	if len(rr) >= 120 && strings.Contains(ns, string(rr[:120])) {
+		return true
+	}
+	if len(rs) >= 120 && strings.Contains(nr, string(rs[:120])) {
+		return true
+	}
+	return false
 }
 
 // recordWorkerExplicitReport records an explicit `corgi report` for the current turn so

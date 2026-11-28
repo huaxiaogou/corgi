@@ -16,6 +16,7 @@ export function RouterLiveBubble({ router, thread, visible }: Props) {
   const activeLive = working && threadMatches ? live : undefined;
   const progress = activeLive?.progress ?? [];
   const draftText = activeLive?.draft_text ?? "";
+  const subject = activeLive?.subject?.trim() ?? "";
   const thinkingSince = activeLive?.thinking_since;
 
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -42,10 +43,16 @@ export function RouterLiveBubble({ router, thread, visible }: Props) {
   }
 
   const label = draftText
-    ? "Corgi 正在回复…"
-    : elapsedSec >= 2
-      ? `Corgi 思考中 · ${elapsedSec}s`
-      : "Corgi 在想…";
+    ? subject
+      ? `Corgi 正在整理${subject}回复…`
+      : "Corgi 正在回复…"
+    : subject
+      ? elapsedSec >= 2
+        ? `Corgi 正在处理${subject} · ${elapsedSec}s`
+        : `Corgi 正在处理${subject}…`
+      : elapsedSec >= 2
+        ? `Corgi 思考中 · ${elapsedSec}s`
+        : "Corgi 在想…";
 
   return (
     <div aria-live="polite" className="mt-3 space-y-2">

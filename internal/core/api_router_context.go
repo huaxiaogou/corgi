@@ -285,7 +285,13 @@ func (e *Engine) buildLiveTailStatePeek(ctx context.Context, thread string, trig
 	if wiTitle := e.workItemTitleFor(ctx, trig.WorkItemID, trig.From); wiTitle != "" {
 		fmt.Fprintf(&b, " | 事项名称=「%s」", oneLineClip(wiTitle, 60))
 	}
-	b.WriteString("\n\n" + clipRunes(strings.TrimSpace(trig.Text), 2000, fmt.Sprintf("\n...[内容过长已截断，请调用 read_detail(kind=\"trigger\", target=%q) 查看全文]", trig.ID)))
+	rawText := strings.TrimSpace(trig.Text)
+	clipHint := fmt.Sprintf("\n...[内容过长已截断（全文共 %d 字），请调用 read_detail(kind=\"trigger\", target=%q, offset=2000) 查看全文", len([]rune(rawText)), trig.ID)
+	if trig.ArtifactID != "" {
+		clipHint += fmt.Sprintf("，或直接 read_detail(kind=\"artifact\", target=%q)", trig.ArtifactID)
+	}
+	clipHint += "]"
+	b.WriteString("\n\n" + clipRunes(rawText, 2000, clipHint))
 	return b.String(), peekedBgNotes
 }
 

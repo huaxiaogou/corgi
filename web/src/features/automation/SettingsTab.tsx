@@ -67,6 +67,7 @@ export function SettingsTab({
         router_api_base_url: effectiveAPIBaseURL,
         router_api_model: effectiveAPIModel,
         router_api_effort: effectiveAPIEffort,
+        router_context_budget_tokens: draft.router_context_budget_tokens ?? 80000,
         worker_kind: draft.worker_kind,
         worker_model: activeDefault?.model ?? draft.worker_model ?? "",
         worker_effort: activeDefault?.effort ?? draft.worker_effort ?? "",

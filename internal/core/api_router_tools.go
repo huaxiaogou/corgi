@@ -61,7 +61,7 @@ func apiRouterToolDefs() []LLMToolDef {
 			"kind":   propEnum([]string{"worker", "trigger", "work_item", "action", "note", "artifact", "history"}, "详情类型"),
 			"target": prop("string", "对应 ID / 名称 / 笔记名 / 快照 ID（history 时为检索关键词）"),
 			"offset": prop("integer", "字符分页偏移量（默认 0）"),
-			"limit":  prop("integer", "返回最大字符数（默认 4000，上限 7000）"),
+			"limit":  prop("integer", "返回最大字符数（默认 12000，上限 16000）"),
 		}, "kind", "target"),
 		toolSpec("reply_user", "向用户发送最终回复、成果附件或决策卡片（有 choices 或 check=true 为决策/提醒卡；有 files 或 worker+re_id 为带交付回复）。发送成功后直接结束本轮。", map[string]any{
 			"title":   prop("string", "决策卡可选短标题（≤20字纯文本，以事项名称为主语）"),
@@ -96,16 +96,40 @@ func toolJSON(v any) string {
 }
 func toolErr(msg string) string { return toolJSON(map[string]any{"ok": false, "error": msg}) }
 
-func paginateRunes(s string, offset, limit int) map[string]any {
+type paginatedDetailResult struct {
+	OK         bool   `json:"ok"`
+	TotalChars int    `json:"total_chars"`
+	Offset     int    `json:"offset"`
+	NextOffset int    `json:"next_offset,omitempty"`
+	HasMore    bool   `json:"has_more"`
+	Artifact   string `json:"artifact,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Content    string `json:"content"`
+}
+
+func paginateRunes(s string, offset, limit int) paginatedDetailResult {
 	if limit <= 0 {
-		limit = 4000
+		limit = 12000
 	}
-	limit, offset, runes := min(limit, 7000), max(offset, 0), []rune(s)
+	limit, offset, runes := min(limit, 16000), max(offset, 0), []rune(s)
 	if offset >= len(runes) {
-		return map[string]any{"ok": true, "total_chars": len(runes), "offset": offset, "has_more": false, "content": ""}
+		return paginatedDetailResult{OK: true, TotalChars: len(runes), Offset: offset, HasMore: false, Content: ""}
 	}
 	end := min(offset+limit, len(runes))
-	return map[string]any{"ok": true, "total_chars": len(runes), "offset": offset, "has_more": end < len(runes), "content": string(runes[offset:end])}
+	hasMore := end < len(runes)
+	nextOffset := 0
+	if hasMore {
+		nextOffset = end
+	}
+	return paginatedDetailResult{
+		OK:         true,
+		TotalChars: len(runes),
+		Offset:     offset,
+		NextOffset: nextOffset,
+		HasMore:    hasMore,
+		Content:    string(runes[offset:end]),
+	}
 }
 
 // canAPIRouterSilence enforces the exact deterministic silence whitelist (Strategy 1A).
@@ -348,9 +372,9 @@ func (e *Engine) toolReadDetail(ctx context.Context, turn *apiRouterTurn, rawArg
 			return toolErr("快照为非文本类型（" + art.Kind + "），不支持文本分页读取")
 		}
 		res := paginateRunes(string(data), args.Offset, args.Limit)
-		res["artifact"] = art.ID
-		res["name"] = art.Name
-		res["kind"] = art.Kind
+		res.Artifact = art.ID
+		res.Name = art.Name
+		res.Kind = art.Kind
 		return toolJSON(res)
 	case "history":
 		if e.store == nil {

@@ -335,6 +335,7 @@ type RouterLiveView struct {
 	Active        bool       `json:"active"`
 	Thread        string     `json:"thread,omitempty"`
 	TriggerID     string     `json:"trigger_id,omitempty"`
+	Subject       string     `json:"subject,omitempty"`
 	Progress      []string   `json:"progress,omitempty"`
 	DraftText     string     `json:"draft_text,omitempty"`
 	ThinkingSince *time.Time `json:"thinking_since,omitempty"`

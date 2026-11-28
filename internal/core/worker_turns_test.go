@@ -423,3 +423,57 @@ func TestExplicitReportSuppressesSameTurnClosingDuplicateWhileAllowingNewTurnAnd
 		t.Fatal("expected new turn after prior explicit report to emit normally")
 	}
 }
+
+func TestExplicitReportCrossRestartDeduplication(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// Fresh Engine simulates Hub restart where in-memory workerTurns are empty,
+	// while wk.LastReport and wk.ReportAt were persisted in SQLite before restart.
+	eng, err := NewEngine(context.Background(), st, nil, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.workerTurnSettleDelay = -1
+	t0 := time.Now()
+	reportBody := "# Corgi Hub 源码与运行结构调研报告\n\n> 调研基线：`/Users/kiperjing/github/corgi`，本次调研严格只读，覆盖目录结构、单向依赖、企微协议层、SQLite 存储与发版构建流程。\n\n## 1. 架构分层\n核心包单向依赖清晰无环。"
+	wk := &model.Worker{
+		Name:       "agy-4839",
+		Kind:       "agy",
+		PaneID:     "w2N:p1",
+		Session:    "s-4839",
+		Thread:     model.MainThread,
+		LastReport: reportBody,
+		ReportAt:   t0.Add(-2 * time.Minute),
+	}
+
+	dupSnap := workerTurnSnapshot{
+		Text:           reportBody + "\n\n以上为全部调研内容。",
+		FromTranscript: true,
+		AfterLastUser:  true,
+		AssistantAt:    5000,
+		LastUserAt:     1000,
+		LastUserSeq:    4840,
+	}
+	if eng.shouldEmitWorkerTurnSummary(wk, dupSnap, t0) {
+		t.Fatal("expected duplicate turn-done matching persisted LastReport after Hub restart to be suppressed")
+	}
+
+	// A genuinely new turn with different output MUST still emit normally.
+	newSnap := workerTurnSnapshot{
+		Text:           "已完成第二轮补充检查，所有前端单测与构建全部通过。",
+		FromTranscript: true,
+		AfterLastUser:  true,
+		AssistantAt:    9000,
+		LastUserAt:     6000,
+		LastUserSeq:    4860,
+	}
+	if !eng.shouldEmitWorkerTurnSummary(wk, newSnap, t0.Add(30*time.Second)) {
+		t.Fatal("expected genuinely new worker turn after restart to emit normally")
+	}
+}

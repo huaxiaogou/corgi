@@ -191,6 +191,32 @@ func (e *Engine) toolManageTimer(ctx context.Context, turn *apiRouterTurn, trig 
 	}
 }
 
+func (e *Engine) formatAPIRouterTurnSubject(ctx context.Context, trig *model.Trigger) string {
+	if trig == nil {
+		return ""
+	}
+	switch {
+	case trig.Source == "chat" || trig.Source == "wecom":
+		return ""
+	case trig.Source == "worker":
+		if title := e.workItemTitleFor(ctx, trig.WorkItemID, trig.From); title != "" {
+			return fmt.Sprintf("「%s」汇报", oneLineClip(title, 24))
+		}
+		return "后台任务汇报"
+	case trig.Source == "timer":
+		return "定时提醒"
+	case trig.Source == "system":
+		if trig.From == "dream" {
+			return "记忆整理结果"
+		}
+		return "后台巡检"
+	case strings.HasPrefix(trig.Source, "webhook:"):
+		return "外部事件"
+	default:
+		return ""
+	}
+}
+
 func (e *Engine) pushToolProgress(ctx, bg context.Context, turn *apiRouterTurn, tc LLMToolCall, lines *[]string) {
 	line := strings.TrimSpace(e.formatAPIToolProgress(ctx, turn.thread, tc))
 	if line == "" {
@@ -221,6 +247,10 @@ func (e *Engine) formatAPIToolProgress(ctx context.Context, thread string, tc LL
 	var raw map[string]any
 	_ = json.Unmarshal([]byte(tc.Function.Arguments), &raw)
 	s := func(k string) string { v, _ := raw[k].(string); return strings.TrimSpace(v) }
+	offset := 0
+	if f, ok := raw["offset"].(float64); ok && f > 0 {
+		offset = int(f)
+	}
 	lbl := func(wiID, wkName string) string {
 		if _, errMsg := e.requireThreadWorkItem(ctx, wiID, thread); wiID != "" && errMsg != "" {
 			wiID = ""
@@ -235,15 +265,33 @@ func (e *Engine) formatAPIToolProgress(ctx context.Context, thread string, tc LL
 	case "read_detail":
 		switch s("kind") {
 		case "worker":
+			if offset > 0 {
+				return fmt.Sprintf("正在续读%s进展（第 %d+ 字）…", lbl("", s("target")), offset)
+			}
 			return "正在查看" + lbl("", s("target")) + "最新进展…"
 		case "work_item":
+			if offset > 0 {
+				return fmt.Sprintf("正在续读%s事项详情（第 %d+ 字）…", lbl(s("target"), ""), offset)
+			}
 			return "正在查阅" + lbl(s("target"), "") + "事项详情…"
 		case "note":
+			if offset > 0 {
+				return fmt.Sprintf("正在续读记忆笔记（第 %d+ 字）…", offset)
+			}
 			return "正在查阅记忆笔记…"
 		case "artifact":
+			if offset > 0 {
+				return fmt.Sprintf("正在续读交付快照（第 %d+ 字）…", offset)
+			}
 			return "正在查阅交付快照全文…"
 		case "history":
+			if offset > 0 {
+				return fmt.Sprintf("正在续读历史对话（第 %d+ 字）…", offset)
+			}
 			return "正在检索历史对话记录…"
+		}
+		if offset > 0 {
+			return fmt.Sprintf("正在续读任务详情（第 %d+ 字）…", offset)
 		}
 		return "正在查阅任务详情…"
 	case "dispatch_work":

@@ -222,6 +222,7 @@ export interface RouterLiveView {
   active: boolean;
   thread?: string;
   trigger_id?: string;
+  subject?: string;
   progress?: string[];
   draft_text?: string;
   thinking_since?: string;
