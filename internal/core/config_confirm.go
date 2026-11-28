@@ -16,6 +16,7 @@ const (
 	configOpRemoveProjectPath     = "remove_project_path"
 	configOpDeletePolicy          = "delete_policy"
 	configOpDisableAskPermissions = "disable_ask_permissions"
+	configOpTriggerUpdate         = "trigger_update"
 )
 
 type deleteProjectPayload struct {
@@ -131,10 +132,11 @@ func (e *Engine) resolveConfigConfirmAction(ctx context.Context, actionID, resol
 	}
 
 	var (
-		resolved    *model.Action
-		receiptText string
-		receiptErr  bool
-		appliedSt   *model.Settings
+		resolved            *model.Action
+		receiptText         string
+		receiptErr          bool
+		appliedSt           *model.Settings
+		triggerUpdateTarget string
 	)
 	err := e.withConfigWriteLock(ctx, func() error {
 		act, err := e.store.GetAction(ctx, actionID)
@@ -203,23 +205,17 @@ func (e *Engine) resolveConfigConfirmAction(ctx context.Context, actionID, resol
 		// Compute resulting Settings/Policies and atomic KV updates.
 		prevSt, prevPols := e.Settings(), e.Policies()
 		nextSt, nextPols := CloneSettings(prevSt), ClonePolicies(prevPols)
-		stChanged, polsChanged, changeSummary, applyErr := applyProposalMutation(&nextSt, &nextPols, prop)
+		stChanged, polsChanged, changeSummary, updateTarget, applyErr := applyProposalMutation(&nextSt, &nextPols, prop)
 		if applyErr != nil {
 			settled, txErr := e.store.CommitConfigConfirmTx(ctx, store.ConfigConfirmTxRequest{
-				ActionID:      actionID,
-				ProposalKey:   propKey,
-				NextStatus:    model.ActionExpired,
-				ResolvedBy:    resolvedBy,
-				ChosenKey:     "1",
-				ChosenLabel:   chosenLabel,
+				ActionID: actionID, ProposalKey: propKey, NextStatus: model.ActionExpired,
+				ResolvedBy: resolvedBy, ChosenKey: "1", ChosenLabel: chosenLabel,
 				ExpiredReason: "无法执行配置变更：" + applyErr.Error(),
 			})
 			if txErr != nil {
 				return txErr
 			}
-			resolved = settled
-			receiptText = "未执行配置变更：" + applyErr.Error()
-			receiptErr = true
+			resolved, receiptText, receiptErr = settled, "未执行配置变更："+applyErr.Error(), true
 			return nil
 		}
 
@@ -247,13 +243,8 @@ func (e *Engine) resolveConfigConfirmAction(ctx context.Context, actionID, resol
 		kvUpdates[configAuditRingKVKey] = e.buildAuditRingValue(ctx, resolvedBy, prop.Op, changeSummary)
 
 		settled, txErr := e.store.CommitConfigConfirmTx(ctx, store.ConfigConfirmTxRequest{
-			ActionID:    actionID,
-			ProposalKey: propKey,
-			NextStatus:  model.ActionResolved,
-			ResolvedBy:  resolvedBy,
-			ChosenKey:   "1",
-			ChosenLabel: chosenLabel,
-			KVUpdates:   kvUpdates,
+			ActionID: actionID, ProposalKey: propKey, NextStatus: model.ActionResolved,
+			ResolvedBy: resolvedBy, ChosenKey: "1", ChosenLabel: chosenLabel, KVUpdates: kvUpdates,
 		})
 		if txErr != nil {
 			return txErr
@@ -283,45 +274,55 @@ func (e *Engine) resolveConfigConfirmAction(ctx context.Context, actionID, resol
 			e.logger.Info("config confirm applied", "action", actionID, "op", prop.Op, "by", resolvedBy, "summary", changeSummary)
 		}
 		resolved = settled
+		triggerUpdateTarget = updateTarget
 		receiptText = fmt.Sprintf("已确认并执行配置变更：%s（via %s）", changeSummary, resolvedBy)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-
+	if triggerUpdateTarget != "" {
+		receiptText, receiptErr = e.executeConfirmedFleetUpdate(ctx, triggerUpdateTarget, resolvedBy)
+	}
 	e.postConfigConfirmReceipt(ctx, resolved, receiptText, receiptErr)
 	return resolved, nil
 }
 
-func applyProposalMutation(st *model.Settings, pols *[]model.Policy, prop model.ConfigProposal) (stChanged, polsChanged bool, summary string, err error) {
+func applyProposalMutation(st *model.Settings, pols *[]model.Policy, prop model.ConfigProposal) (stChanged, polsChanged bool, summary, updateTarget string, err error) {
 	switch prop.Op {
 	case configOpDeleteProject:
 		var p deleteProjectPayload
 		if err := json.Unmarshal(prop.Payload, &p); err != nil {
-			return false, false, "", fmt.Errorf("无效的删除项目提案：%w", err)
+			return false, false, "", "", fmt.Errorf("无效的删除项目提案：%w", err)
 		}
 		s, err := applyDeleteProject(st, p.Project)
-		return err == nil, false, s, err
+		return err == nil, false, s, "", err
 	case configOpRemoveProjectPath:
 		var p removeProjectPathPayload
 		if err := json.Unmarshal(prop.Payload, &p); err != nil {
-			return false, false, "", fmt.Errorf("无效的移除路径提案：%w", err)
+			return false, false, "", "", fmt.Errorf("无效的移除路径提案：%w", err)
 		}
 		s, err := applyRemoveProjectPath(st, p.Project, p.Machine)
-		return err == nil, false, s, err
+		return err == nil, false, s, "", err
 	case configOpDeletePolicy:
 		var p deletePolicyPayload
 		if err := json.Unmarshal(prop.Payload, &p); err != nil {
-			return false, false, "", fmt.Errorf("无效的删除策略提案：%w", err)
+			return false, false, "", "", fmt.Errorf("无效的删除策略提案：%w", err)
 		}
 		s, err := applyDeletePolicy(pols, p.Source)
-		return false, err == nil, s, err
+		return false, err == nil, s, "", err
 	case configOpDisableAskPermissions:
 		st.AskPermissions = false
-		return true, false, "关闭全站 Agent 自动执行权限确认（ask_permissions=false）", nil
+		return true, false, "关闭全站 Agent 自动执行权限确认（ask_permissions=false）", "", nil
+	case configOpTriggerUpdate:
+		var p triggerUpdatePayload
+		if err := json.Unmarshal(prop.Payload, &p); err != nil || strings.TrimSpace(p.TargetVersion) == "" {
+			return false, false, "", "", fmt.Errorf("无效的升级提案：缺少目标版本号")
+		}
+		t := strings.TrimSpace(p.TargetVersion)
+		return false, false, "确认触发一键升级至 " + t, t, nil
 	default:
-		return false, false, "", fmt.Errorf("不支持的配置提案操作：%s", prop.Op)
+		return false, false, "", "", fmt.Errorf("不支持的配置提案操作：%s", prop.Op)
 	}
 }
 

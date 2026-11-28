@@ -89,3 +89,50 @@ func TestMachineTokenForbiddenOnSettingsWeComDreamAndInspectPath(t *testing.T) {
 		t.Fatalf("node inspect /etc: want 400, got %d (%s)", nRecBad.Code, nRecBad.Body.String())
 	}
 }
+
+func TestFleetUpdaterCheckReadOnlyExpectedTargetAndBusyGuard(t *testing.T) {
+	srv, _ := newTestServer(t)
+	srv.Version = "v0.1.78"
+	releaseTag := "v0.1.79"
+	relSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/releases/latest" {
+			http.Redirect(w, r, "/releases/tag/"+releaseTag, http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer relSrv.Close()
+	srv.ReleaseRepoURL = relSrv.URL
+
+	// 1. CheckUpdate is strictly read-only (does not mutate cached latestTag).
+	chk, err := srv.CheckUpdate(context.Background())
+	if err != nil {
+		t.Fatalf("CheckUpdate: %v", err)
+	}
+	if chk.CurrentVersion != "v0.1.78" || chk.LatestVersion != "v0.1.79" || !chk.HasUpdate || len(chk.Outdated) != 1 {
+		t.Fatalf("unexpected CheckUpdate result: %+v", chk)
+	}
+	srv.updateMu.Lock()
+	cached := srv.latestTag
+	srv.updateMu.Unlock()
+	if cached != "" {
+		t.Fatalf("CheckUpdate must be strictly read-only, mutated latestTag=%q", cached)
+	}
+
+	// 2. TriggerFleetUpdate rejects mismatched expectedTarget (release drifted to v0.1.80).
+	releaseTag = "v0.1.80"
+	if _, err := srv.TriggerFleetUpdate(context.Background(), "v0.1.79"); err == nil {
+		t.Fatalf("expected TriggerFleetUpdate to reject drifted target v0.1.79 vs v0.1.80")
+	}
+
+	// 3. Empty-plan check must never overwrite an already-busy fleetUpdate state.
+	srv.fleetUpdateMu.Lock()
+	srv.fleetUpdate = &fleetUpdateState{
+		view: FleetUpdateView{Busy: true, Phase: "updating", Target: "v0.1.80"},
+	}
+	srv.fleetUpdateMu.Unlock()
+	res, err := srv.TriggerFleetUpdate(context.Background(), "v0.1.80")
+	if err != nil || !res.Busy || res.Started {
+		t.Fatalf("expected busy status preserved without starting duplicate run, got res=%+v err=%v", res, err)
+	}
+}

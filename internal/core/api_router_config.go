@@ -17,11 +17,11 @@ func condStr(cond bool, yes, no string) string {
 }
 
 func configRouterToolDef() LLMToolDef {
-	return toolSpec("manage_config", "查看或修改 Hub 运营配置、项目工作区、外部过滤策略或手动触发整理记忆（仅限主线程；写操作强制仅限人类主对话回合；删除项目/路径/策略或关闭 ask_permissions 会自动下发确认卡片；严禁修改大脑 API 与企微凭据）。", map[string]any{
+	return toolSpec("manage_config", "查看或修改 Hub 运营配置、项目工作区、外部过滤策略、检查/一键升级或手动触发整理记忆（仅限主线程；写操作强制仅限人类主对话回合；删除项目/路径/策略、关闭 ask_permissions 或触发一键升级会自动下发确认卡片；严禁修改大脑 API 与企微凭据）。", map[string]any{
 		"action": propEnum([]string{
-			"get", "history",
+			"get", "history", "check_update",
 			"upsert_project", "set_project_path", "delete_project", "remove_project_path",
-			"patch_settings", "upsert_policy", "delete_policy", "trigger_dream",
+			"patch_settings", "upsert_policy", "delete_policy", "trigger_dream", "trigger_update",
 		}, "操作类型"),
 		"section":       propEnum([]string{"all", "projects", "dispatch", "schedule", "policies", "machines"}, "action=get 时的只读视图分区（默认 all，自动脱敏）"),
 		"project":       prop("string", "项目 ID 或名称（project 相关操作使用）"),
@@ -82,6 +82,12 @@ func (e *Engine) toolManageConfig(ctx context.Context, turn *apiRouterTurn, trig
 		return toolJSON(map[string]any{"ok": true, "config": e.BuildRedactedConfigView(ctx, args.Section)}), false
 	case "history":
 		return toolJSON(map[string]any{"ok": true, "history": e.ListConfigHistory(ctx, maxConfigAuditRing)}), false
+	case "check_update":
+		res, err := e.CheckFleetUpdate(ctx)
+		if err != nil {
+			return toolErr(err.Error()), false
+		}
+		return toolJSON(map[string]any{"ok": true, "update": res}), false
 	case "upsert_project":
 		if msg := requireHumanConfigTurn(turn, trig, meta); msg != "" {
 			return toolErr(msg), false
@@ -220,6 +226,28 @@ func (e *Engine) toolManageConfig(ctx context.Context, turn *apiRouterTurn, trig
 		turn.markMutated("已启动后台记忆整理（做梦）")
 		e.ackAPITriggerOnce(context.Background(), turn, trig)
 		return toolJSON(map[string]any{"ok": true, "started": true}), false
+	case "trigger_update":
+		if msg := requireHumanConfigTurn(turn, trig, meta); msg != "" {
+			return toolErr(msg), false
+		}
+		checkRes, err := e.CheckFleetUpdate(ctx)
+		if err != nil {
+			return toolErr(err.Error()), false
+		}
+		if checkRes.Busy {
+			return toolJSON(map[string]any{"ok": true, "busy": true, "update": checkRes}), false
+		}
+		if !checkRes.HasUpdate {
+			return toolJSON(map[string]any{"ok": true, "already_up_to_date": true, "update": checkRes}), false
+		}
+		names := make([]string, 0, len(checkRes.Outdated))
+		for _, m := range checkRes.Outdated {
+			names = append(names, fmt.Sprintf("%s(%s)", orStr(m.Name, m.ID), orStr(m.Version, "unknown")))
+		}
+		return e.sendConfigConfirmCard(ctx, turn, trig, configOpTriggerUpdate,
+			"确认一键升级至 "+checkRes.LatestVersion,
+			fmt.Sprintf("即将把 %d 台在线设备从当前版本升级至 %s：%s（先逐台升级远端节点，最后 Hub 自动重启）。", len(checkRes.Outdated), checkRes.LatestVersion, strings.Join(names, "、")),
+			triggerUpdatePayload{TargetVersion: checkRes.LatestVersion, CurrentVersion: checkRes.CurrentVersion})
 	default:
 		return toolErr("不支持的 manage_config action：" + args.Action), false
 	}

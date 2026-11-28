@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kiperjing/corgi/internal/core"
 	"github.com/kiperjing/corgi/internal/model"
 )
 
@@ -113,11 +114,16 @@ func (s *Server) handleFleetUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startFleetUpdate(reqCtx context.Context, scope string, allowFilter func(id string) bool) (FleetUpdateView, int, error) {
+	view, status, _, err := s.startFleetUpdateWithTarget(reqCtx, scope, "", allowFilter)
+	return view, status, err
+}
+
+func (s *Server) startFleetUpdateWithTarget(reqCtx context.Context, scope, expectedTarget string, allowFilter func(id string) bool) (FleetUpdateView, int, bool, error) {
 	s.fleetUpdateMu.Lock()
 	if s.fleetUpdate != nil && s.fleetUpdate.view.Busy {
 		snap := cloneFleetUpdateView(s.fleetUpdate.view)
 		s.fleetUpdateMu.Unlock()
-		return snap, http.StatusOK, nil
+		return snap, http.StatusOK, false, nil
 	}
 	prev := s.fleetUpdate
 	s.fleetUpdateMu.Unlock()
@@ -130,19 +136,27 @@ func (s *Server) startFleetUpdate(reqCtx context.Context, scope string, allowFil
 		if msg == "" {
 			msg = "无法获取最新版本号"
 		}
-		return s.fleetUpdateSnapshot(), http.StatusBadGateway, errors.New("查不到最新版本：" + msg)
+		return s.fleetUpdateSnapshot(), http.StatusBadGateway, false, errors.New("查不到最新版本：" + msg)
+	}
+	if exp := strings.TrimSpace(expectedTarget); exp != "" && latest != exp {
+		return s.fleetUpdateSnapshot(), http.StatusConflict, false, fmt.Errorf("最新版本已变更为 %s（确认目标为 %s），未执行升级，请重新检查并确认", latest, exp)
 	}
 	s.recordLatestTag(latest)
 
 	targets := s.buildFleetUpdatePlan(reqCtx, latest, prev, allowFilter)
 	if len(targets) == 0 {
 		s.fleetUpdateMu.Lock()
+		if s.fleetUpdate != nil && s.fleetUpdate.view.Busy {
+			snap := cloneFleetUpdateView(s.fleetUpdate.view)
+			s.fleetUpdateMu.Unlock()
+			return snap, http.StatusOK, false, nil
+		}
 		s.fleetUpdate = &fleetUpdateState{
 			view: FleetUpdateView{Phase: "done", Scope: scope, Target: latest},
 		}
 		snap := cloneFleetUpdateView(s.fleetUpdate.view)
 		s.fleetUpdateMu.Unlock()
-		return snap, http.StatusOK, nil
+		return snap, http.StatusOK, false, nil
 	}
 
 	pendingIDs := make([]string, 0, len(targets))
@@ -154,7 +168,7 @@ func (s *Server) startFleetUpdate(reqCtx context.Context, scope string, allowFil
 	if s.fleetUpdate != nil && s.fleetUpdate.view.Busy {
 		snap := cloneFleetUpdateView(s.fleetUpdate.view)
 		s.fleetUpdateMu.Unlock()
-		return snap, http.StatusOK, nil
+		return snap, http.StatusOK, false, nil
 	}
 	completed := []string(nil)
 	if prev != nil && prev.view.Phase == "failed" && prev.view.Target == latest {
@@ -181,7 +195,67 @@ func (s *Server) startFleetUpdate(reqCtx context.Context, scope string, allowFil
 
 	s.notifyFleetUpdateChanged()
 	go s.runFleetUpdate(st)
-	return snap, http.StatusOK, nil
+	return snap, http.StatusOK, true, nil
+}
+
+// CheckUpdate implements core.FleetUpdater as a strictly read-only version inspection
+// reusing fetchLatestTagErr, collectVersionMachines, and fleetUpdateSnapshot.
+func (s *Server) CheckUpdate(ctx context.Context) (core.UpdateCheckResult, error) {
+	tctx, cancel := context.WithTimeout(ctx, updateLatestAttemptTimeout*2)
+	latest, _, err := s.fetchLatestTagErr(tctx)
+	cancel()
+	if err != nil || latest == "" {
+		msg := formatUpdateError(err)
+		if msg == "" {
+			msg = "无法获取最新版本号"
+		}
+		return core.UpdateCheckResult{}, errors.New("检查更新失败：" + msg)
+	}
+	machines := s.collectVersionMachines(ctx)
+	snap := s.fleetUpdateSnapshot()
+	res := core.UpdateCheckResult{
+		CurrentVersion: s.Version,
+		LatestVersion:  latest,
+		Busy:           snap.Busy,
+		Phase:          snap.Phase,
+		Error:          snap.Error,
+		Machines:       make([]core.UpdateMachineStatus, 0, len(machines)),
+	}
+	for _, m := range machines {
+		outdated := (m.Local || m.Online) && isOutdatedVersion(m.Version, latest)
+		item := core.UpdateMachineStatus{
+			ID:       m.ID,
+			Name:     m.Name,
+			Version:  m.Version,
+			OS:       m.OS,
+			Local:    m.Local,
+			Online:   m.Online,
+			Outdated: outdated,
+		}
+		res.Machines = append(res.Machines, item)
+		if outdated {
+			res.Outdated = append(res.Outdated, item)
+		}
+	}
+	res.HasUpdate = len(res.Outdated) > 0
+	return res, nil
+}
+
+// TriggerFleetUpdate implements core.FleetUpdater by delegating to the existing Hub-owned
+// sequential fleet upgrade while validating expectedTarget against the live release tag.
+func (s *Server) TriggerFleetUpdate(ctx context.Context, expectedTarget string) (core.UpdateTriggerResult, error) {
+	view, _, started, err := s.startFleetUpdateWithTarget(ctx, "fleet", expectedTarget, nil)
+	if err != nil {
+		return core.UpdateTriggerResult{}, err
+	}
+	return core.UpdateTriggerResult{
+		Started:    started,
+		Busy:       !started && view.Busy,
+		AlreadyUp:  !started && !view.Busy && view.Phase == "done",
+		Target:     view.Target,
+		PendingIDs: append([]string(nil), view.PendingIDs...),
+		Phase:      view.Phase,
+	}, nil
 }
 
 func (s *Server) buildFleetUpdatePlan(ctx context.Context, latest string, prev *fleetUpdateState, allowFilter func(id string) bool) []updateTarget {
