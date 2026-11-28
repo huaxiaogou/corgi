@@ -32,10 +32,12 @@ func (e *Engine) requireThreadWorker(ctx context.Context, name, thread string) (
 	return wk, ""
 }
 
-// hasReleaseCardApproval verifies that this human turn originated from an explicit
+// hasHumanDecisionCardApproval verifies that this human turn originated from an explicit
 // preset choice selection on a same-thread decision card (Action.Choices) via a
 // trusted human channel, never plain chat text, custom free-text, or router_check.
-func hasReleaseCardApproval(meta *turnConsentMeta) bool {
+// When both act.WorkItemID and targetWorkID are set, they must match so a decision card
+// for one work item cannot authorize release or scope escalation on another.
+func hasHumanDecisionCardApproval(meta *turnConsentMeta, targetWorkID string) bool {
 	if meta == nil || !meta.isHuman || meta.approvedAction == nil || meta.sourceEntry == nil {
 		return false
 	}
@@ -52,6 +54,9 @@ func hasReleaseCardApproval(meta *turnConsentMeta) bool {
 	if len(act.Choices) < 2 {
 		return false
 	}
+	if actWI, tgtWI := strings.TrimSpace(act.WorkItemID), strings.TrimSpace(targetWorkID); actWI != "" && tgtWI != "" && actWI != tgtWI {
+		return false
+	}
 	if len(act.ChosenKeys) > 0 {
 		for _, k := range act.ChosenKeys {
 			if _, _, _, ok := matchStrictActionChoice(act, k); !ok {
@@ -66,6 +71,32 @@ func hasReleaseCardApproval(meta *turnConsentMeta) bool {
 	}
 	_, _, _, ok := matchStrictActionChoice(act, key)
 	return ok
+}
+
+func (e *Engine) lookupResumeWorkerMeta(ctx context.Context, resumeName, thread string) (workItemID string, errMsg string) {
+	if e.store == nil || resumeName == "" {
+		return "", ""
+	}
+	if prevWk, err := e.store.GetWorker(ctx, resumeName); err == nil && prevWk != nil {
+		if orStr(prevWk.Thread, model.MainThread) != thread {
+			return "", "目标 Worker 不属于当前会话线程"
+		}
+		if wid := strings.TrimSpace(prevWk.WorkItemID); wid != "" {
+			return wid, ""
+		}
+	}
+	if ended, err := e.store.ListEndedSessions(ctx, 200); err == nil {
+		for _, es := range ended {
+			if es == nil || es.Name != resumeName {
+				continue
+			}
+			if es.Thread != "" && orStr(es.Thread, model.MainThread) != thread {
+				return "", "目标 Worker 不属于当前会话线程"
+			}
+			return strings.TrimSpace(es.WorkItemID), ""
+		}
+	}
+	return "", ""
 }
 
 func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, meta *turnConsentMeta, rawArgs string) string {
@@ -105,14 +136,12 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		}
 		wtMode = "off"
 	}
-	if args.AllowRelease && !hasReleaseCardApproval(meta) {
-		return toolErr("allow_release=true 必须由用户在含 choices 的决策卡片上点选确认后才能开启，不能仅凭普通消息文本推断；请先调用 reply_user 下发发布确认卡，待用户点选后再执行。")
-	}
 
 	targetWorkID := strings.TrimSpace(args.WorkID)
 	if targetWorkID == "" && meta != nil && meta.boundWorkItem != nil {
 		targetWorkID = meta.boundWorkItem.ID
 	}
+	var scopeWI *model.WorkItem
 	if targetWorkID != "" {
 		wi, errMsg := e.requireThreadWorkItem(ctx, targetWorkID, turn.thread)
 		if errMsg != "" {
@@ -121,13 +150,38 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		if wi.ClosedAt != nil {
 			return toolErr("work_id 已关闭，如需重新开启请先提示用户或创建新工作项")
 		}
+		scopeWI = wi
+	}
+
+	resumeName := strings.TrimSpace(args.Resume)
+	if resumeName != "" {
+		resumeWorkID, errMsg := e.lookupResumeWorkerMeta(ctx, resumeName, turn.thread)
+		if errMsg != "" {
+			return toolErr(errMsg)
+		}
+		if scopeWI == nil && resumeWorkID != "" {
+			if wi, err := e.store.GetWorkItem(ctx, resumeWorkID); err == nil && wi != nil && wi.ClosedAt == nil && orStr(wi.Thread, model.MainThread) == turn.thread {
+				scopeWI = wi
+			}
+		}
+	}
+
+	scopeWorkID := ""
+	if scopeWI != nil {
+		scopeWorkID = scopeWI.ID
+	}
+	if args.AllowRelease && !hasHumanDecisionCardApproval(meta, scopeWorkID) {
+		return toolErr("allow_release=true 必须由用户在含 choices 的决策卡片上点选确认后才能开启，不能仅凭普通消息文本推断；请先调用 reply_user 下发发布确认卡，待用户点选后再执行。")
+	}
+	if mode == "implement" && isPrototypeOrReadonlyWorkItem(scopeWI) && !hasHumanDecisionCardApproval(meta, scopeWI.ID) {
+		return toolErr(fmt.Sprintf(
+			"工作项 %s 当前处于 %s 阶段，转入源码修改（mode=\"implement\"）必须由用户在含 choices 的决策卡片上点选拍板，不能仅凭普通消息文本推断；请先调用 reply_user 下发转实现确认卡，待用户点选后再执行。",
+			scopeWI.ID, strings.TrimSpace(scopeWI.Scope),
+		))
 	}
 
 	rawConstraint := strings.TrimSpace(args.Constraint)
-	if resumeName := strings.TrimSpace(args.Resume); resumeName != "" {
-		if prevWk, err := e.store.GetWorker(ctx, resumeName); err == nil && prevWk != nil && orStr(prevWk.Thread, model.MainThread) != turn.thread {
-			return toolErr("目标 Worker 不属于当前会话线程")
-		}
+	if resumeName != "" {
 		if err := e.recordAPIRouterInflight(context.Background(), trig, "resume_worker", resumeName); err != nil {
 			return toolErr("记录防重标记失败，已中止续聊：" + err.Error())
 		}
@@ -145,7 +199,7 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		} else if boundWI != "" {
 			effWorkID = boundWI
 		}
-		e.updateWorkItemScopeOnDispatch(ctx, effWorkID, mode)
+		e.updateWorkItemScopeOnDispatch(ctx, meta, effWorkID, mode)
 		turn.markMutated("已续聊 #" + wk.Name)
 		turn.flags.Or(turnFlagDispatched)
 		e.ackAPITriggerOnce(context.Background(), turn, trig)
@@ -234,7 +288,7 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 	if err != nil {
 		return toolErr("派发 Worker 失败：" + err.Error())
 	}
-	e.updateWorkItemScopeOnDispatch(ctx, wk.WorkItemID, mode)
+	e.updateWorkItemScopeOnDispatch(ctx, meta, wk.WorkItemID, mode)
 	turn.markMutated("已派发 #" + wk.Name)
 	turn.flags.Or(turnFlagDispatched)
 	e.ackAPITriggerOnce(context.Background(), turn, trig)
@@ -252,11 +306,18 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 	return toolJSON(res)
 }
 
-func (e *Engine) updateWorkItemScopeOnDispatch(ctx context.Context, workID, mode string) {
+func (e *Engine) updateWorkItemScopeOnDispatch(ctx context.Context, meta *turnConsentMeta, workID, mode string) {
 	if e.store == nil || workID == "" || mode == "" {
 		return
 	}
-	if wi, err := e.store.GetWorkItem(ctx, workID); err == nil && wi != nil && (wi.Scope != "implement" || mode == "implement") {
+	wi, err := e.store.GetWorkItem(ctx, workID)
+	if err != nil || wi == nil {
+		return
+	}
+	if mode == "implement" && isPrototypeOrReadonlyWorkItem(wi) && !hasHumanDecisionCardApproval(meta, wi.ID) {
+		return
+	}
+	if wi.Scope != "implement" || mode == "implement" {
 		_, _ = e.store.SetWorkItemScope(ctx, workID, mode)
 	}
 }

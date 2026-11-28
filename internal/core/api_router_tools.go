@@ -26,7 +26,7 @@ func toolSpec(name, desc string, props map[string]any, req ...string) LLMToolDef
 func apiRouterToolDefs() []LLMToolDef {
 	return []LLMToolDef{
 		toolSpec("dispatch_work", "启动新 Coding CLI Worker 或 resume 续聊已有 Worker。非人类回合仅允许新派 readonly。", map[string]any{
-			"mode":          propEnum([]string{"readonly", "prototype", "implement"}, "readonly 只读调研，prototype 原型/草稿，implement 修改源码/跑测试"),
+			"mode":          propEnum([]string{"readonly", "prototype", "implement"}, "readonly 只读调研，prototype 原型/草稿，implement 修改源码/跑测试（已有 prototype/readonly 工作项转 implement 必须先经决策卡拍板）"),
 			"goal":          prop("string", "清晰、自包含的任务说明与验收标准"),
 			"work_id":       prop("string", "关联的开放 work_item ID"),
 			"title":         prop("string", "新建 work_item 时的简洁标题（≤20字）"),
