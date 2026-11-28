@@ -121,6 +121,7 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 	entries, earlier, _ := e.store.ListEntries(ctx, thread, 200)
 	e.HydrateEntriesArtifacts(ctx, entries)
 	actions, _ := e.store.ListPendingActions(ctx)
+	activityNotices, _ := e.store.ListRecentFYIActions(ctx, thread, time.Now().Add(-fyiActivityWindow), fyiActivityLimit)
 	resolvedActions := e.ResolvedActionsForEntries(ctx, entries)
 	snoozed, _ := e.store.ListSnoozedActions(ctx)
 	pinned, _ := e.store.ListPinnedEntries(ctx, 50)
@@ -208,6 +209,7 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 		Entries:          entries,
 		Earlier:          earlier,
 		Actions:          actions,
+		ActivityNotices:  activityNotices,
 		ResolvedActions:  resolvedActions,
 		SnoozedActions:   len(snoozed),
 		Pinned:           pinned,

@@ -181,6 +181,15 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 			WorkItemID: relatedWorker.WorkItemID,
 		}
 	}
+	var boundWorkTitle string
+	if workID == "" {
+		if matchedWI := e.resolveOpenWorkItemByQuotedTitle(ctx, thread, text); matchedWI != nil {
+			workID = matchedWI.ID
+			boundWorkTitle = matchedWI.Title
+		}
+	} else if wi, wErr := e.store.GetWorkItem(ctx, workID); wErr == nil && wi != nil {
+		boundWorkTitle = wi.Title
+	}
 
 	eid, eseq, err := e.store.NextID(ctx, "e")
 	if err != nil {
@@ -261,6 +270,7 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 
 	var action *model.Action
 	var expireDigestKind string
+	var autoArchivedFYI bool
 	if hasOpts || wantCheck {
 		aid, _, err := e.store.NextID(ctx, "a")
 		if err != nil {
@@ -291,7 +301,7 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 			case req.Digest:
 				cat = "patrol"
 			case wantCheck:
-				cat = "check"
+				cat = model.ActionCategoryCheck
 			default:
 				cat = "decision"
 			}
@@ -320,12 +330,36 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 			Status:       model.ActionPending,
 			CreatedAt:    now,
 		}
-		entry.ActionID = aid
+		if kind == model.ActionKindRouterCheck {
+			isExplicitFYI := strings.EqualFold(cat, model.ActionCategoryFYI)
+			cls := ClassifyRouterCheck(actionTitle, text, hasResolvedAttachment)
+			if isExplicitFYI || cls.Category == model.ActionCategoryFYI {
+				autoArchivedFYI = true
+				resolvedAt := now
+				action.Category = model.ActionCategoryFYI
+				action.Status = model.ActionResolved
+				action.ResolvedBy = "auto_fyi"
+				action.ResolvedChannel = "router"
+				action.ChosenKey = "fyi"
+				action.ChosenLabel = "纯知会"
+				action.ResolvedAt = &resolvedAt
+				entry.Check = false
+			} else {
+				entry.ActionID = aid
+			}
+		} else {
+			entry.ActionID = aid
+		}
 	}
 
 	if err := e.store.CommitReplyTx(ctx, entry, action, expireDigestKind, artifactRecs); err != nil {
 		cleanupBlobs()
 		return nil, err
+	}
+	if workID != "" && (autoArchivedFYI || (!hasOpts && !wantCheck && ClassifyRouterCheck(req.Title, text, hasResolvedAttachment).Category == model.ActionCategoryFYI)) {
+		if note := summarizeLatestUpdate(text, boundWorkTitle); note != "" {
+			_ = e.store.SetWorkItemLatestUpdate(ctx, workID, note, entry.ID, now)
+		}
 	}
 	if autoAttachedReportID != "" && relatedWorker != nil {
 		relatedWorker.LastReportAttachedID = autoAttachedReportID

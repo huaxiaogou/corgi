@@ -67,10 +67,10 @@ func apiRouterToolDefs() []LLMToolDef {
 			"text":    prop("string", "回复正文（2项以上用 '- ' 列表分条；决策卡聚焦当前一件事，尽量 ≤100 字）"),
 			"choices": prop("[]string", "决策卡片 2–4 个清晰选项（每项尽量 ≤14 字）"),
 			"multi":   prop("boolean", "决策卡是否多选"),
-			"check":   prop("boolean", "轻量已读提醒（无需多选项时使用）"),
+			"check":   prop("boolean", "仅在确有实质交付物/新结果需用户抽空审阅确认时设为 true；暂无新进展、巡检正常、无需干预、进行中等待结果或已派发回执严禁传 check=true"),
 			"files":   prop("[]string", "显式附带的绝对文件路径"),
 			"machine": prop("string", "files 所在机器 ID（Hub 本机留空）"),
-			"work_id": prop("string", "关联的 work_item ID"),
+			"work_id": prop("string", "关联的 work_item ID（回报事项进展或设 check=true 时尽量填写，便于按事项归并与更新进展）"),
 			"re_id":   prop("string", "引用的 entry ID 或 trigger ID"),
 			"worker":  prop("string", "关联的 Worker 名称（配合 re_id 可自动附带完整报告快照）"),
 		}, "text"),
@@ -122,8 +122,11 @@ func canAPIRouterSilence(t *model.Trigger) bool {
 	case "system":
 		return (t.From == "corgi" && (t.Ref == "idle-patrol" || t.Ref == "morning-digest")) || (t.From == "dream" && t.Ref != "")
 	case "worker":
-		body, ok := strings.CutPrefix(strings.TrimSpace(t.Text), "report from "+t.From+":\n")
-		return t.From != "" && ok && isProgressReportText(body)
+		trimmed := strings.TrimSpace(t.Text)
+		if body, ok := strings.CutPrefix(trimmed, "report from "+t.From+":\n"); ok {
+			return t.From != "" && isProgressReportText(body)
+		}
+		return t.From != "" && strings.HasPrefix(trimmed, "watchdog: ")
 	}
 	return false
 }
@@ -225,6 +228,9 @@ func (e *Engine) toolReplyUser(ctx context.Context, turn *apiRouterTurn, trig *m
 	out := map[string]any{"ok": true, "entry": res.Entry.ID}
 	if res.Action != nil {
 		out["action"] = res.Action.ID
+		if res.Action.IsFYI() {
+			out["bucket"] = model.ActionCategoryFYI
+		}
 	}
 	if res.Warning != "" {
 		out["warning"] = res.Warning

@@ -206,7 +206,9 @@ export function WorkNotebookRow({
         </div>
       </div>
 
-      {!isOpen && item.next_step && <div className="text-[11px] text-muted truncate mt-0.5">{item.next_step}</div>}
+      {!isOpen && (item.next_step || item.latest_update) && (
+        <div className="text-[11px] text-muted truncate mt-0.5">{item.next_step || item.latest_update}</div>
+      )}
 
       {isOpen && (
         <div className="notebook-acc-body mt-2 space-y-2" onClick={(e) => e.stopPropagation()}>
@@ -245,6 +247,12 @@ export function WorkNotebookRow({
               title="点击修改下一步"
             >
               {item.next_step || "点击补充下一步…"}
+            </div>
+          )}
+          {item.latest_update && item.latest_update !== item.next_step && (
+            <div className="text-[11px] leading-relaxed text-muted">
+              <span className="text-secondary">最新巡检</span>
+              {item.latest_update_at ? ` · ${formatShortAge(item.latest_update_at)}` : ""}：{item.latest_update}
             </div>
           )}
 

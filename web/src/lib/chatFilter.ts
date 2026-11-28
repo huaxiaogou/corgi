@@ -33,13 +33,31 @@ export function isDecisionAction(action: Action | undefined | null): boolean {
 }
 
 /**
+ * Returns true for routine FYI / no-action-needed status notices that have been bucketed out
+ * of pending decision & review counts at the source.
+ */
+export function isFYIAction(action: Action | undefined | null): boolean {
+  if (!action) return false;
+  return action.kind === "router_check" && (action.category ?? "").toLowerCase() === "fyi";
+}
+
+/**
+ * Returns true only for pending substantive review reminders (deliverables, explicit questions,
+ * or reviewable updates) while excluding routine FYI broadcasts.
+ */
+export function isSubstantiveCheckAction(action: Action | undefined | null): boolean {
+  if (!action || action.status !== "pending") return false;
+  return action.kind === "router_check" && !isFYIAction(action);
+}
+
+/**
  * Lightweight review reminders (--check) and fast 1-2 option single-select router choices render
  * inline right under their originating Corgi reply bubble. Multi-select and >2-option decisions
  * render in the structured DecisionCard with radio/checkbox selection and explicit submit.
  */
 export function isInlineBubbleAction(action: Action | undefined | null): boolean {
   if (!action || action.status !== "pending") return false;
-  if (action.kind === "router_check") return true;
+  if (action.kind === "router_check") return !isFYIAction(action);
   if (action.kind === "router_choice") return isFastSingleAction(action);
   return false;
 }

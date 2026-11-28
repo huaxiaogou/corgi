@@ -102,10 +102,11 @@ func (s *Store) CommitReplyTx(
 		}
 	}
 
-	// When inserting a new causal review reminder (--check) bound to a WorkItem or Worker,
-	// atomically supersede older pending router_check reminders for that same deliverable source.
-	// Real decision cards (router_choice / worker_dialog) are never auto-expired here.
-	if action != nil && action.Kind == model.ActionKindRouterCheck &&
+	// When inserting a new substantive pending review reminder (--check) bound to a WorkItem or Worker,
+	// atomically supersede older pending router_check reminders for that same matter/worker.
+	// Auto-archived FYI notices never supersede real pending review reminders, and real decision
+	// cards (router_choice / worker_dialog) are never auto-expired here.
+	if action != nil && action.IsSubstantiveCheck() &&
 		(strings.TrimSpace(action.WorkItemID) != "" || strings.TrimSpace(action.TargetWorker) != "") {
 		rows, err := tx.QueryContext(ctx,
 			`SELECT id, data FROM actions WHERE thread = ? AND kind = ? AND status = ?`,
@@ -144,7 +145,7 @@ func (s *Store) CommitReplyTx(
 			oldWk := strings.TrimSpace(old.TargetWorker)
 			sameSource := false
 			if newWI != "" {
-				sameSource = oldWI == newWI && (newWk == "" || oldWk == "" || oldWk == newWk)
+				sameSource = oldWI == newWI
 			} else if newWk != "" {
 				sameSource = oldWI == "" && oldWk == newWk
 			}
@@ -173,13 +174,18 @@ func (s *Store) CommitReplyTx(
 		if err != nil {
 			return fmt.Errorf("encode action: %w", err)
 		}
+		resolvedAt := int64(0)
+		if action.ResolvedAt != nil && !action.ResolvedAt.IsZero() {
+			resolvedAt = action.ResolvedAt.Unix()
+		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO actions(id, thread, kind, target_worker, status, data, created_at)
-			VALUES(?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO actions(id, thread, kind, target_worker, status, data, created_at, resolved_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				status = excluded.status,
-				data = excluded.data
-		`, action.ID, action.Thread, action.Kind, action.TargetWorker, action.Status, actData, action.CreatedAt.Unix()); err != nil {
+				data = excluded.data,
+				resolved_at = excluded.resolved_at
+		`, action.ID, action.Thread, action.Kind, action.TargetWorker, action.Status, actData, action.CreatedAt.Unix(), resolvedAt); err != nil {
 			return fmt.Errorf("insert action %s: %w", action.ID, err)
 		}
 	}

@@ -198,7 +198,7 @@ func (s *Store) GetWorkItem(ctx context.Context, id string) (*model.WorkItem, er
 	if err != nil {
 		return nil, fmt.Errorf("get work item %s: %w", id, err)
 	}
-	wi.Scope = s.GetWorkItemScope(ctx, wi.ID)
+	s.hydrateWorkItemMeta(ctx, wi)
 	return wi, nil
 }
 
@@ -231,7 +231,7 @@ func (s *Store) ListWorkItems(ctx context.Context, includeClosed bool) ([]*model
 		return nil, rErr
 	}
 	for _, wi := range out {
-		wi.Scope = s.GetWorkItemScope(ctx, wi.ID)
+		s.hydrateWorkItemMeta(ctx, wi)
 	}
 	return out, nil
 }
@@ -343,7 +343,15 @@ func (s *Store) ListClosedWorkItems(ctx context.Context, thread, query string, l
 		}
 		out = append(out, wi)
 	}
-	return out, total, rows.Err()
+	rErr := rows.Err()
+	_ = rows.Close()
+	if rErr != nil {
+		return nil, 0, rErr
+	}
+	for _, wi := range out {
+		s.hydrateWorkItemMeta(ctx, wi)
+	}
+	return out, total, nil
 }
 
 // ClearWorkItemNextStep clears next_step on an open work item transactionally.

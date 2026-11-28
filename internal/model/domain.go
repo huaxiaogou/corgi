@@ -115,19 +115,22 @@ type WorkArtifact struct {
 // WorkItem is a Hub-owned durable ledger record for an ongoing user project or deliverable.
 // ClosedAt == nil indicates the item is still open.
 type WorkItem struct {
-	ID        string            `json:"id"`
-	Thread    string            `json:"thread"`
-	Title     string            `json:"title"`
-	Scope     string            `json:"scope,omitempty"` // "" | readonly | prototype | implement
-	NextStep  string            `json:"next_step,omitempty"`
-	Workers   []string          `json:"workers,omitempty"`
-	Branches  []string          `json:"branches,omitempty"`
-	Artifacts []WorkArtifact    `json:"artifacts,omitempty"`
-	Snapshots []ArtifactSummary `json:"snapshots,omitempty"`
-	CreatedAt time.Time         `json:"created_at"`
-	UpdatedAt time.Time         `json:"updated_at"`
-	ClosedAt  *time.Time        `json:"closed_at,omitempty"`
-	CloseNote string            `json:"close_note,omitempty"`
+	ID                  string            `json:"id"`
+	Thread              string            `json:"thread"`
+	Title               string            `json:"title"`
+	Scope               string            `json:"scope,omitempty"` // "" | readonly | prototype | implement
+	NextStep            string            `json:"next_step,omitempty"`
+	LatestUpdate        string            `json:"latest_update,omitempty"`
+	LatestUpdateAt      *time.Time        `json:"latest_update_at,omitempty"`
+	LatestUpdateEntryID string            `json:"latest_update_entry_id,omitempty"`
+	Workers             []string          `json:"workers,omitempty"`
+	Branches            []string          `json:"branches,omitempty"`
+	Artifacts           []WorkArtifact    `json:"artifacts,omitempty"`
+	Snapshots           []ArtifactSummary `json:"snapshots,omitempty"`
+	CreatedAt           time.Time         `json:"created_at"`
+	UpdatedAt           time.Time         `json:"updated_at"`
+	ClosedAt            *time.Time        `json:"closed_at,omitempty"`
+	CloseNote           string            `json:"close_note,omitempty"`
 }
 
 // SearchHit is one matched user/corgi entry from full-text search.
@@ -250,6 +253,9 @@ const (
 
 	ActionModeSingle = "single"
 	ActionModeMulti  = "multi"
+
+	ActionCategoryCheck = "check"
+	ActionCategoryFYI   = "fyi"
 )
 
 // ActionChoice is one selectable button on a unified decision card.
@@ -324,6 +330,24 @@ func (a *Action) IsDecision() bool {
 		return false
 	}
 	return len(a.Choices) > 0
+}
+
+// IsFYI reports whether this Action is a routine FYI / no-action-needed notice that must
+// never inflate pending decision or review reminder badges.
+func (a *Action) IsFYI() bool {
+	if a == nil {
+		return false
+	}
+	return a.Kind == ActionKindRouterCheck && strings.EqualFold(strings.TrimSpace(a.Category), ActionCategoryFYI)
+}
+
+// IsSubstantiveCheck reports whether this Action is a pending review reminder that carries
+// real deliverables, explicit questions, or reviewable progress (excluding routine FYI notices).
+func (a *Action) IsSubstantiveCheck() bool {
+	if a == nil || a.Status != ActionPending {
+		return false
+	}
+	return a.Kind == ActionKindRouterCheck && !a.IsFYI()
 }
 
 // Timer schedules a one-shot or recurring event into a thread or directly to a worker.

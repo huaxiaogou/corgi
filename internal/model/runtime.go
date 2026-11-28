@@ -307,6 +307,7 @@ type SuperView struct {
 	Entries          []*Entry                `json:"entries"`
 	Earlier          bool                    `json:"earlier,omitempty"`
 	Actions          []*Action               `json:"actions"`
+	ActivityNotices  []*Action               `json:"activity_notices,omitempty"`
 	ResolvedActions  map[string]*Action      `json:"resolved_actions,omitempty"`
 	SnoozedActions   int                     `json:"snoozed_actions,omitempty"`
 	Pinned           []*Entry                `json:"pinned"`

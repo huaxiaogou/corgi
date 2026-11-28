@@ -8,13 +8,13 @@ import { useKeyboardViewport } from "../../hooks/useKeyboardViewport";
 import { formatWeComFocusBanner } from "../../lib/agentIdentity";
 import { api } from "../../lib/api";
 import {
-  isDecisionAction,
   isInlineBubbleAction,
   isRoutineChatterEvent,
   shouldHideRedundantQuote,
   type QuoteVisibilityState,
 } from "../../lib/chatFilter";
 import type { GalleryImageItem } from "../../lib/imageGallery";
+import { partitionInboxActions } from "../../lib/inboxFilter";
 import { partitionInPlaceReplies, setDraftEntry, shouldUseInlineReplyBox } from "../../lib/inPlaceReply";
 import {
   computeLatestSeq,
@@ -40,7 +40,7 @@ import type {
 import { ChatEntryRow } from "./ChatEntryRow";
 import { ChatFloatingDecision, ChatUnreadJumpPill } from "./ChatFloatingDecision";
 import { ChatHeader } from "./ChatHeader";
-import { ChatPendingInbox, actionPriority } from "./ChatPendingInbox";
+import { ChatPendingInbox } from "./ChatPendingInbox";
 import { ChatHistoryPreviewModal, ChatTopBanners } from "./ChatTopBanners";
 import { ComposerBar } from "./ComposerBar";
 import { WorkNotebook } from "./WorkNotebook";
@@ -93,8 +93,6 @@ export function CorgiChatView({
   const [pinnedOpen, setPinnedOpen] = useState(false);
   const [inboxOpen, setInboxOpen] = useState(false);
   const [clearingWeComFocus, setClearingWeComFocus] = useState(false);
-  const [inboxFilter, setInboxFilter] = useState("all");
-  const [inboxSearch, setInboxSearch] = useState("");
   const [activeFloatingId, setActiveFloatingId] = useState("");
   const [olderEntries, setOlderEntries] = useState<Entry[]>([]);
   const [olderResolvedActions, setOlderResolvedActions] = useState<Record<string, Action>>({});
@@ -216,11 +214,11 @@ export function CorgiChatView({
   }
   const canLoadMore = moreOlder ?? Boolean(data?.earlier);
   const pinnedList = (data?.pinned ?? []).filter((e) => !thread || e.thread === thread);
-  const pendingActions = (data?.actions ?? [])
-    .filter((a) => a.status === "pending" && (!thread || a.thread === thread))
-    .sort((a, b) => actionPriority(a) - actionPriority(b));
-  const pendingDecisions = pendingActions.filter(isDecisionAction);
-  const pendingChecks = pendingActions.filter((a) => !isDecisionAction(a));
+  const { pendingActions, pendingDecisions, pendingChecks, activityNotices } = partitionInboxActions(
+    data?.actions,
+    data?.activity_notices,
+    thread
+  );
   const visibleEntries = entries.filter((e) => !isRoutineChatterEvent(e, resolvedActions));
   const { timelineEntries, inPlaceByTarget } = useMemo(() => partitionInPlaceReplies(visibleEntries), [visibleEntries]);
   const visibleEntryIds = new Set(visibleEntries.map((e) => e.id));
@@ -615,18 +613,16 @@ export function CorgiChatView({
       />
 
       <ChatPendingInbox
+        thread={thread}
         pendingActions={pendingActions}
         pendingDecisions={pendingDecisions}
         pendingChecks={pendingChecks}
+        activityNotices={activityNotices}
         snoozedCount={snoozedCount}
         superReady={superReady}
         inboxOpen={inboxOpen}
-        inboxFilter={inboxFilter}
-        inboxSearch={inboxSearch}
         onToggleOpen={() => setInboxOpen((v) => !v)}
         onSetOpen={setInboxOpen}
-        onFilterChange={setInboxFilter}
-        onSearchChange={setInboxSearch}
         onSelectFloating={(id) => {
           setActiveFloatingId(id);
           setInboxOpen(false);

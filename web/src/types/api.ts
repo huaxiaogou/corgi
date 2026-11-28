@@ -74,7 +74,7 @@ export interface Action {
   confirm_label?: string;
   choices?: ActionChoice[];
   status: "pending" | "resolved" | "expired" | "snoozed";
-  category?: "blocked" | "worktree" | "decision" | "stale" | string;
+  category?: "blocked" | "worktree" | "decision" | "stale" | "check" | "fyi" | string;
   resolved_by?: string;
   resolved_channel?: string;
   chosen_key?: string;
@@ -138,6 +138,9 @@ export interface WorkItem {
   thread: string;
   title: string;
   next_step?: string;
+  latest_update?: string;
+  latest_update_at?: string;
+  latest_update_entry_id?: string;
   workers?: string[];
   branches?: string[];
   artifacts?: WorkArtifact[];
@@ -240,6 +243,7 @@ export interface SuperView {
   entries: Entry[];
   earlier?: boolean;
   actions: Action[];
+  activity_notices?: Action[];
   resolved_actions?: Record<string, Action>;
   snoozed_actions?: number;
   pinned: Entry[];

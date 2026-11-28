@@ -1,246 +1,273 @@
-import { Check } from "lucide-react";
+import { useEffect, useState } from "react";
 import { api } from "../../lib/api";
-import { isFastSingleAction } from "../../lib/decisionCard";
+import { actionCategoryTag, formatInboxSummaryMeta } from "../../lib/inboxFilter";
 import type { Action } from "../../types/api";
+import { ChatPendingInboxRow } from "./ChatPendingInboxRow";
 
-export function actionPriority(a: Action): number {
-  if (a.kind === "worker_dialog" || a.category === "blocked") return 0;
-  if (a.category === "worktree") return 1;
-  if (a.kind === "patrol_digest" || a.kind === "router_choice") return 2;
-  return 3;
-}
-
-export function actionCategoryTag(a: Action): { key: string; label: string } {
-  if (a.kind === "worker_dialog" || a.category === "blocked") return { key: "blocked", label: "终端阻塞" };
-  if (a.category === "worktree") return { key: "worktree", label: "未合分支" };
-  if (a.kind === "patrol_digest") {
-    const cat = (a.category ?? "").toLowerCase();
-    if (cat === "morning") return { key: "digest", label: "晨间简报" };
-    if (cat === "stale") return { key: "digest", label: "会话归档" };
-    return { key: "digest", label: "待办提醒" };
-  }
-  if (a.kind === "router_check") return { key: "check", label: "审阅提醒" };
-  return { key: "decision", label: "待拍板" };
-}
+export { actionCategoryTag, actionPriority } from "../../lib/inboxFilter";
 
 interface Props {
+  thread: string;
   pendingActions: Action[];
   pendingDecisions: Action[];
   pendingChecks: Action[];
+  activityNotices: Action[];
   snoozedCount: number;
   superReady: boolean;
   inboxOpen: boolean;
-  inboxFilter: string;
-  inboxSearch: string;
   onToggleOpen: () => void;
   onSetOpen: (open: boolean) => void;
-  onFilterChange: (filter: string) => void;
-  onSearchChange: (search: string) => void;
   onSelectFloating: (actionId: string) => void;
   onJumpToEntry: (entryId: string) => void;
   onOpenWorker: (name: string) => void;
   onToast: (msg: string) => void;
 }
 
+const FILTER_SPECS = [
+  { key: "blocked", label: "终端阻塞" },
+  { key: "worktree", label: "未合分支" },
+  { key: "digest", label: "巡检简报" },
+  { key: "decision", label: "待拍板" },
+  { key: "check", label: "审阅提醒" },
+] as const;
+
 export function ChatPendingInbox({
+  thread,
   pendingActions,
   pendingDecisions,
   pendingChecks,
+  activityNotices,
   snoozedCount,
   superReady,
   inboxOpen,
-  inboxFilter,
-  inboxSearch,
   onToggleOpen,
   onSetOpen,
-  onFilterChange,
-  onSearchChange,
   onSelectFloating,
   onJumpToEntry,
   onOpenWorker,
   onToast,
 }: Props) {
-  if (pendingActions.length === 0 && snoozedCount === 0) return null;
+  const [inboxFilter, setInboxFilter] = useState("all");
+  const [inboxSearch, setInboxSearch] = useState("");
+  const [bulkBusy, setBulkBusy] = useState<"checks" | "activity" | "">("");
 
-  const topAction = pendingDecisions[0] ?? pendingChecks[0] ?? null;
-  const filteredInbox = pendingActions.filter((a) => {
-    if (inboxFilter !== "all" && actionCategoryTag(a).key !== inboxFilter) return false;
-    if (inboxSearch.trim()) {
-      const q = inboxSearch.toLowerCase();
-      return `${a.title} ${a.target_worker ?? ""} ${a.summary ?? ""}`.toLowerCase().includes(q);
+  useEffect(() => {
+    setInboxFilter("all");
+    setInboxSearch("");
+  }, [thread]);
+
+  useEffect(() => {
+    if (inboxFilter === "activity" && activityNotices.length === 0) {
+      setInboxFilter("all");
     }
-    return true;
+  }, [inboxFilter, activityNotices.length]);
+
+  const summaryMeta = formatInboxSummaryMeta(
+    pendingDecisions.length,
+    pendingChecks.length,
+    snoozedCount,
+    activityNotices.length
+  );
+  if (!summaryMeta.visible) return null;
+
+  const onlyActivity = pendingActions.length === 0 && snoozedCount === 0 && activityNotices.length > 0;
+  const activeTab =
+    onlyActivity || (inboxFilter === "activity" && activityNotices.length > 0) ? "activity" : inboxFilter;
+  const topAction = pendingDecisions[0] ?? pendingChecks[0] ?? null;
+  const topActivity = activityNotices[0] ?? null;
+  const canExpand = pendingActions.length > 0 || activityNotices.length > 0;
+  const sourceList = activeTab === "activity" ? activityNotices : pendingActions;
+  const filteredItems = sourceList.filter((a) => {
+    if (activeTab !== "all" && activeTab !== "activity" && actionCategoryTag(a).key !== activeTab) return false;
+    if (!inboxSearch.trim()) return true;
+    const q = inboxSearch.toLowerCase();
+    return `${a.title} ${a.target_worker ?? ""} ${a.summary ?? ""}`.toLowerCase().includes(q);
   });
+
+  const ackAllChecks = async () => {
+    if (!superReady || bulkBusy) return;
+    setBulkBusy("checks");
+    try {
+      const res = await api<{ ok: boolean; acked: number }>("/api/super/actions/ack-checks", { thread, by: "web" });
+      onToast(res.acked > 0 ? `已将 ${res.acked} 条审阅提醒标为已看` : "暂无待清审阅提醒");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "操作失败");
+    } finally {
+      setBulkBusy("");
+    }
+  };
+
+  const clearActivity = async () => {
+    if (!superReady || bulkBusy) return;
+    setBulkBusy("activity");
+    try {
+      await api("/api/super/activity/clear", { thread });
+      if (onlyActivity) onSetOpen(false);
+      else setInboxFilter("all");
+      onToast("已清空巡检动态");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "清空失败");
+    } finally {
+      setBulkBusy("");
+    }
+  };
+
+  const categoryTabs = [
+    { key: "all", label: "全部", count: pendingActions.length },
+    ...FILTER_SPECS.map((s) => ({
+      key: s.key,
+      label: s.label,
+      count: pendingActions.filter((a) => actionCategoryTag(a).key === s.key).length,
+    })),
+  ].filter((f) => f.key === "all" || f.count > 0);
 
   return (
     <div className="border-b border-hairline surface-rail shrink-0 text-xs">
       <div className="px-5 py-2 flex items-center justify-between gap-3">
         <button
           type="button"
-          onClick={() => pendingActions.length > 0 && onToggleOpen()}
+          onClick={() => canExpand && onToggleOpen()}
           className="flex items-center gap-2 min-w-0 text-left cursor-pointer"
         >
           <span
             className="w-2 h-2 rounded-full shrink-0"
-            style={{ background: pendingDecisions.length > 0 ? "var(--attn)" : "var(--fg-3)" }}
+            style={{ background: summaryMeta.isBlocking ? "var(--attn)" : "var(--fg-3)" }}
           />
-          <span className="font-medium text-primary shrink-0">
-            {pendingDecisions.length > 0
-              ? pendingChecks.length > 0
-                ? `待你拍板 (${pendingDecisions.length}) · 审阅提醒 (${pendingChecks.length})`
-                : `待你拍板 (${pendingDecisions.length})`
-              : pendingChecks.length > 0
-                ? `审阅提醒 (${pendingChecks.length})`
-                : `已暂缓 (${snoozedCount})`}
+          <span className={`shrink-0 ${onlyActivity ? "text-secondary" : "font-medium text-primary"}`}>
+            {summaryMeta.headline}
           </span>
           {topAction ? (
             <>
               <span className="text-muted">·</span>
               <span className="text-secondary truncate">{topAction.title}</span>
             </>
-          ) : (
+          ) : snoozedCount > 0 ? (
             <span className="text-muted truncate">将在下次晨报重新浮出</span>
-          )}
+          ) : topActivity ? (
+            <>
+              <span className="text-muted">·</span>
+              <span className="text-muted truncate">{topActivity.title}</span>
+            </>
+          ) : null}
         </button>
-        {pendingActions.length > 1 && (
-          <button
-            type="button"
-            onClick={onToggleOpen}
-            className="px-2 py-0.5 rounded-md border border-strong surface-bg surface-hover text-secondary cursor-pointer shrink-0"
-          >
-            {inboxOpen ? "收起收件箱" : "展开收件箱"}
-          </button>
-        )}
+
+        <div className="flex items-center gap-1.5 shrink-0">
+          {onlyActivity && (
+            <>
+              <button
+                type="button"
+                onClick={onToggleOpen}
+                className="px-2 py-0.5 rounded-md border border-hairline surface-bg surface-hover text-secondary cursor-pointer"
+              >
+                {inboxOpen ? "收起" : "查看"}
+              </button>
+              <button
+                type="button"
+                disabled={!superReady || bulkBusy === "activity"}
+                onClick={() => void clearActivity()}
+                className="px-2 py-0.5 rounded-md border border-hairline surface-bg surface-hover text-muted hover:text-primary cursor-pointer disabled:opacity-40"
+              >
+                清空
+              </button>
+            </>
+          )}
+          {!onlyActivity && pendingDecisions.length === 0 && pendingChecks.length > 0 && (
+            <button
+              type="button"
+              disabled={!superReady || bulkBusy === "checks"}
+              onClick={() => void ackAllChecks()}
+              className="px-2 py-0.5 rounded-md border border-hairline surface-bg surface-hover text-secondary cursor-pointer disabled:opacity-40"
+            >
+              全部已看
+            </button>
+          )}
+          {!onlyActivity && (pendingActions.length > 1 || (pendingActions.length > 0 && activityNotices.length > 0)) && (
+            <button
+              type="button"
+              onClick={onToggleOpen}
+              className="px-2 py-0.5 rounded-md border border-strong surface-bg surface-hover text-secondary cursor-pointer"
+            >
+              {inboxOpen ? "收起收件箱" : "展开收件箱"}
+            </button>
+          )}
+        </div>
       </div>
-      {inboxOpen && pendingActions.length > 0 && (
+
+      {inboxOpen && canExpand && (
         <div className="px-5 pb-3 pt-1.5 space-y-2 border-t border-hairline surface-bg">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-1.5">
-              {[
-                { key: "all", label: "全部", count: pendingActions.length },
-                { key: "blocked", label: "终端阻塞", count: pendingActions.filter((a) => actionCategoryTag(a).key === "blocked").length },
-                { key: "worktree", label: "未合分支", count: pendingActions.filter((a) => actionCategoryTag(a).key === "worktree").length },
-                { key: "digest", label: "巡检简报", count: pendingActions.filter((a) => actionCategoryTag(a).key === "digest").length },
-                { key: "decision", label: "待拍板", count: pendingActions.filter((a) => actionCategoryTag(a).key === "decision").length },
-                { key: "check", label: "审阅提醒", count: pendingActions.filter((a) => actionCategoryTag(a).key === "check").length },
-              ]
-                .filter((f) => f.key === "all" || f.count > 0)
-                .map((f) => (
+              {!onlyActivity &&
+                categoryTabs.map((f) => (
                   <button
                     key={f.key}
                     type="button"
-                    onClick={() => onFilterChange(f.key)}
+                    onClick={() => setInboxFilter(f.key)}
                     className={`px-2.5 py-0.5 rounded-full border cursor-pointer ${
-                      inboxFilter === f.key ? "btn-accent border-transparent" : "border-hairline text-secondary surface-hover"
+                      activeTab === f.key ? "btn-accent border-transparent" : "border-hairline text-secondary surface-hover"
                     }`}
                   >
                     {f.label} {f.count}
                   </button>
                 ))}
+              {activityNotices.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setInboxFilter("activity")}
+                  className={`px-2.5 py-0.5 rounded-full border cursor-pointer ${
+                    activeTab === "activity" ? "btn-accent border-transparent" : "border-hairline text-muted surface-hover"
+                  }`}
+                >
+                  巡检动态
+                </button>
+              )}
             </div>
-            <input
-              value={inboxSearch}
-              onChange={(e) => onSearchChange(e.target.value)}
-              placeholder="筛选任务…"
-              className="w-36 px-2.5 py-1 rounded-lg border border-hairline surface-rail text-xs outline-none"
-            />
+            <div className="flex items-center gap-1.5">
+              {activeTab === "activity" && activityNotices.length > 0 ? (
+                <button
+                  type="button"
+                  disabled={!superReady || bulkBusy === "activity"}
+                  onClick={() => void clearActivity()}
+                  className="px-2 py-1 rounded-lg border border-hairline surface-rail surface-hover text-secondary text-[11px] cursor-pointer disabled:opacity-40"
+                >
+                  一键清空动态
+                </button>
+              ) : pendingChecks.length > 0 ? (
+                <button
+                  type="button"
+                  disabled={!superReady || bulkBusy === "checks"}
+                  onClick={() => void ackAllChecks()}
+                  className="px-2 py-1 rounded-lg border border-hairline surface-rail surface-hover text-secondary text-[11px] cursor-pointer disabled:opacity-40"
+                >
+                  审阅全部已看
+                </button>
+              ) : null}
+              <input
+                value={inboxSearch}
+                onChange={(e) => setInboxSearch(e.target.value)}
+                placeholder={activeTab === "activity" ? "筛选动态…" : "筛选任务…"}
+                className="w-36 px-2.5 py-1 rounded-lg border border-hairline surface-rail text-xs outline-none"
+              />
+            </div>
           </div>
+
           <div className="max-h-56 overflow-y-auto divide-y divide-[var(--line)] rounded-xl border border-hairline">
-            {filteredInbox.slice(0, 20).map((act) => {
-              const tag = actionCategoryTag(act);
-              const primaryChoice = act.choices?.[0];
-              return (
-                <div key={act.id} className="px-3.5 py-2 flex items-center justify-between gap-3 surface-hover">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (act.entry_id) {
-                        onSetOpen(false);
-                        onJumpToEntry(act.entry_id);
-                      } else if (act.target_worker) {
-                        onOpenWorker(act.target_worker);
-                      }
-                    }}
-                    className="min-w-0 flex items-center gap-2 text-left cursor-pointer flex-1"
-                  >
-                    <span className="px-1.5 py-0.5 rounded font-mono-code text-[10.5px] border border-hairline surface-rail text-secondary shrink-0">
-                      {tag.label}
-                    </span>
-                    <span className="font-medium text-primary truncate">{act.title}</span>
-                  </button>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {primaryChoice && isFastSingleAction(act) ? (
-                      <button
-                        type="button"
-                        disabled={!superReady}
-                        onClick={() =>
-                          void api(`/api/super/actions/${encodeURIComponent(act.id)}/resolve`, {
-                            choice: primaryChoice.key || primaryChoice.label,
-                            by: "web",
-                          }).then(() => onToast("已拍板并同步"))
-                        }
-                        className="px-2 py-0.5 rounded-md btn-accent text-[11px] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        {primaryChoice.label}
-                      </button>
-                    ) : primaryChoice ? (
-                      <button
-                        type="button"
-                        onClick={() => onSelectFloating(act.id)}
-                        className="px-2 py-0.5 rounded-md border border-strong surface-bg surface-hover text-primary text-[11px] cursor-pointer"
-                      >
-                        去选择
-                      </button>
-                    ) : act.kind === "router_check" ? (
-                      <button
-                        type="button"
-                        disabled={!superReady}
-                        onClick={() =>
-                          void api(`/api/super/actions/${encodeURIComponent(act.id)}/resolve`, {
-                            choice: "ack",
-                            by: "web",
-                          }).then(() => onToast("已标记已看"))
-                        }
-                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-strong surface-bg surface-hover text-primary text-[11px] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        <Check className="w-3 h-3" />
-                        <span>已看</span>
-                      </button>
-                    ) : null}
-                    {act.kind !== "worker_dialog" && (
-                      <button
-                        type="button"
-                        disabled={!superReady}
-                        onClick={() =>
-                          void api(`/api/super/actions/${encodeURIComponent(act.id)}/snooze`, {}).then(() =>
-                            onToast("已暂缓至明天晨报提醒")
-                          )
-                        }
-                        className="px-2 py-0.5 rounded-md border border-strong text-secondary surface-hover text-[11px] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        明天
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      disabled={!superReady}
-                      onClick={() =>
-                        void api(`/api/super/actions/${encodeURIComponent(act.id)}/dismiss`, {}).then(() =>
-                          onToast("已忽略待办")
-                        )
-                      }
-                      className="text-muted hover:text-primary px-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                      title="忽略"
-                    >
-                      ×
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-            {filteredInbox.length > 20 && (
+            {filteredItems.slice(0, 20).map((act) => (
+              <ChatPendingInboxRow
+                key={act.id}
+                action={act}
+                isActivityRow={activeTab === "activity"}
+                superReady={superReady}
+                onCloseInbox={() => onSetOpen(false)}
+                onJumpToEntry={onJumpToEntry}
+                onOpenWorker={onOpenWorker}
+                onSelectFloating={onSelectFloating}
+                onToast={onToast}
+              />
+            ))}
+            {filteredItems.length > 20 && (
               <div className="px-3.5 py-2 text-center text-[11.5px] text-muted surface-rail">
-                已展示前 20 条（共 {filteredInbox.length} 条），支持按分类或搜索快速筛选
+                已展示前 20 条（共 {filteredItems.length} 条），支持按分类或搜索快速筛选
               </div>
             )}
           </div>

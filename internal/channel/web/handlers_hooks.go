@@ -129,6 +129,44 @@ func (s *Server) handleSnoozeAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": act})
 }
 
+func (s *Server) handleAckAllChecks(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Thread string `json:"thread"`
+		By     string `json:"by"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+			return
+		}
+	}
+	by := s.resolveActionActor(r, body.By)
+	count, err := s.Engine.AckAllRouterChecks(r.Context(), body.Thread, by)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "acked": count})
+}
+
+func (s *Server) handleClearActivity(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Thread string `json:"thread"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+			return
+		}
+	}
+	count, err := s.Engine.ClearFYIActions(r.Context(), body.Thread)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cleared": count})
+}
+
 func (s *Server) handleStartDream(w http.ResponseWriter, r *http.Request) {
 	if !s.isOwnerRequest(r) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "仅 Hub 管理员或已配对浏览器可手动触发整理记忆"})

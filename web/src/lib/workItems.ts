@@ -1,5 +1,5 @@
 import type { Action, WorkItem, Worker } from "../types/api";
-import { isDecisionAction } from "./chatFilter";
+import { isDecisionAction, isSubstantiveCheckAction } from "./chatFilter";
 
 export type DerivedWorkStatus = "failed" | "blocked" | "working" | "review" | "idle";
 export type NotebookMode = "mini" | "expanded" | "hidden";
@@ -77,7 +77,7 @@ export function deriveWorkItems(
     if (isDecisionAction(act)) {
       if (act.work_item_id) pendingWorkIds.add(act.work_item_id);
       else if (act.target_worker) pendingWorkers.add(act.target_worker);
-    } else if (act.kind === "router_check") {
+    } else if (isSubstantiveCheckAction(act)) {
       if (act.work_item_id) reviewWorkIds.add(act.work_item_id);
       else if (act.target_worker) reviewWorkers.add(act.target_worker);
     }
@@ -195,6 +195,7 @@ export function filterAndPartitionWorkItems(
     const hay = [
       entry.item.title,
       entry.item.next_step ?? "",
+      entry.item.latest_update ?? "",
       ...(entry.item.workers ?? []),
       ...(entry.item.branches ?? []),
       ...(entry.item.artifacts ?? []).map((a) => a.path),

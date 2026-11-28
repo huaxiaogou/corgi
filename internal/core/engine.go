@@ -156,6 +156,7 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		gc:                 newWorkerGCState(time.Now()),
 	}
 	eng.loadActiveDreamMarker(ctx)
+	eng.ReclassifyPendingNoiseChecks(ctx)
 	return eng, nil
 }
 
