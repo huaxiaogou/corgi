@@ -166,13 +166,7 @@ func (e *Engine) reconcileAPIRouterInflight(ctx context.Context) bool {
 	if hasKV {
 		_ = e.store.DeleteKV(ctx, apiRouterInflightKVKey)
 		if pendingID != targetID {
-			note := fmt.Sprintf("上次大脑回合（%s）在 Hub 重启时中断，为防重复执行已跳过自动重放", m.Op)
-			if wk, wErr := e.store.GetWorker(ctx, m.ReservedID); m.ReservedID != "" && wErr == nil && wk != nil {
-				note = fmt.Sprintf("上次大脑回合在派发 #%s 后因 Hub 重启中断，该 Worker 已保留（状态：%s），未重复派发", wk.Name, wk.Status)
-			} else if en, eErr := e.store.GetEntry(ctx, m.ReservedID); m.ReservedID != "" && eErr == nil && en != nil {
-				note = fmt.Sprintf("上次大脑回复（%s）已入库后因 Hub 重启中断，未重复发送", en.ID)
-			}
-			e.addEvent(ctx, orStr(m.Thread, model.MainThread), note, targetID, "info")
+			e.addEvent(ctx, orStr(m.Thread, model.MainThread), e.formatInflightRecoveryNote(ctx, m), targetID, "info")
 			e.notifyChanged()
 		}
 	}

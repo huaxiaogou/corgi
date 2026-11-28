@@ -5,9 +5,32 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kiperjing/corgi/internal/model"
 )
+
+func (e *Engine) formatInflightRecoveryNote(ctx context.Context, m apiRouterInflight) string {
+	if m.ReservedID != "" && e.store != nil {
+		if wk, err := e.store.GetWorker(ctx, m.ReservedID); err == nil && wk != nil {
+			return fmt.Sprintf("上次大脑回合在派发 #%s 后因 Hub 重启中断，该 Worker 已保留（状态：%s），未重复派发", wk.Name, wk.Status)
+		}
+		if en, err := e.store.GetEntry(ctx, m.ReservedID); err == nil && en != nil {
+			return fmt.Sprintf("上次大脑回复（%s）已入库后因 Hub 重启中断，未重复发送", en.ID)
+		}
+		if wi, err := e.store.GetWorkItem(ctx, m.ReservedID); err == nil && wi != nil {
+			return fmt.Sprintf("上次大脑回合在创建工作项「%s」（%s）后因 Hub 重启中断，已保留该工作项，未重复创建", oneLineClip(wi.Title, 40), wi.ID)
+		}
+		if timers, err := e.store.ListTimers(ctx); err == nil {
+			for _, tm := range timers {
+				if tm != nil && tm.ID == m.ReservedID {
+					return fmt.Sprintf("上次大脑回合在创建定时提醒（%s）后因 Hub 重启中断，已保留该提醒，未重复创建", tm.ID)
+				}
+			}
+		}
+	}
+	return fmt.Sprintf("上次大脑回合（%s）在 Hub 重启时中断，为防重复执行已跳过自动重放", m.Op)
+}
 
 func (e *Engine) toolManageWork(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, rawArgs string) string {
 	var args struct {
@@ -24,10 +47,18 @@ func (e *Engine) toolManageWork(ctx context.Context, turn *apiRouterTurn, trig *
 	target := strings.TrimSpace(args.Target)
 	switch strings.ToLower(strings.TrimSpace(args.Action)) {
 	case "create_work":
-		wi, err := e.SetWorkItem(ctx, "new", turn.thread, args.Title, args.NextStep, "", "")
+		title := strings.TrimSpace(args.Title)
+		if title == "" {
+			return toolErr("create_work 必须提供 title")
+		}
+		if err := e.recordAPIRouterInflight(context.Background(), trig, "create_work", ""); err != nil {
+			return toolErr("记录防重标记失败，已中止创建工作项：" + err.Error())
+		}
+		wi, err := e.SetWorkItem(ctx, "new", turn.thread, title, args.NextStep, "", "")
 		if err != nil {
 			return toolErr(err.Error())
 		}
+		_ = e.recordAPIRouterInflight(context.Background(), trig, "create_work", wi.ID)
 		turn.markMutated("已创建工作项 " + wi.ID)
 		e.ackAPITriggerOnce(context.Background(), turn, trig)
 		return toolJSON(map[string]any{"ok": true, "work_item": wi})
@@ -103,13 +134,21 @@ func (e *Engine) toolManageTimer(ctx context.Context, turn *apiRouterTurn, trig 
 		}
 		return toolJSON(map[string]any{"ok": true, "timers": scoped})
 	case "add":
-		if strings.TrimSpace(args.Spec) == "" || strings.TrimSpace(args.Text) == "" {
+		spec, text := strings.TrimSpace(args.Spec), strings.TrimSpace(args.Text)
+		if spec == "" || text == "" {
 			return toolErr("add 定时器必须提供 spec 和 text")
 		}
-		tm, err := e.AddTimer(ctx, args.Spec, args.Text, turn.thread, model.RouterName, "corgi")
+		if _, err := ParseTimerSpec(spec, time.Now()); err != nil {
+			return toolErr(err.Error())
+		}
+		if err := e.recordAPIRouterInflight(context.Background(), trig, "manage_timer_add", ""); err != nil {
+			return toolErr("记录防重标记失败，已中止创建定时器：" + err.Error())
+		}
+		tm, err := e.AddTimer(ctx, spec, text, turn.thread, model.RouterName, "corgi")
 		if err != nil {
 			return toolErr(err.Error())
 		}
+		_ = e.recordAPIRouterInflight(context.Background(), trig, "manage_timer_add", tm.ID)
 		turn.markMutated("已设提醒 " + tm.ID)
 		e.ackAPITriggerOnce(context.Background(), turn, trig)
 		return toolJSON(map[string]any{"ok": true, "timer": tm})
