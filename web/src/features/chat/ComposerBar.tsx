@@ -26,6 +26,7 @@ interface Props {
   draftSeed?: { seq: number; text: string } | null;
   working?: boolean;
   stopping?: boolean;
+  disabled?: boolean;
   queuedCount?: number;
   embedded?: boolean;
   onStop?: () => void;
@@ -53,6 +54,7 @@ export function ComposerBar({
   draftSeed = null,
   working = false,
   stopping = false,
+  disabled = false,
   queuedCount = 0,
   embedded = false,
   onStop,
@@ -203,7 +205,7 @@ export function ComposerBar({
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (submittingRef.current) return;
+    if (disabled || submittingRef.current) return;
     let payload = text.trim();
     if (!payload && attachments.length === 0) return;
     if (attachments.length > 0) {
@@ -590,7 +592,7 @@ export function ComposerBar({
             {working && onStop && (
               <button
                 type="button"
-                disabled={stopping}
+                disabled={stopping || disabled}
                 onClick={onStop}
                 title="停止当前步骤 (Esc)"
                 className="w-7 h-7 rounded-full border border-strong surface-rail text-primary surface-hover flex items-center justify-center cursor-pointer disabled:opacity-40"
@@ -600,8 +602,8 @@ export function ComposerBar({
             )}
             <button
               type="submit"
-              disabled={submitting || (!text.trim() && attachments.length === 0)}
-              title={working || queuedCount > 0 ? "加入待发队列" : "发送"}
+              disabled={disabled || submitting || (!text.trim() && attachments.length === 0)}
+              title={disabled ? "正在同步实时状态…" : working || queuedCount > 0 ? "加入待发队列" : "发送"}
               className="w-7 h-7 rounded-full btn-accent flex items-center justify-center cursor-pointer disabled:opacity-30"
             >
               <ArrowUp className="w-4 h-4" strokeWidth={2} />

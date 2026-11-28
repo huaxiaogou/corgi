@@ -21,6 +21,7 @@ export interface DecisionResolvePayload {
 
 interface Props {
   action: Action;
+  disabled?: boolean;
   workerNames?: string[];
   queuePos?: number;
   queueTotal?: number;
@@ -43,6 +44,7 @@ function isClippedTitleOfSummary(title: string, summary: string): boolean {
 
 export function DecisionCard({
   action,
+  disabled = false,
   workerNames,
   queuePos,
   queueTotal,
@@ -56,6 +58,7 @@ export function DecisionCard({
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [expanded, setExpanded] = useState(false);
+  const locked = busy || disabled;
 
   useEffect(() => {
     setSelected([]);
@@ -63,7 +66,7 @@ export function DecisionCard({
   }, [action.id]);
 
   const run = async (fn: () => Promise<void>) => {
-    if (busy || action.status !== "pending") return;
+    if (locked || action.status !== "pending") return;
     setBusy(true);
     try {
       await fn();
@@ -106,6 +109,7 @@ export function DecisionCard({
       : "需要你拍板";
 
   const onChoiceClick = (key: string) => {
+    if (locked) return;
     if (fastSingle) {
       void run(() => onResolve(action.id, { choice: key }));
       return;
@@ -114,7 +118,7 @@ export function DecisionCard({
   };
 
   const submitSelected = () => {
-    if (selected.length === 0) return;
+    if (locked || selected.length === 0) return;
     void run(() => onResolve(action.id, multi ? { choices: selected } : { choice: selected[0] }));
   };
 
@@ -205,18 +209,18 @@ export function DecisionCard({
               {hasExplicitRec && (
                 <button
                   type="button"
-                  disabled={busy}
+                  disabled={locked}
                   onClick={() => setSelected(choices.map((c, i) => (c.recommended ? choiceKeyOf(c, i) : "")).filter(Boolean))}
-                  className="text-secondary hover:text-primary hover:underline cursor-pointer"
+                  className="text-secondary hover:text-primary hover:underline cursor-pointer disabled:opacity-40"
                 >
                   勾选推荐
                 </button>
               )}
               <button
                 type="button"
-                disabled={busy}
+                disabled={locked}
                 onClick={() => setSelected(selected.length === choices.length ? [] : choices.map((c, i) => choiceKeyOf(c, i)))}
-                className="text-secondary hover:text-primary hover:underline cursor-pointer"
+                className="text-secondary hover:text-primary hover:underline cursor-pointer disabled:opacity-40"
               >
                 {selected.length === choices.length ? "清空" : "全选"}
               </button>
@@ -231,7 +235,7 @@ export function DecisionCard({
             <button
               key={`${key}-${idx}`}
               type="button"
-              disabled={busy}
+              disabled={locked}
               aria-pressed={!fastSingle ? isSelected : undefined}
               onClick={() => onChoiceClick(key)}
               className={`w-full px-5 py-3 flex items-start gap-3 text-left text-[13.5px] border-b border-hairline transition-colors cursor-pointer disabled:opacity-50 ${
@@ -291,7 +295,7 @@ export function DecisionCard({
             <span className="text-[11.5px] text-muted">{multi ? "勾选所需项后点击右侧提交" : "先选定一项，再确认拍板"}</span>
             <button
               type="button"
-              disabled={busy || selected.length === 0}
+              disabled={locked || selected.length === 0}
               onClick={submitSelected}
               className="px-4 py-1.5 rounded-lg btn-accent text-xs font-medium cursor-pointer shrink-0 disabled:opacity-35 disabled:cursor-not-allowed"
             >
@@ -301,7 +305,7 @@ export function DecisionCard({
         )}
 
         <DecisionCardFooter
-          busy={busy}
+          busy={locked}
           isWorkerDialog={isWorkerDialog}
           isPatrolDigest={isPatrolDigest}
           onSubmitCustom={(text) => run(() => onResolve(action.id, { choice: text, custom: true }))}

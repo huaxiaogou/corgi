@@ -29,6 +29,7 @@ interface Props {
   shells: AgentView[];
   machines: Machine[];
   connected: boolean;
+  stateReady?: boolean;
   dark: boolean;
   mobile?: boolean;
   fleetUpdate: FleetUpdateController;
@@ -46,6 +47,7 @@ export function Sidebar({
   shells,
   machines,
   connected,
+  stateReady = true,
   dark,
   mobile = false,
   fleetUpdate,
@@ -84,6 +86,7 @@ export function Sidebar({
 
   const toggleKeep = async (a: AgentView, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (!stateReady) return;
     const next = !isKept(a);
     setKeepOverride((m) => ({ ...m, [a.name]: next }));
     try {
@@ -129,9 +132,10 @@ export function Sidebar({
         <div className="flex items-center gap-1">
           <button
             type="button"
+            disabled={!stateReady}
             onClick={onOpenLauncher}
-            title="新建独立会话"
-            className="w-7 h-7 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer"
+            title={stateReady ? "新建独立会话" : "正在同步机群状态…"}
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Plus className="w-4 h-4" strokeWidth={1.7} />
           </button>

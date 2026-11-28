@@ -9,6 +9,8 @@ interface Props {
   isWeComGroup: boolean;
   router?: RouterView;
   paused?: boolean;
+  syncing?: boolean;
+  actionsDisabled?: boolean;
   follow?: FollowView;
   notebookCount?: number;
   notebookDot?: DerivedWorkStatus;
@@ -24,6 +26,8 @@ export function ChatHeader({
   isWeComGroup,
   router,
   paused,
+  syncing = false,
+  actionsDisabled = false,
   follow,
   notebookCount = 0,
   notebookDot = "idle",
@@ -64,6 +68,11 @@ export function ChatHeader({
         <div className="flex items-center gap-2 text-[11.5px] text-muted mt-0.5 flex-wrap">
           <StatusDot status={paused ? "idle" : router?.status ?? "asleep"} />
           <span>{statusLabel}</span>
+          {syncing && (
+            <span className="inline-flex items-center gap-1 text-[11px] text-muted">
+              · 同步中
+            </span>
+          )}
           {router?.model && (
             <span>
               · {router.model}
@@ -156,22 +165,24 @@ export function ChatHeader({
             <div className="absolute right-0 top-9 z-30 w-44 py-1 rounded-xl card-floating text-xs">
               <button
                 type="button"
+                disabled={actionsDisabled}
                 onClick={() => {
                   setMenuOpen(false);
                   onTogglePause();
                 }}
-                className="w-full px-3 py-2 flex items-center gap-2 text-left text-primary surface-hover cursor-pointer"
+                className="w-full px-3 py-2 flex items-center gap-2 text-left text-primary surface-hover cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {paused ? <Play className="w-3.5 h-3.5 text-muted" /> : <Pause className="w-3.5 h-3.5 text-muted" />}
                 <span>{paused ? "恢复自动投递" : "暂停自动投递"}</span>
               </button>
               <button
                 type="button"
+                disabled={actionsDisabled}
                 onClick={() => {
                   setMenuOpen(false);
                   onRestartRouter();
                 }}
-                className="w-full px-3 py-2 flex items-center gap-2 text-left text-primary surface-hover cursor-pointer"
+                className="w-full px-3 py-2 flex items-center gap-2 text-left text-primary surface-hover cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <RotateCw className="w-3.5 h-3.5 text-muted" />
                 <span>重置 API 大脑状态</span>

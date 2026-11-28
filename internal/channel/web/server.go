@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +54,8 @@ type Server struct {
 	buildOnce    sync.Once
 	buildTag     string
 	staticAssets sync.Map
+	scopeOnce    sync.Once
+	scopeSalt    string
 
 	startMu sync.Mutex
 	started map[string]time.Time
@@ -306,7 +311,50 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
 		setTokenCookie(w, r, c.Value)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": s.Version})
+	resp := map[string]any{"ok": true, "version": s.Version}
+	if scope := s.sessionScope(r); scope != "" {
+		resp["scope"] = scope
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) sessionScopeSalt() string {
+	s.scopeOnce.Do(func() {
+		if s.CorgiDir != "" {
+			saltPath := filepath.Join(s.CorgiDir, "session_scope.salt")
+			if b, err := os.ReadFile(saltPath); err == nil {
+				if v := strings.TrimSpace(string(b)); v != "" {
+					s.scopeSalt = v
+					return
+				}
+			}
+			var raw [16]byte
+			_, _ = rand.Read(raw[:])
+			v := hex.EncodeToString(raw[:])
+			_ = os.MkdirAll(s.CorgiDir, 0o700)
+			_ = os.WriteFile(saltPath, []byte(v+"\n"), 0o600)
+			s.scopeSalt = v
+			return
+		}
+		var raw [16]byte
+		_, _ = rand.Read(raw[:])
+		s.scopeSalt = hex.EncodeToString(raw[:])
+	})
+	return s.scopeSalt
+}
+
+func (s *Server) sessionScope(r *http.Request) string {
+	master, dev := s.identity(r)
+	salt := s.sessionScopeSalt()
+	if master {
+		sum := sha256.Sum256([]byte("corgi-scope:master:" + salt))
+		return hex.EncodeToString(sum[:6])
+	}
+	if dev != nil && dev.ID != "" {
+		sum := sha256.Sum256([]byte("corgi-scope:dev:" + salt + ":" + dev.ID))
+		return hex.EncodeToString(sum[:6])
+	}
+	return ""
 }
 
 func (s *Server) handleNewPair(w http.ResponseWriter, r *http.Request) {

@@ -13,6 +13,7 @@ import { AgentChatThread, type PendingPrompt } from "./AgentChatThread";
 
 interface Props {
   pane: AgentView;
+  stateReady?: boolean;
   focusSeq?: number;
   queuedPrompts?: QueuedPrompt[];
   queuePaused?: boolean;
@@ -86,6 +87,7 @@ function reconcilePendingPrompts(
 
 export function AgentPaneView({
   pane,
+  stateReady = true,
   focusSeq = 0,
   queuedPrompts = [],
   queuePaused = false,
@@ -355,7 +357,7 @@ export function AgentPaneView({
   };
 
   const steerQueued = async (item: QueuedPrompt) => {
-    if (item.id.startsWith("tmp-")) return;
+    if (!stateReady || item.id.startsWith("tmp-")) return;
     const enc = encodeURIComponent(pane.pane_id);
     const pid = `s-${++pendingSeqRef.current}`;
     const afterAbsIdx = baseRef.current + liveMsgs.length;
@@ -378,6 +380,7 @@ export function AgentPaneView({
   };
 
   const cancelQueued = async (item: QueuedPrompt) => {
+    if (!stateReady) return;
     if (item.id.startsWith("tmp-")) {
       setOptimisticQueued((prev) => prev.filter((x) => x.id !== item.id));
       return;
@@ -398,6 +401,7 @@ export function AgentPaneView({
   };
 
   const resumeQueue = async () => {
+    if (!stateReady) return;
     try {
       await api(`/api/panes/${encodeURIComponent(pane.pane_id)}/queue/resume`, {});
     } catch (err) {
@@ -406,7 +410,7 @@ export function AgentPaneView({
   };
 
   const stopCurrentStep = async () => {
-    if (stopping) return;
+    if (!stateReady || stopping) return;
     setStopping(true);
     try {
       const res = await api<{ ok: boolean; paused?: boolean }>(`/api/panes/${encodeURIComponent(pane.pane_id)}/stop`, {});
@@ -420,7 +424,7 @@ export function AgentPaneView({
 
   const sendInput = async (e: FormEvent) => {
     e.preventDefault();
-    if (imeRef.current.composing) return;
+    if (!stateReady || imeRef.current.composing) return;
     let val = input.trim();
     if (!val && attachments.length === 0) return;
     if (attachments.length > 0) {
@@ -435,9 +439,13 @@ export function AgentPaneView({
     }
   };
 
-  const sendKey = (key: string) => api(`/api/panes/${encodeURIComponent(pane.pane_id)}/keys`, { keys: [key] });
+  const sendKey = (key: string) => {
+    if (!stateReady) return Promise.resolve();
+    return api(`/api/panes/${encodeURIComponent(pane.pane_id)}/keys`, { keys: [key] });
+  };
 
   const answerApproval = async (choice: Approval["choices"][number], idx: number) => {
+    if (!stateReady) return;
     const enc = encodeURIComponent(pane.pane_id);
     if (choice.keys && choice.keys.length > 0) {
       await api(`/api/panes/${enc}/keys`, { keys: choice.keys });
@@ -530,9 +538,10 @@ export function AgentPaneView({
           </div>
           <button
             type="button"
+            disabled={!stateReady}
             onClick={() => void api(`/api/workspaces/${encodeURIComponent(pane.workspace_id)}/close`, {}).then(() => { onToast("已关闭工作区"); onClosed(); })}
-            className="w-8 h-8 rounded-lg flex items-center justify-center text-muted surface-hover cursor-pointer"
-            title="关闭工作区"
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-muted surface-hover cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            title={stateReady ? "关闭工作区" : "正在同步实时状态…"}
           >
             <Trash2 className="w-4 h-4" strokeWidth={1.7} />
           </button>
@@ -714,7 +723,7 @@ export function AgentPaneView({
                   <Square className="w-3 h-3 fill-current" />
                 </button>
               )}
-              <button type="submit" title={pane.is_agent && mode === "chat" && (liveStatus === "working" || effectiveQueue.length > 0) ? "加入待发送队列" : "发送"} className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer shrink-0">
+              <button type="submit" disabled={!stateReady} title={!stateReady ? "正在同步实时状态…" : pane.is_agent && mode === "chat" && (liveStatus === "working" || effectiveQueue.length > 0) ? "加入待发送队列" : "发送"} className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer shrink-0 disabled:opacity-35 disabled:cursor-not-allowed">
                 <ArrowUp className="w-4 h-4" />
               </button>
             </div>

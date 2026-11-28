@@ -1,3 +1,5 @@
+import { clearAllSnapshotCaches } from "./snapshotCache";
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -8,6 +10,7 @@ export class ApiError extends Error {
 
 let initialBuildTag = "";
 const buildListeners = new Set<() => void>();
+const unauthorizedListeners = new Set<() => void>();
 
 function checkBuildHeader(res: Response) {
   const tag = res.headers.get("X-Corgi-Web");
@@ -26,7 +29,24 @@ export function onWebBuildChange(fn: () => void): () => void {
   };
 }
 
+export function onUnauthorized(fn: () => void): () => void {
+  unauthorizedListeners.add(fn);
+  return () => {
+    unauthorizedListeners.delete(fn);
+  };
+}
+
+function notifyUnauthorizedIfSessionEndpoint(path: string, status: number) {
+  if (status !== 401) return;
+  if (path === "/api/login" || path === "/api/pair") return;
+  clearAllSnapshotCaches();
+  unauthorizedListeners.forEach((fn) => fn());
+}
+
 export async function api<T>(path: string, body?: unknown): Promise<T> {
+  if (path === "/api/logout") {
+    clearAllSnapshotCaches();
+  }
   const res = await fetch(path, {
     method: body !== undefined ? "POST" : "GET",
     headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
@@ -41,8 +61,12 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
     // non-json response
   }
   if (!res.ok) {
+    notifyUnauthorizedIfSessionEndpoint(path, res.status);
     const msg = typeof data.error === "string" ? data.error : res.statusText;
     throw new ApiError(res.status, msg);
+  }
+  if (path === "/api/logout") {
+    unauthorizedListeners.forEach((fn) => fn());
   }
   return data as T;
 }
@@ -58,6 +82,7 @@ export async function uploadFile(file: File, machine?: string): Promise<{ path: 
   checkBuildHeader(res);
   const data = (await res.json()) as { path?: string; name?: string; size?: number; error?: string };
   if (!res.ok || !data.path) {
+    notifyUnauthorizedIfSessionEndpoint("/api/uploads", res.status);
     throw new ApiError(res.status, data.error ?? "上传失败");
   }
   return { path: data.path, name: data.name ?? file.name, size: data.size ?? file.size };

@@ -31,6 +31,7 @@ export function DecisionCardFooter({
 
   const submitCustom = (e?: FormEvent) => {
     e?.preventDefault();
+    if (busy) return;
     const trimmed = customText.trim();
     if (!trimmed) return;
     void onSubmitCustom(trimmed).then(() => setCustomText(""));

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, Menu, Plus, RefreshCw } from "lucide-react";
+import { AppShellSkeleton } from "./components/AppShellSkeleton";
 import { AgentGlyph, CorgiMark, StatusDot } from "./components/CorgiMark";
 import { Sidebar, type AppRoute } from "./components/Sidebar";
 import { UpdatePill } from "./components/UpdatePill";
@@ -42,7 +43,7 @@ export function App() {
   useEffect(() => onWebBuildChange(() => setWebOutdated(true)), []);
 
   const activeThread = route.view === "corgi" ? route.thread : "chat:main";
-  const { authed, connected, superView, paneState, refreshAuth } = useCorgiStream(activeThread);
+  const { authed, connected, superView, paneState, superReady, stateReady, refreshAuth } = useCorgiStream(activeThread);
 
   const toast = (msg: string) => {
     setToastMsg(msg);
@@ -73,7 +74,7 @@ export function App() {
   };
 
   if (authed === null) {
-    return <div className="h-full flex items-center justify-center text-xs text-muted">连接中…</div>;
+    return <AppShellSkeleton />;
   }
   if (!authed) {
     return <LoginView onSuccess={refreshAuth} />;
@@ -180,7 +181,13 @@ export function App() {
               </div>
               <div className="flex items-center gap-1.5">
                 <UpdatePill fleetUpdate={fleetUpdate} compact />
-                <button type="button" onClick={() => setLaunchOpen(true)} className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer" title="手动新建">
+                <button
+                  type="button"
+                  disabled={!stateReady}
+                  onClick={() => setLaunchOpen(true)}
+                  className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={stateReady ? "手动新建" : "正在同步机群状态…"}
+                >
                   <Plus className="w-4 h-4" />
                 </button>
               </div>
@@ -195,6 +202,7 @@ export function App() {
           shells={shells}
           machines={machines}
           connected={connected}
+          stateReady={stateReady}
           dark={dark}
           fleetUpdate={fleetUpdate}
           onSelect={selectRoute}
@@ -214,6 +222,7 @@ export function App() {
                 shells={shells}
                 machines={machines}
                 connected={connected}
+                stateReady={stateReady}
                 dark={dark}
                 fleetUpdate={fleetUpdate}
                 onSelect={selectRoute}
@@ -231,6 +240,7 @@ export function App() {
             <CorgiChatView
               key={route.thread}
               data={superView}
+              superReady={superReady}
               machines={machines}
               thread={route.thread}
               focusSeq={navSeq}
@@ -245,6 +255,7 @@ export function App() {
             <AgentPaneView
               key={selectedPane.pane_id}
               pane={selectedPane}
+              stateReady={stateReady}
               focusSeq={navSeq}
               queuedPrompts={paneState?.queued_prompts?.[selectedPane.pane_id] ?? []}
               queuePaused={Boolean(paneState?.paused_queues?.[selectedPane.pane_id])}

@@ -73,6 +73,7 @@ function actionCategoryTag(a: Action): { key: string; label: string } {
 
 interface Props {
   data: SuperView | null;
+  superReady?: boolean;
   machines: Machine[];
   thread: string;
   focusSeq?: number;
@@ -91,7 +92,7 @@ function artifactBadgeLabel(kind: string): string {
   return "FILE";
 }
 
-export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWorker, onOpenFile, onOpenArtifact, onOpenSettings, onToast }: Props) {
+export function CorgiChatView({ data, superReady = true, machines, thread, focusSeq = 0, onSelectWorker, onOpenFile, onOpenArtifact, onOpenSettings, onToast }: Props) {
   const [replyTo, setReplyTo] = useState<Entry | null>(null);
   const [resumingWorkerKey, setResumingWorkerKey] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -327,7 +328,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   };
 
   const resolveInlineAction = async (act: Action, choice: string, toastText: string) => {
-    if (busyActionId === act.id) return;
+    if (!superReady || busyActionId === act.id) return;
     captureVisibleAnchor();
     setBusyActionId(act.id);
     try {
@@ -341,7 +342,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
   };
 
   const dismissInlineAction = async (act: Action) => {
-    if (busyActionId === act.id) return;
+    if (!superReady || busyActionId === act.id) return;
     captureVisibleAnchor();
     setBusyActionId(act.id);
     try {
@@ -458,14 +459,22 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
         isWeComGroup={isWeComGroup}
         router={router}
         paused={data?.paused}
+        syncing={Boolean(data) && !superReady}
+        actionsDisabled={!superReady}
         follow={data?.follow}
         notebookCount={notebookSummary.count}
         notebookDot={notebookSummary.dot}
         notebookMode={notebookMode}
         onToggleNotebook={toggleNotebook}
         onToggleSearch={() => setSearchOpen((v) => !v)}
-        onRestartRouter={() => void api("/api/super/router/restart", {}).then(() => onToast("已重置 Corgi 大脑状态"))}
-        onTogglePause={() => void togglePause()}
+        onRestartRouter={() => {
+          if (!superReady) return;
+          void api("/api/super/router/restart", {}).then(() => onToast("已重置 Corgi 大脑状态"));
+        }}
+        onTogglePause={() => {
+          if (!superReady) return;
+          void togglePause();
+        }}
       />
 
       {wecomFocus && wecomFocusLabel && (
@@ -612,13 +621,14 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                         {primaryChoice && isFastSingleAction(act) ? (
                           <button
                             type="button"
+                            disabled={!superReady}
                             onClick={() =>
                               void api(`/api/super/actions/${encodeURIComponent(act.id)}/resolve`, {
                                 choice: primaryChoice.key || primaryChoice.label,
                                 by: "web",
                               }).then(() => onToast("已拍板并同步"))
                             }
-                            className="px-2 py-0.5 rounded-md btn-accent text-[11px] cursor-pointer"
+                            className="px-2 py-0.5 rounded-md btn-accent text-[11px] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             {primaryChoice.label}
                           </button>
@@ -637,13 +647,14 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                         ) : act.kind === "router_check" ? (
                           <button
                             type="button"
+                            disabled={!superReady}
                             onClick={() =>
                               void api(`/api/super/actions/${encodeURIComponent(act.id)}/resolve`, {
                                 choice: "ack",
                                 by: "web",
                               }).then(() => onToast("已标记已看"))
                             }
-                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-strong surface-bg surface-hover text-primary text-[11px] cursor-pointer"
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-strong surface-bg surface-hover text-primary text-[11px] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             <Check className="w-3 h-3" />
                             <span>已看</span>
@@ -652,24 +663,26 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                         {act.kind !== "worker_dialog" && (
                           <button
                             type="button"
+                            disabled={!superReady}
                             onClick={() =>
                               void api(`/api/super/actions/${encodeURIComponent(act.id)}/snooze`, {}).then(() =>
                                 onToast("已暂缓至明天晨报提醒")
                               )
                             }
-                            className="px-2 py-0.5 rounded-md border border-strong text-secondary surface-hover text-[11px] cursor-pointer"
+                            className="px-2 py-0.5 rounded-md border border-strong text-secondary surface-hover text-[11px] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             明天
                           </button>
                         )}
                         <button
                           type="button"
+                          disabled={!superReady}
                           onClick={() =>
                             void api(`/api/super/actions/${encodeURIComponent(act.id)}/dismiss`, {}).then(() =>
                               onToast("已忽略待办")
                             )
                           }
-                          className="text-muted hover:text-primary px-1 cursor-pointer"
+                          className="text-muted hover:text-primary px-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                           title="忽略"
                         >
                           ×
@@ -1145,7 +1158,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                         {inlineAction.kind === "router_check" || !inlineAction.choices?.length ? (
                           <button
                             type="button"
-                            disabled={inlineBusy}
+                            disabled={inlineBusy || !superReady}
                             onClick={() => void resolveInlineAction(inlineAction, "ack", "已标记已看")}
                             className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs border border-strong surface-bg surface-hover text-primary cursor-pointer disabled:opacity-50"
                           >
@@ -1157,7 +1170,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                             <button
                               key={ch.key || cIdx}
                               type="button"
-                              disabled={inlineBusy}
+                              disabled={inlineBusy || !superReady}
                               onClick={() => void resolveInlineAction(inlineAction, ch.key || ch.label, "已拍板并同步")}
                               className={`px-3 py-1 rounded-full text-xs cursor-pointer disabled:opacity-50 ${
                                 cIdx === 0
@@ -1171,7 +1184,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                         )}
                         <button
                           type="button"
-                          disabled={inlineBusy}
+                          disabled={inlineBusy || !superReady}
                           onClick={() => setReplyTo(entry)}
                           className="px-2.5 py-1 rounded-full text-xs border border-hairline text-secondary surface-hover cursor-pointer disabled:opacity-50"
                         >
@@ -1179,7 +1192,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                         </button>
                         <button
                           type="button"
-                          disabled={inlineBusy}
+                          disabled={inlineBusy || !superReady}
                           onClick={() => void dismissInlineAction(inlineAction)}
                           title="忽略待办"
                           className="px-1.5 py-1 rounded-full text-xs text-muted hover:text-primary cursor-pointer disabled:opacity-50"
@@ -1192,7 +1205,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                       <button type="button" onClick={() => setReplyTo(entry)} className="hover:underline cursor-pointer">
                         引用回复
                       </button>
-                      <button type="button" onClick={() => void api("/api/super/pin", { id: entry.id, pinned: !entry.pinned })} className="inline-flex items-center gap-1 hover:underline cursor-pointer">
+                      <button type="button" disabled={!superReady} onClick={() => void api("/api/super/pin", { id: entry.id, pinned: !entry.pinned })} className="inline-flex items-center gap-1 hover:underline cursor-pointer disabled:opacity-40">
                         <Pin className="w-3 h-3" />
                         {entry.pinned ? "取消置顶" : "置顶"}
                       </button>
@@ -1207,6 +1220,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
             <div className="pl-0 sm:pl-10 space-y-2">
               <DecisionCard
                 action={topFloatingAction}
+                disabled={!superReady}
                 workerNames={activeWorkers.map((w) => w.name)}
                 queuePos={activeFloatingIdx + 1}
                 queueTotal={floatingActions.length}
@@ -1287,7 +1301,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
           paused={Boolean(data?.chat_queue_paused)}
           busyId={queueBusyId}
           onSteer={async (item) => {
-            if (item.id.startsWith("tmp-")) return;
+            if (!superReady || item.id.startsWith("tmp-")) return;
             setQueueBusyId(item.id);
             setRemovedQueueIds((prev) => [...prev, item.id]);
             try {
@@ -1301,6 +1315,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
             }
           }}
           onCancel={async (item) => {
+            if (!superReady) return;
             if (item.id.startsWith("tmp-")) {
               setOptimisticQueued((prev) => prev.filter((x) => x.id !== item.id));
               return;
@@ -1317,6 +1332,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
             }
           }}
           onResume={async () => {
+            if (!superReady) return;
             try {
               await api("/api/super/queue/resume", { thread });
             } catch (err) {
@@ -1326,6 +1342,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
         />
         <ComposerBar
           embedded
+          disabled={!superReady}
           machines={machines}
           dispatchDefaults={data?.dispatch_defaults}
           replyTo={replyTo}
