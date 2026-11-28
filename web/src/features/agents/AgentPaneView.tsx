@@ -1,16 +1,14 @@
-import { lazy, Suspense, useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent } from "react";
-import { ArrowDown, ArrowLeft, ArrowUp, GitBranch, Keyboard, Paperclip, Square, Trash2, X } from "lucide-react";
+import { lazy, Suspense, useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { ArrowDown } from "lucide-react";
 import { ChunkErrorBoundary } from "../../components/ChunkErrorBoundary";
-import { AgentGlyph } from "../../components/CorgiMark";
-import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { useKeyboardViewport } from "../../hooks/useKeyboardViewport";
-import { formatAgentComposerContext, formatPaneHandle } from "../../lib/agentIdentity";
+import { formatAgentComposerContext } from "../../lib/agentIdentity";
 import { api, uploadFile } from "../../lib/api";
-import { createIMETracker, isPostCompositionSafariEnter } from "../../lib/composerInput";
-import { capturePasteSnapshot, resolvePastedFiles } from "../../lib/pasteImage";
 import type { AgentView, Approval, ChatMessage, MsgPatch, QueuedPrompt } from "../../types/api";
 import { AgentChatThread, type PendingPrompt } from "./AgentChatThread";
+import { AgentPaneComposer } from "./AgentPaneComposer";
+import { AgentPaneHeader } from "./AgentPaneHeader";
 
 interface Props {
   pane: AgentView;
@@ -46,18 +44,12 @@ function computeCursorMoveKeys(ap: Approval, targetIdx: number): string[] {
   return keys;
 }
 
-function reconcilePendingPrompts(
-  pending: PendingPrompt[],
-  liveMsgs: ChatMessage[],
-  liveBase: number
-): PendingPrompt[] {
+function reconcilePendingPrompts(pending: PendingPrompt[], liveMsgs: ChatMessage[], liveBase: number): PendingPrompt[] {
   if (pending.length === 0 || liveMsgs.length === 0) return pending;
   const remainingUsers = new Map<number, string>();
   for (let i = 0; i < liveMsgs.length; i++) {
     const m = liveMsgs[i];
-    if (m.kind === "user" && m.text) {
-      remainingUsers.set(liveBase + i, m.text.trim());
-    }
+    if (m.kind === "user" && m.text) remainingUsers.set(liveBase + i, m.text.trim());
   }
   if (remainingUsers.size === 0) return pending;
 
@@ -77,11 +69,8 @@ function reconcilePendingPrompts(
         }
       }
     }
-    if (matched) {
-      changed = true;
-    } else {
-      next.push(p);
-    }
+    if (matched) changed = true;
+    else next.push(p);
   }
   return changed ? next : pending;
 }
@@ -123,10 +112,7 @@ export function AgentPaneView({
   const pendingSeqRef = useRef(0);
   const prevServerQueueRef = useRef<QueuedPrompt[]>(queuedPrompts);
   const localHandledIdsRef = useRef<Set<string>>(new Set());
-  const fileRef = useRef<HTMLInputElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
   const composerDockRef = useRef<HTMLDivElement>(null);
-  const imeRef = useRef(createIMETracker());
   useKeyboardViewport(composerDockRef);
 
   useEffect(() => {
@@ -144,9 +130,7 @@ export function AgentPaneView({
 
   useEffect(() => {
     const curIds = new Set(queuedPrompts.map((q) => q.id));
-    // Detect prompts automatically drained by Hub on idle and show them as pending until transcript catches up.
-    const prev = prevServerQueueRef.current;
-    for (const item of prev) {
+    for (const item of prevServerQueueRef.current) {
       if (!curIds.has(item.id) && !localHandledIdsRef.current.has(item.id)) {
         const pid = `d-${++pendingSeqRef.current}`;
         const afterAbsIdx = baseRef.current + liveMsgs.length;
@@ -235,10 +219,7 @@ export function AgentPaneView({
   }, [liveMsgs, liveBase]);
 
   const lastLive = liveMsgs[liveMsgs.length - 1];
-  const scrollHasContent =
-    mode === "log"
-      ? logText.length > 0
-      : liveMsgs.length > 0 || pendingPrompts.length > 0 || Boolean(approval);
+  const scrollHasContent = mode === "log" ? logText.length > 0 : liveMsgs.length > 0 || pendingPrompts.length > 0 || Boolean(approval);
   const scrollContentKey =
     mode === "log"
       ? `log:${patchSeq}:${logText.length}`
@@ -312,13 +293,9 @@ export function AgentPaneView({
       const shouldQueue = liveStatus === "working" || effectiveQueue.length > 0;
       if (shouldQueue) {
         const tmpId = `tmp-${++pendingSeqRef.current}`;
-        const tmpItem: QueuedPrompt = { id: tmpId, pane_id: pane.pane_id, text: rawText, created_at: new Date().toISOString() };
-        setOptimisticQueued((prev) => [...prev, tmpItem]);
+        setOptimisticQueued((prev) => [...prev, { id: tmpId, pane_id: pane.pane_id, text: rawText, created_at: new Date().toISOString() }]);
         try {
-          const res = await api<{ ok: boolean; queued?: boolean; item?: QueuedPrompt }>(`/api/agents/${enc}/prompt`, {
-            prompt: rawText,
-            mode: "queue",
-          });
+          const res = await api<{ ok: boolean; queued?: boolean; item?: QueuedPrompt }>(`/api/agents/${enc}/prompt`, { prompt: rawText, mode: "queue" });
           setOptimisticQueued((prev) => {
             const without = prev.filter((x) => x.id !== tmpId);
             return res.queued && res.item ? [...without, res.item] : without;
@@ -340,10 +317,7 @@ export function AgentPaneView({
       setPendingPrompts((prev) => [...prev, { id, text: rawText, afterAbsIdx, sending: true }]);
       scrollToBottom(true);
       try {
-        const res = await api<{ ok: boolean; queued?: boolean; item?: QueuedPrompt }>(`/api/agents/${enc}/prompt`, {
-          prompt: rawText,
-          mode: "auto",
-        });
+        const res = await api<{ ok: boolean; queued?: boolean; item?: QueuedPrompt }>(`/api/agents/${enc}/prompt`, { prompt: rawText, mode: "auto" });
         if (res.queued && res.item) {
           setPendingPrompts((prev) => prev.filter((item) => item.id !== id));
           setOptimisticQueued((prev) => [...prev, res.item!]);
@@ -428,7 +402,7 @@ export function AgentPaneView({
 
   const sendInput = async (e: FormEvent) => {
     e.preventDefault();
-    if (!stateReady || imeRef.current.composing) return;
+    if (!stateReady) return;
     let val = input.trim();
     if (!val && attachments.length === 0) return;
     if (attachments.length > 0) {
@@ -463,14 +437,8 @@ export function AgentPaneView({
   };
 
   const messages = [...olderMsgs, ...liveMsgs];
-  const keysVisible = mode !== "chat" || !pane.is_agent || showKeys;
   const setupHint = mode === "chat" && messages.length === 0 && SETUP_RE.test(logText);
-  const modeTabs = pane.is_agent ? (["chat", "screen", "log"] as const) : (["screen", "log"] as const);
-  const handleInfo = formatPaneHandle(pane);
-  const composerCtx = formatAgentComposerContext(pane, {
-    mode,
-    busy: liveStatus === "working" || effectiveQueue.length > 0,
-  });
+  const composerCtx = formatAgentComposerContext(pane, { mode, busy: liveStatus === "working" || effectiveQueue.length > 0 });
 
   return (
     <div
@@ -481,76 +449,21 @@ export function AgentPaneView({
         if (e.dataTransfer?.files?.length) void addFiles(e.dataTransfer.files);
       }}
     >
-      <header className="min-h-14 py-2 px-4 md:px-5 flex items-center justify-between border-b border-hairline shrink-0 gap-2">
-        <div className="flex items-start gap-2.5 min-w-0">
-          <div className="w-7 h-7 rounded-lg border border-hairline surface-rail flex items-center justify-center shrink-0 mt-0.5 text-secondary">
-            <AgentGlyph kind={pane.kind} isAgent={pane.is_agent} className="w-4 h-4" />
-          </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="font-semibold text-[15px] truncate">{handleInfo.title}</span>
-              {handleInfo.showHandle && (
-                <span className="text-[11.5px] font-mono-code text-muted shrink-0">{handleInfo.handle}</span>
-              )}
-              <span className="direct-pill text-[10.5px] font-medium px-1.5 py-0.5 rounded-full shrink-0">
-                {composerCtx.badge}
-              </span>
-              <span className="text-[11px] font-mono-code px-1.5 py-0.5 rounded border border-strong text-secondary shrink-0">
-                {pane.is_agent ? pane.kind : "shell"}
-              </span>
-              {pane.worktree_branch && (
-                <span
-                  title={pane.repo_root ? `独立 Worktree（源仓库：${pane.repo_root}）` : "独立 Git Worktree"}
-                  className="inline-flex items-center gap-1 text-[11px] font-mono-code px-1.5 py-0.5 rounded border border-hairline surface-rail text-secondary shrink-0"
-                >
-                  <GitBranch className="w-3 h-3" />
-                  <span>{pane.worktree_branch}</span>
-                </span>
-              )}
-              {contextPct > 0 && <span className="text-[11px] font-mono-code text-muted">上下文 {contextPct}%</span>}
-            </div>
-            <div className="text-[11.5px] font-mono-code text-muted truncate mt-0.5">
-              {pane.machine ? `${pane.machine} · ` : ""}
-              {pane.cwd}
-            </div>
-            {pane.constraint && (
-              <div
-                title={`本会话红线：${pane.constraint}`}
-                className="text-[11px] text-attn truncate mt-0.5"
-              >
-                红线：{pane.constraint}
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={onBackToCorgi}
-            className="hidden md:inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs border border-strong surface-bg text-secondary surface-hover cursor-pointer shrink-0"
-            title="返回 Corgi 主对话"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span>回 Corgi</span>
-          </button>
-          <div className="inline-flex p-0.5 rounded-lg text-xs surface-rail border border-hairline">
-            {modeTabs.map((m) => (
-              <button key={m} type="button" onClick={() => switchMode(m)} className={`px-2.5 py-1 rounded-md cursor-pointer ${mode === m ? "surface-bg font-medium text-primary" : "text-secondary"}`}>
-                {m === "chat" ? "对话" : m === "screen" ? "屏幕" : "日志"}
-              </button>
-            ))}
-          </div>
-          <button
-            type="button"
-            disabled={!stateReady}
-            onClick={() => void api(`/api/workspaces/${encodeURIComponent(pane.workspace_id)}/close`, {}).then(() => { onToast("已关闭工作区"); onClosed(); })}
-            className="w-8 h-8 rounded-lg flex items-center justify-center text-muted surface-hover cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-            title={stateReady ? "关闭工作区" : "正在同步实时状态…"}
-          >
-            <Trash2 className="w-4 h-4" strokeWidth={1.7} />
-          </button>
-        </div>
-      </header>
+      <AgentPaneHeader
+        pane={pane}
+        mode={mode}
+        badge={composerCtx.badge}
+        contextPct={contextPct}
+        stateReady={stateReady}
+        onBackToCorgi={onBackToCorgi}
+        onSwitchMode={switchMode}
+        onCloseWorkspace={() =>
+          void api(`/api/workspaces/${encodeURIComponent(pane.workspace_id)}/close`, {}).then(() => {
+            onToast("已关闭工作区");
+            onClosed();
+          })
+        }
+      />
 
       <div className="relative flex-1 flex flex-col min-h-0">
         <div ref={containerRef} onScroll={onScroll} className="flex-1 overflow-y-auto scroll-chat px-5 py-5 min-h-0">
@@ -599,7 +512,9 @@ export function AgentPaneView({
             </div>
           ) : (
             <div ref={contentRef}>
-              <pre className="max-w-[900px] mx-auto text-xs font-mono-code leading-relaxed whitespace-pre-wrap text-secondary">{logText || "等待终端输出…"}</pre>
+              <pre className="max-w-[900px] mx-auto text-xs font-mono-code leading-relaxed whitespace-pre-wrap text-secondary">
+                {logText || "等待终端输出…"}
+              </pre>
             </div>
           )}
         </div>
@@ -615,136 +530,33 @@ export function AgentPaneView({
         )}
       </div>
 
-      <div ref={composerDockRef} className="px-5 pt-2 shrink-0 space-y-2 kb-dock">
-        {pane.is_agent && mode === "chat" && (
-          <PromptQueueTray
-            items={effectiveQueue}
-            paused={queuePaused}
-            busyId={queueBusyId}
-            onSteer={(it) => void steerQueued(it)}
-            onCancel={(it) => void cancelQueued(it)}
-            onResume={() => void resumeQueue()}
-          />
-        )}
-        {keysVisible && (
-          <div className="max-w-[740px] mx-auto flex items-center gap-1.5 overflow-x-auto text-xs">
-            {["esc", "ctrl+c", "tab", "up", "down", "enter"].map((k) => (
-              <button key={k} type="button" onClick={() => void sendKey(k)} className="px-2.5 py-1 rounded-lg border border-hairline surface-rail text-secondary font-mono-code cursor-pointer shrink-0">
-                {k}
-              </button>
-            ))}
-          </div>
-        )}
-        <div className="max-w-[740px] mx-auto">
-          <div className="direct-strip rounded-t-2xl px-3.5 py-1.5 flex items-center justify-between gap-2 text-[11.5px]">
-            <div className="flex items-center gap-1.5 min-w-0">
-              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: "var(--attn)" }} />
-              <span className="hidden sm:inline truncate text-primary font-medium">{composerCtx.stripDesktop}</span>
-              <span className="sm:hidden truncate text-primary font-medium">{composerCtx.stripMobile}</span>
-            </div>
-            <button
-              type="button"
-              onClick={onBackToCorgi}
-              className="inline-flex items-center gap-1 text-[11.5px] text-secondary hover:text-primary font-medium cursor-pointer shrink-0"
-            >
-              <ArrowLeft className="w-3 h-3" />
-              <span>{composerCtx.backLabel}</span>
-            </button>
-          </div>
-          <form onSubmit={(e) => void sendInput(e)} className="composer-box-docked rounded-b-2xl px-3 py-2 space-y-1.5">
-            {attachments.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 px-1">
-                {attachments.map((a, idx) => (
-                  <span key={idx} className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md surface-rail border border-hairline text-secondary">
-                    {a.name}
-                    <button type="button" onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))} className="text-muted cursor-pointer"><X className="w-3 h-3" /></button>
-                  </span>
-                ))}
-              </div>
-            )}
-            <div className="flex items-center gap-2">
-              <input ref={fileRef} type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles(e.target.files); e.target.value = ""; }} />
-              <button type="button" onClick={() => fileRef.current?.click()} title="添加图片或文件" className="w-8 h-8 rounded-lg flex items-center justify-center text-muted surface-hover cursor-pointer shrink-0">
-                <Paperclip className="w-4 h-4" />
-              </button>
-              {pane.is_agent && mode === "chat" && (
-                <button type="button" onClick={() => setShowKeys((v) => !v)} title={showKeys ? "隐藏终端快捷键" : "显示终端快捷键"} className={`w-8 h-8 rounded-lg flex items-center justify-center surface-hover cursor-pointer shrink-0 ${showKeys ? "text-primary surface-rail" : "text-muted"}`}>
-                  <Keyboard className="w-4 h-4" />
-                </button>
-              )}
-              <input
-                ref={inputRef}
-                type="text"
-                value={input}
-                onCompositionStart={() => {
-                  imeRef.current.composing = true;
-                }}
-                onCompositionEnd={(e) => {
-                  imeRef.current.composing = false;
-                  imeRef.current.lastCompositionEndAt = e.timeStamp;
-                }}
-                onKeyDown={(e) => {
-                  if (
-                    !e.nativeEvent.isComposing &&
-                    isPostCompositionSafariEnter(
-                      {
-                        key: e.key,
-                        shiftKey: e.shiftKey,
-                        keyCode: e.keyCode,
-                        isComposing: e.nativeEvent.isComposing,
-                        timeStamp: e.timeStamp,
-                      },
-                      imeRef.current
-                    )
-                  ) {
-                    // Prevent implicit <form> submission on Safari's post-compositionend Enter.
-                    e.preventDefault();
-                  }
-                }}
-                onPaste={(e: ClipboardEvent<HTMLInputElement>) => {
-                  const snap = capturePasteSnapshot(e.clipboardData);
-                  if (!snap.hasMediaHint) return;
-                  e.preventDefault();
-                  void resolvePastedFiles(snap, navigator.clipboard).then((res) => {
-                    if (res.files.length > 0) {
-                      void addFiles(res.files);
-                    } else if (res.error) {
-                      onToast(res.error);
-                    }
-                  });
-                }}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder={composerCtx.placeholder}
-                className="flex-1 bg-transparent text-[14px] outline-none"
-              />
-              {pane.is_agent && mode === "chat" && liveStatus === "working" && (
-                <button
-                  type="button"
-                  disabled={stopping}
-                  onClick={() => void stopCurrentStep()}
-                  title="停止当前步骤 (Esc)"
-                  className="w-8 h-8 rounded-full border border-strong surface-rail text-primary flex items-center justify-center surface-hover cursor-pointer shrink-0 disabled:opacity-50"
-                >
-                  <Square className="w-3 h-3 fill-current" />
-                </button>
-              )}
-              <button
-                type="submit"
-                disabled={!stateReady}
-                onPointerDown={(e) => {
-                  if (document.activeElement === inputRef.current) {
-                    e.preventDefault();
-                  }
-                }}
-                title={!stateReady ? "正在同步实时状态…" : pane.is_agent && mode === "chat" && (liveStatus === "working" || effectiveQueue.length > 0) ? "加入待发送队列" : "发送"}
-                className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer shrink-0 disabled:opacity-35 disabled:cursor-not-allowed"
-              >
-                <ArrowUp className="w-4 h-4" />
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
+      <AgentPaneComposer
+        composerDockRef={composerDockRef}
+        pane={pane}
+        mode={mode}
+        stateReady={stateReady}
+        liveStatus={liveStatus}
+        stopping={stopping}
+        showKeys={showKeys}
+        input={input}
+        attachments={attachments}
+        effectiveQueue={effectiveQueue}
+        queuePaused={queuePaused}
+        queueBusyId={queueBusyId}
+        composerCtx={composerCtx}
+        onInputChange={setInput}
+        onRemoveAttachment={(idx) => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
+        onAddFiles={(files) => void addFiles(files)}
+        onToggleKeys={() => setShowKeys((v) => !v)}
+        onSendKey={(k) => void sendKey(k)}
+        onSubmit={(e) => void sendInput(e)}
+        onStop={() => void stopCurrentStep()}
+        onSteerQueued={(it) => void steerQueued(it)}
+        onCancelQueued={(it) => void cancelQueued(it)}
+        onResumeQueue={() => void resumeQueue()}
+        onBackToCorgi={onBackToCorgi}
+        onToast={onToast}
+      />
     </div>
   );
 }

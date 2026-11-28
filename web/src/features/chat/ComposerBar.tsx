@@ -3,10 +3,11 @@ import { ArrowUp, ChevronDown, FolderGit2, Paperclip, Square, X } from "lucide-r
 import { useAutoResizeTextarea } from "../../hooks/useAutoResizeTextarea";
 import { api, uploadFile } from "../../lib/api";
 import { createIMETracker, classifyEnterKey } from "../../lib/composerInput";
-import { capturePasteSnapshot, resolvePastedFiles } from "../../lib/pasteImage";
 import { formatDispatchSummary, resolveEffectiveDispatch } from "../../lib/dispatchDefaults";
 import { getSupportedEfforts } from "../../lib/models";
+import { capturePasteSnapshot, resolvePastedFiles } from "../../lib/pasteImage";
 import type { Entry, Machine, MediaRef, ModelCatalog, WorkItem, WorkerDispatchDefaults } from "../../types/api";
+import { DispatchOverridePopover } from "./DispatchOverridePopover";
 
 const ALL_KINDS = ["agy", "codebuddy", "codex", "claude"];
 const IMG_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
@@ -86,9 +87,7 @@ export function ComposerBar({
   useAutoResizeTextarea(textareaRef, text, { minHeight: 24, maxHeight: 180 });
 
   useEffect(() => {
-    if (replyTo) {
-      textareaRef.current?.focus({ preventScroll: true });
-    }
+    if (replyTo) textareaRef.current?.focus({ preventScroll: true });
   }, [replyTo?.id]);
 
   useEffect(() => {
@@ -123,13 +122,9 @@ export function ComposerBar({
 
   const resolved = resolveEffectiveDispatch(dispatchDefaults, machines, { machine, kind, model, effort });
   const effectiveBase = resolveEffectiveDispatch(dispatchDefaults, machines, { machine, kind });
-  const effectiveMachineObj = machines.find((m) =>
-    resolved.machine === "" ? m.local : m.id === resolved.machine
-  );
+  const effectiveMachineObj = machines.find((m) => (resolved.machine === "" ? m.local : m.id === resolved.machine));
   const availableKinds =
-    effectiveMachineObj && effectiveMachineObj.agents && effectiveMachineObj.agents.length > 0
-      ? effectiveMachineObj.agents
-      : ALL_KINDS;
+    effectiveMachineObj && effectiveMachineObj.agents && effectiveMachineObj.agents.length > 0 ? effectiveMachineObj.agents : ALL_KINDS;
 
   useEffect(() => {
     if (kind && !availableKinds.includes(kind)) {
@@ -198,9 +193,7 @@ export function ComposerBar({
   const onDrop = (e: DragEvent) => {
     e.preventDefault();
     setDragging(false);
-    if (e.dataTransfer?.files?.length) {
-      void handleFiles(e.dataTransfer.files);
-    }
+    if (e.dataTransfer?.files?.length) void handleFiles(e.dataTransfer.files);
   };
 
   const submit = async (e: FormEvent) => {
@@ -211,9 +204,7 @@ export function ComposerBar({
     if (attachments.length > 0) {
       payload = (payload ? payload + "\n\n" : "") + "附件：\n" + attachments.map((a) => a.path).join("\n");
     }
-    if (!clientMsgIdRef.current) {
-      clientMsgIdRef.current = createClientMsgId();
-    }
+    if (!clientMsgIdRef.current) clientMsgIdRef.current = createClientMsgId();
     const msgId = clientMsgIdRef.current;
     const hadOverride = resolved.isOverride;
     submittingRef.current = true;
@@ -228,13 +219,7 @@ export function ComposerBar({
         projectId,
         media:
           attachments.length > 0
-            ? attachments.map((a) => ({
-                path: a.path,
-                machine: a.machine || undefined,
-                name: a.name,
-                mime: a.mime,
-                size: a.size,
-              }))
+            ? attachments.map((a) => ({ path: a.path, machine: a.machine || undefined, name: a.name, mime: a.mime, size: a.size }))
             : undefined,
         clientMsgId: msgId,
       });
@@ -242,11 +227,7 @@ export function ComposerBar({
       setAttachments([]);
       clientMsgIdRef.current = "";
       setOverrideOpen(false);
-      // Automatically reset one-shot dispatch overrides back to global Settings after sending
-      // so the composer never silently sticks to a stale override.
-      if (hadOverride) {
-        clearOneShotOverride();
-      }
+      if (hadOverride) clearOneShotOverride();
     } catch {
       // Keep draft, attachments, replyTo, and the same clientMsgId so retrying is lossless and idempotent.
     } finally {
@@ -267,138 +248,34 @@ export function ComposerBar({
   const form = (
     <div className="max-w-[740px] mx-auto relative">
       {overrideOpen && (
-        <div
-          ref={popoverRef}
-          className="absolute left-0 bottom-[calc(100%+10px)] w-[min(430px,calc(100vw-40px))] rounded-2xl card-floating border border-strong p-4 z-40 space-y-3 text-xs"
-        >
-          <div className="flex items-start justify-between gap-2">
-            <div>
-              <div className="font-semibold text-[13px] text-primary">仅本次派活临时指定</div>
-              <div className="text-[11px] text-muted mt-0.5">只影响接下来发送的这一条消息，发送后自动还原为全局默认。</div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setOverrideOpen(false)}
-              className="w-6 h-6 rounded-md flex items-center justify-center text-muted hover:text-primary surface-hover cursor-pointer"
-              title="关闭"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            <label className="space-y-1">
-              <span className="text-[11px] text-muted">电脑</span>
-              <select
-                value={machine}
-                onChange={(e) => setMachine(e.target.value)}
-                className="w-full px-2.5 py-1.5 rounded-lg surface-rail border border-hairline outline-none"
-              >
-                <option value="">沿用默认（{resolveEffectiveDispatch(dispatchDefaults, machines).machineLabel}）</option>
-                {machines.map((m) => (
-                  <option key={m.id || "hub"} value={m.local ? "hub" : m.id}>
-                    {m.name}
-                    {m.local ? "（Hub）" : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="space-y-1">
-              <span className="text-[11px] text-muted">工具</span>
-              <select
-                value={kind}
-                onChange={(e) => {
-                  setKind(e.target.value);
-                  setModel("");
-                  setEffort("");
-                }}
-                className="w-full px-2.5 py-1.5 rounded-lg surface-rail border border-hairline outline-none"
-              >
-                <option value="">沿用默认（{resolveEffectiveDispatch(dispatchDefaults, machines, { machine }).kind}）</option>
-                {availableKinds.map((k) => (
-                  <option key={k} value={k}>
-                    {k}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-
-          <div className={`grid grid-cols-1 ${hideEffort ? "" : "sm:grid-cols-2"} gap-2.5`}>
-            <label className="space-y-1">
-              <span className="text-[11px] text-muted">模型</span>
-              <select
-                value={model}
-                onChange={(e) => {
-                  const nextModel = e.target.value;
-                  const nextEfforts = getSupportedEfforts(catalog, nextModel || effectiveBase.model);
-                  setModel(nextModel);
-                  if (effort && !nextEfforts.includes(effort)) setEffort("");
-                }}
-                className="w-full px-2.5 py-1.5 rounded-lg surface-rail border border-hairline outline-none"
-              >
-                <option value="">沿用默认（当前：{baseModelDisplay}）</option>
-                {(catalog?.models ?? []).map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label || m.id}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {!hideEffort && (
-              <label className="space-y-1">
-                <span className="text-[11px] text-muted">思考强度</span>
-                <select
-                  value={effort}
-                  onChange={(e) => setEffort(e.target.value)}
-                  className="w-full px-2.5 py-1.5 rounded-lg surface-rail border border-hairline outline-none"
-                >
-                  <option value="">沿用默认{effectiveBase.effort ? `（${effectiveBase.effort}）` : ""}</option>
-                  {efforts.map((ef) => (
-                    <option key={ef} value={ef}>
-                      {ef}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-          </div>
-
-          <div className="pt-2.5 border-t border-hairline flex items-center justify-between gap-2">
-            {onOpenSettings ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setOverrideOpen(false);
-                  onOpenSettings();
-                }}
-                className="text-[11.5px] text-secondary hover:text-primary underline underline-offset-2 cursor-pointer"
-              >
-                去改全局默认设置 →
-              </button>
-            ) : (
-              <span />
-            )}
-            <div className="flex items-center gap-1.5">
-              {resolved.isOverride && (
-                <button
-                  type="button"
-                  onClick={clearOneShotOverride}
-                  className="px-2.5 py-1 rounded-lg border border-hairline surface-rail surface-hover text-secondary cursor-pointer"
-                >
-                  恢复默认
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setOverrideOpen(false)}
-                className="px-2.5 py-1 rounded-lg btn-accent font-medium cursor-pointer"
-              >
-                应用到本条
-              </button>
-            </div>
-          </div>
-        </div>
+        <DispatchOverridePopover
+          popoverRef={popoverRef}
+          machines={machines}
+          dispatchDefaults={dispatchDefaults}
+          machine={machine}
+          kind={kind}
+          model={model}
+          effort={effort}
+          availableKinds={availableKinds}
+          catalog={catalog}
+          baseModelDisplay={baseModelDisplay}
+          effectiveBaseModel={effectiveBase.model}
+          effectiveBaseEffort={effectiveBase.effort}
+          efforts={efforts}
+          hideEffort={hideEffort}
+          isOverride={resolved.isOverride}
+          onChangeMachine={setMachine}
+          onChangeKind={(v) => {
+            setKind(v);
+            setModel("");
+            setEffort("");
+          }}
+          onChangeModel={setModel}
+          onChangeEffort={setEffort}
+          onClearOverride={clearOneShotOverride}
+          onClose={() => setOverrideOpen(false)}
+          onOpenSettings={onOpenSettings}
+        />
       )}
 
       <form
@@ -483,11 +360,8 @@ export function ComposerBar({
             if (!snap.hasMediaHint) return;
             e.preventDefault();
             void resolvePastedFiles(snap, navigator.clipboard).then((res) => {
-              if (res.files.length > 0) {
-                void handleFiles(res.files);
-              } else if (res.error) {
-                onToast(res.error);
-              }
+              if (res.files.length > 0) void handleFiles(res.files);
+              else if (res.error) onToast(res.error);
             });
           }}
           onKeyDown={(e) => {
@@ -604,9 +478,7 @@ export function ComposerBar({
               type="submit"
               disabled={disabled || submitting || (!text.trim() && attachments.length === 0)}
               onPointerDown={(e) => {
-                if (document.activeElement === textareaRef.current) {
-                  e.preventDefault();
-                }
+                if (document.activeElement === textareaRef.current) e.preventDefault();
               }}
               title={disabled ? "正在同步实时状态…" : working || queuedCount > 0 ? "加入待发队列" : "发送"}
               className="w-7 h-7 rounded-full btn-accent flex items-center justify-center cursor-pointer disabled:opacity-30"
