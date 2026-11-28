@@ -157,7 +157,6 @@ export function HtmlPreviewPane({
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
           title={title || path || artifactId || "HTML Preview"}
-          style={{ colorScheme: "light" }}
           className={`w-full flex-1 min-h-0 border-0 surface-bg ${resizing ? "pointer-events-none" : ""}`}
         />
       )}

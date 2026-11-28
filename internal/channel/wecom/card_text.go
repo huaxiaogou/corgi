@@ -11,13 +11,17 @@ import (
 )
 
 var (
-	mdLinkRe    = regexp.MustCompile(`\[([^\]\n]+)\]\((https?://[^)\s]+)\)`)
-	mdBoldAstRe = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
-	mdBoldUndRe = regexp.MustCompile(`__([^_\n]+)__`)
-	mdStrikeRe  = regexp.MustCompile(`~~([^~\n]+)~~`)
-	mdCodeRe    = regexp.MustCompile("`([^`\n]+)`")
-	mdHeadingRe = regexp.MustCompile(`(?m)^\s{0,3}#{1,6}\s+`)
-	mdBulletRe  = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
+	mdLinkRe       = regexp.MustCompile(`\[([^\]\n]+)\]\((https?://[^)\s]+)\)`)
+	mdBoldAstRe    = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
+	mdBoldUndRe    = regexp.MustCompile(`__([^_\n]+)__`)
+	mdStrikeRe     = regexp.MustCompile(`~~([^~\n]+)~~`)
+	mdMarkRe       = regexp.MustCompile(`==([^=\n]+)==`)
+	mdKbdRe        = regexp.MustCompile(`(?i)<kbd>([^<\n]+)</kbd>`)
+	mdCalloutTagRe = regexp.MustCompile(`(?im)^\s*>?\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*`)
+	mdDetailsTagRe = regexp.MustCompile(`(?i)</?(?:details|summary)(?:\s[^>]*)?>`)
+	mdCodeRe       = regexp.MustCompile("`([^`\n]+)`")
+	mdHeadingRe    = regexp.MustCompile(`(?m)^\s{0,3}#{1,6}\s+`)
+	mdBulletRe     = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
 )
 
 // stripMarkdownPlainText strips common Markdown emphasis/link/code markers so plain-text
@@ -27,11 +31,15 @@ func stripMarkdownPlainText(s string) string {
 		return ""
 	}
 	out := strings.ReplaceAll(s, "\r\n", "\n")
+	out = mdCalloutTagRe.ReplaceAllString(out, "")
+	out = mdDetailsTagRe.ReplaceAllString(out, "")
 	out = mdLinkRe.ReplaceAllString(out, "$1")
 	out = mdCodeRe.ReplaceAllString(out, "$1")
 	out = mdBoldAstRe.ReplaceAllString(out, "$1")
 	out = mdBoldUndRe.ReplaceAllString(out, "$1")
 	out = mdStrikeRe.ReplaceAllString(out, "$1")
+	out = mdMarkRe.ReplaceAllString(out, "$1")
+	out = mdKbdRe.ReplaceAllString(out, "$1")
 	// Clean any stray unmatched "**" left by an upstream rune truncation.
 	out = strings.ReplaceAll(out, "**", "")
 	out = mdHeadingRe.ReplaceAllString(out, "")

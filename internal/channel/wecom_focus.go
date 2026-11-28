@@ -181,7 +181,7 @@ func formatDirectReplyBody(title, workerName, machineLabel, fullText, previewURL
 	if strings.TrimSpace(quotaError) != "" {
 		mainText = "⚠ Worker 遇到模型/配额错误：" + strings.TrimSpace(quotaError)
 	} else {
-		mainText = strings.TrimSpace(fullText)
+		mainText = formatMarkdownForWeCom(fullText, previewURL)
 		if mainText == "" {
 			mainText = "已完成本轮处理。"
 		}

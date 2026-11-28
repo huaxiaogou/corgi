@@ -499,7 +499,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 				_, _ = st.seal(ctx, "", sealText)
 			} else {
 				// Fall back to readable reply prose if card push failed or WeCom went offline.
-				_, _ = st.seal(ctx, "", prependReplyHeaders("", focusNotice, formatWeComReply(entry)))
+				_, _ = st.seal(ctx, "", prependReplyHeaders("", focusNotice, formatWeComReply(entry, b.effectivePublicURL())))
 			}
 		}
 		if hasExplicitFiles {
@@ -531,7 +531,7 @@ func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Act
 	}
 	chatID = b.canonicalWeComChat(entry.Thread, streamChatID)
 
-	body := prependReplyHeaders(webQuote, focusNotice, formatWeComReply(entry))
+	body := prependReplyHeaders(webQuote, focusNotice, formatWeComReply(entry, b.effectivePublicURL()))
 	combined := body
 	if hasExplicitFiles && linksBlock != "" {
 		if combined != "" {
@@ -696,11 +696,18 @@ func queuedAttachmentResults(attachments []core.AttachmentFile, reason string) [
 	return out
 }
 
-func formatWeComReply(entry *model.Entry) string {
+func (b *Bus) effectivePublicURL() string {
+	if b == nil || b.engine == nil {
+		return ""
+	}
+	return b.engine.EffectivePublicURL()
+}
+
+func formatWeComReply(entry *model.Entry, publicURL string) string {
 	if entry == nil {
 		return ""
 	}
-	return strings.TrimSpace(entry.Text)
+	return formatMarkdownForWeCom(entry.Text, publicURL)
 }
 
 func (b *Bus) sendReplyAttachments(ctx context.Context, chatID string, entry *model.Entry, attachments []core.AttachmentFile, allowLongFallback bool) []core.AttachmentDelivery {

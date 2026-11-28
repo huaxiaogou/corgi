@@ -218,3 +218,107 @@ test("chatFilter folds routine worker chatter, hides redundant quotes, and route
   assert.equal(workerSpawnStatusBadge({ name: "w1", kind: "agy", cwd: "~", task: "", thread: "chat:main", status: "blocked", created_at: "" }).label, "等你确认");
   assert.equal(workerSpawnStatusBadge({ name: "w1", kind: "agy", cwd: "~", task: "", thread: "chat:main", status: "done", ended: true, created_at: "" }).label, "已结束");
 });
+
+test("MarkdownText 2.0 renders multi-backtick fences, diff stats, 18-line fold, tables, callouts, details XSS-safe, metrics, steps, and inline extensions", async () => {
+  const { MarkdownText } = await loadModule("src/components/MarkdownText.tsx");
+
+  const longCode = Array.from({ length: 22 }, (_, i) => `line ${i + 1}`).join("\n");
+  const sample = [
+    "````markdown",
+    "```ts",
+    "const nested = 1;",
+    "```",
+    "````",
+    "",
+    "```diff",
+    "--- a/foo.go",
+    "+++ b/foo.go",
+    "-oldLine()",
+    "+newLine1()",
+    "+newLine2()",
+    "```",
+    "",
+    "```ts",
+    longCode,
+    "```",
+    "",
+    "| 指标 | 数值 | 变化 |",
+    "| --- | --- | --- |",
+    "| 首屏 | 155 KB | -82% |",
+    "",
+    "| A | B | C | D |",
+    "| --- | --- | --- | --- |",
+    "| x | 1 | 2 | 3 |",
+    "",
+    "> [!NOTE] 提示标题",
+    "> 普通 *斜体* ~~删除~~ ==高亮== <kbd>Cmd+K</kbd> `internal/core/engine.go:42` PR #128",
+    "",
+    "> [!TIP]",
+    "> 小技巧",
+    "",
+    "> [!IMPORTANT]",
+    "> 重要提醒",
+    "",
+    "> [!WARNING]",
+    "> 警告内容",
+    "",
+    "> [!CAUTION]",
+    "> 警示内容",
+    "",
+    "<details>",
+    "<summary>安全折叠</summary>",
+    "<script>alert(1)</script> <img src=x onerror=alert(2)>",
+    "</details>",
+    "",
+    "```metrics",
+    "首屏体积 | 155 KB | -82%",
+    "单测 | 33/33",
+    "```",
+    "",
+    "```steps",
+    "[x] 完成 Batch 1",
+    "[~] 执行 Batch 2",
+    "[!] 待核验",
+    "[ ] 待规划",
+    "```",
+    "",
+    "```html-card",
+    "<script>alert('never-exec')</script>",
+    "```",
+  ].join("\n");
+
+  const html = renderToStaticMarkup(
+    React.createElement(MarkdownText, {
+      text: sample,
+      onOpenFile: () => {},
+    })
+  );
+
+  // Nested 4-backtick fence preserved inner ```ts.
+  assert.ok(html.includes("const nested = 1;") && html.includes("```ts"), html);
+  // Diff stats (+2 -1) and token vars.
+  assert.ok(html.includes("+2") && html.includes("-1") && html.includes("var(--diff-add-bg)") && html.includes("var(--diff-del-bg)"), html);
+  // 18-line code folding.
+  assert.ok(html.includes("展开剩余 4 行（共 22 行）") && html.includes('data-code-folded="true"'), html);
+  // Tables: 3-col non-wide vs 4-col wide + numeric tabular-nums right alignment.
+  assert.ok(html.includes('data-cols="3"') && html.includes('data-wide="false"'), html);
+  assert.ok(html.includes('data-cols="4"') && html.includes('data-wide="true"'), html);
+  assert.ok(html.includes("text-right tabular-nums"), html);
+  // All 5 callout levels.
+  for (const kind of ["note", "tip", "important", "warning", "caution"]) {
+    assert.ok(html.includes(`data-callout="${kind}"`), `missing callout ${kind}`);
+  }
+  // Inline enhancements.
+  assert.ok(html.includes("<em") && html.includes("<del") && html.includes("<mark") && html.includes("<kbd"), html);
+  assert.ok(html.includes("internal/core/engine.go:42") && html.includes("PR #128"), html);
+  // <details> renders structurally with 0 raw HTML execution (script/onerror escaped as text).
+  assert.ok(html.includes("<details") && html.includes("安全折叠"), html);
+  assert.equal(html.includes("<script>"), false, "raw <script> tag must never appear unescaped");
+  assert.equal(html.includes("<img src=x"), false, "raw <img onerror> must never appear unescaped");
+  assert.ok(html.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), html);
+  // Metrics & steps blocks.
+  assert.ok(html.includes('data-metrics-strip="true"') && html.includes("155 KB"), html);
+  assert.ok(html.includes('data-steps-timeline="true"') && html.includes('data-step-status="done"') && html.includes('data-step-status="warn"'), html);
+  // Unenabled html-card degrades to plain code block (zero iframe / zero script execution).
+  assert.equal(html.includes("<iframe"), false, "html-card must not execute inside chat messages");
+});
