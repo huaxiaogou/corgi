@@ -99,6 +99,8 @@ func snapshotAppliedFields(st model.Settings, keys []string) map[string]any {
 			out[k] = st.WorkerMaxLivePerMachine
 		case "reply_chars":
 			out[k] = st.ReplyChars
+		case "router_context_budget_tokens":
+			out[k] = st.EffectiveRouterContextBudgetTokens()
 		case "morning_digest":
 			out[k] = st.MorningDigestEnabled()
 		case "dream_at":

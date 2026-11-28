@@ -190,6 +190,7 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 			rv.Status = "asleep"
 		}
 	}
+	rv.Context = e.RouterContextSummary(ctx, thread)
 
 	var follow *model.FollowView
 	if timers, err := e.store.ListTimers(ctx); err == nil {

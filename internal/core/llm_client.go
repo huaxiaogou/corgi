@@ -313,6 +313,7 @@ func (e *Engine) SetRouterAPIKey(ctx context.Context, provider, baseURL, apiKey 
 	e.router.resetFailuresLocked(true)
 	e.mu.Unlock()
 	e.wake()
+	e.wakeRouter()
 	e.notifyChanged()
 	return e.RouterAPISecretInfo(ctx), nil
 }

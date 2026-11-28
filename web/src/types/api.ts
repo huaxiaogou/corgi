@@ -168,6 +168,56 @@ export interface MediaRef {
   size?: number;
 }
 
+export interface RouterContextView {
+  epoch: number;
+  active_turns: number;
+  est_tokens: number;
+  last_prompt_tokens?: number;
+  last_cached_tokens?: number;
+  budget_tokens: number;
+  compaction_count?: number;
+  compacting?: boolean;
+}
+
+export interface RouterContextGroup {
+  work_item_id: string;
+  title: string;
+  closed?: boolean;
+  turn_count: number;
+  est_tokens: number;
+}
+
+export interface RouterContextTurnPreview {
+  id: string;
+  seq: number;
+  kind: "turn" | "summary" | string;
+  source?: string;
+  work_item_id?: string;
+  work_item_ids?: string[];
+  work_item_title?: string;
+  user_preview: string;
+  assistant_preview: string;
+  est_tokens: number;
+  created_at: string;
+}
+
+export interface RouterContextInspect {
+  thread: string;
+  summary: RouterContextView;
+  groups: RouterContextGroup[];
+  turns: RouterContextTurnPreview[];
+}
+
+export interface RouterContextPruneResult {
+  ok: boolean;
+  mode: string;
+  dropped_turns?: number;
+  freed_est_tokens?: number;
+  compacting?: boolean;
+  message: string;
+  summary: RouterContextView;
+}
+
 export interface RouterView {
   alive: boolean;
   status: string;
@@ -176,6 +226,7 @@ export interface RouterView {
   effort?: string;
   dreaming?: boolean;
   replied?: boolean;
+  context?: RouterContextView;
 }
 
 export interface FollowView {
@@ -362,6 +413,7 @@ export interface Settings {
   router_api_base_url?: string;
   router_api_model?: string;
   router_api_effort?: string;
+  router_context_budget_tokens?: number;
   worker_kind: string;
   worker_model?: string;
   worker_effort?: string;

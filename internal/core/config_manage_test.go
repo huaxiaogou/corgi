@@ -291,10 +291,10 @@ func TestManageConfigStage1AStrategy1AAndRedaction(t *testing.T) {
 		t.Fatalf("expected same-turn dispatch_work after upsert_project to succeed, got %s", dispOut)
 	}
 
-	// Tool defs count is now 9 in strict alphabetical order.
+	// Tool defs count is now 10 in strict alphabetical order (including manage_context).
 	defs := apiRouterToolDefs()
-	if len(defs) != 9 {
-		t.Fatalf("expected 9 native router tools, got %d", len(defs))
+	if len(defs) != 10 {
+		t.Fatalf("expected 10 native router tools, got %d", len(defs))
 	}
 	for i := 1; i < len(defs); i++ {
 		if defs[i-1].Function.Name >= defs[i].Function.Name {

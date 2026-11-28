@@ -255,15 +255,90 @@ type EndedSession struct {
 	EndedAt             time.Time `json:"ended_at"`
 }
 
+// RouterContextView summarizes the active Append-Only context budget and KV Cache metrics for one thread.
+type RouterContextView struct {
+	Epoch            int  `json:"epoch"`
+	ActiveTurns      int  `json:"active_turns"`
+	EstTokens        int  `json:"est_tokens"`
+	LastPromptTokens int  `json:"last_prompt_tokens,omitempty"`
+	LastCachedTokens int  `json:"last_cached_tokens,omitempty"`
+	BudgetTokens     int  `json:"budget_tokens"`
+	CompactionCount  int  `json:"compaction_count,omitempty"`
+	Compacting       bool `json:"compacting,omitempty"`
+}
+
+// RouterContextTurn is one frozen Append-Only conversation turn (or epoch summary) in Brain working context.
+type RouterContextTurn struct {
+	ID            string    `json:"id"`
+	Seq           int64     `json:"seq"`
+	Thread        string    `json:"thread"`
+	Epoch         int       `json:"epoch"`
+	Kind          string    `json:"kind"` // turn | summary
+	TriggerID     string    `json:"trigger_id,omitempty"`
+	Source        string    `json:"source,omitempty"`
+	WorkItemID    string    `json:"work_item_id,omitempty"`
+	WorkItemIDs   []string  `json:"work_item_ids,omitempty"`
+	UserText      string    `json:"user_text"`
+	AssistantText string    `json:"assistant_text"`
+	EstTokens     int       `json:"est_tokens"`
+	Dropped       bool      `json:"dropped,omitempty"`
+	DropReason    string    `json:"drop_reason,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// RouterContextGroup aggregates active working-context turns belonging to one WorkItem (or ungrouped).
+type RouterContextGroup struct {
+	WorkItemID string `json:"work_item_id"` // "" for ungrouped turns
+	Title      string `json:"title"`
+	Closed     bool   `json:"closed,omitempty"`
+	TurnCount  int    `json:"turn_count"`
+	EstTokens  int    `json:"est_tokens"`
+}
+
+// RouterContextTurnPreview is the UI/tool-friendly summary of one active working-context turn.
+type RouterContextTurnPreview struct {
+	ID               string    `json:"id"`
+	Seq              int64     `json:"seq"`
+	Kind             string    `json:"kind"`
+	Source           string    `json:"source,omitempty"`
+	WorkItemID       string    `json:"work_item_id,omitempty"`
+	WorkItemIDs      []string  `json:"work_item_ids,omitempty"`
+	WorkItemTitle    string    `json:"work_item_title,omitempty"`
+	UserPreview      string    `json:"user_preview"`
+	AssistantPreview string    `json:"assistant_preview"`
+	EstTokens        int       `json:"est_tokens"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+// RouterContextInspect is returned by GET /api/super/context and manage_context(inspect).
+type RouterContextInspect struct {
+	Thread  string                     `json:"thread"`
+	Summary RouterContextView          `json:"summary"`
+	Groups  []RouterContextGroup       `json:"groups"`
+	Turns   []RouterContextTurnPreview `json:"turns"`
+}
+
+// RouterContextPruneResult reports the effect of a context prune/compact/clear action.
+type RouterContextPruneResult struct {
+	OK             bool              `json:"ok"`
+	Mode           string            `json:"mode"`
+	DroppedTurns   int               `json:"dropped_turns,omitempty"`
+	FreedEstTokens int               `json:"freed_est_tokens,omitempty"`
+	Compacting     bool              `json:"compacting,omitempty"`
+	Message        string            `json:"message"`
+	Summary        RouterContextView `json:"summary"`
+}
+
 // RouterView summarizes the live state of Corgi's native in-process API Router.
 type RouterView struct {
-	Alive    bool   `json:"alive"`
-	Status   string `json:"status"`
-	Kind     string `json:"kind"`
-	Model    string `json:"model,omitempty"`
-	Effort   string `json:"effort,omitempty"`
-	Dreaming bool   `json:"dreaming,omitempty"`
-	Replied  bool   `json:"replied,omitempty"`
+	Alive    bool               `json:"alive"`
+	Status   string             `json:"status"`
+	Kind     string             `json:"kind"`
+	Model    string             `json:"model,omitempty"`
+	Effort   string             `json:"effort,omitempty"`
+	Dreaming bool               `json:"dreaming,omitempty"`
+	Replied  bool               `json:"replied,omitempty"`
+	Context  *RouterContextView `json:"context,omitempty"`
 }
 
 // FollowView summarizes the next upcoming self-wakeup timer for the UI header.

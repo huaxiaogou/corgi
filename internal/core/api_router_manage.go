@@ -84,6 +84,17 @@ func (e *Engine) toolManageWork(ctx context.Context, turn *apiRouterTurn, trig *
 		turn.markMutated("已关闭工作项 " + wi.ID)
 		e.ackAPITriggerOnce(context.Background(), turn, trig)
 		return toolJSON(map[string]any{"ok": true, "work_item": wi})
+	case "reopen_work":
+		if _, errMsg := e.requireThreadWorkItem(ctx, target, turn.thread); errMsg != "" {
+			return toolErr(errMsg)
+		}
+		wi, err := e.ReopenWorkItem(ctx, target)
+		if err != nil {
+			return toolErr(err.Error())
+		}
+		turn.markMutated("已重开工作项 " + wi.ID)
+		e.ackAPITriggerOnce(context.Background(), turn, trig)
+		return toolJSON(map[string]any{"ok": true, "work_item": wi})
 	case "stop_worker":
 		if _, errMsg := e.requireThreadWorker(ctx, target, turn.thread); errMsg != "" {
 			return toolErr(errMsg)
@@ -200,7 +211,7 @@ func (e *Engine) pushToolProgress(ctx, bg context.Context, turn *apiRouterTurn, 
 func (e *Engine) formatAPIToolProgress(ctx context.Context, thread string, tc LLMToolCall) string {
 	staticLabels := map[string]string{
 		"reply_user": "正在整理回复…", "no_action": "正在完成核对…", "manage_config": "正在处理配置…",
-		"manage_timer": "正在更新定时提醒…", "save_memory": "正在更新记忆笔记…",
+		"manage_context": "正在整理对话上下文…", "manage_timer": "正在更新定时提醒…", "save_memory": "正在更新记忆笔记…",
 	}
 	if label, ok := staticLabels[tc.Function.Name]; ok {
 		return label

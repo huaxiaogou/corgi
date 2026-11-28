@@ -223,6 +223,8 @@ func (s *Server) registerSuperRoutes(mux *http.ServeMux, api func(string, http.H
 	api("POST /api/super/router/stop", s.handleStopRouter)
 	api("POST /api/super/router/api-key", s.handleSetRouterAPIKey)
 	api("POST /api/super/router/test-api", s.handleTestRouterAPI)
+	api("GET /api/super/context", s.handleGetRouterContext)
+	api("POST /api/super/context/prune", s.handlePruneRouterContext)
 	api("POST /api/super/queue/{qid}/steer", s.handleSteerChatQueue)
 	api("POST /api/super/queue/{qid}/cancel", s.handleCancelChatQueue)
 	api("POST /api/super/queue/resume", s.handleResumeChatQueue)

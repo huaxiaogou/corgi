@@ -19,6 +19,7 @@ func (e *Engine) Run(ctx context.Context) {
 	e.mu.Unlock()
 	e.reconcileAPIRouterInflight(ctx)
 	e.EmitPendingAutoUpdateNotice(ctx)
+	go e.runAPIRouterLoop(ctx)
 	tick := time.NewTicker(1500 * time.Millisecond)
 	defer tick.Stop()
 	defer e.llm.CloseIdleConnections()
@@ -210,6 +211,7 @@ func (e *Engine) RestartRouter(ctx context.Context) error {
 	e.router.resetFailuresLocked(false)
 	e.mu.Unlock()
 	e.wake()
+	e.wakeRouter()
 	e.notifyChanged()
 	return nil
 }

@@ -295,6 +295,19 @@ func (b *Bus) HandleWeComMessage(ctx context.Context, msg wecom.IncomingMessage)
 		QuoteText: msg.QuoteText,
 		Media:     mediaRefs,
 		IdemKey:   "wecom:" + msg.MsgID,
+		OnCommitted: func(committedEntry *model.Entry, committedTrig *model.Trigger) {
+			if st == nil {
+				return
+			}
+			entryID, trigID := "", ""
+			if committedEntry != nil {
+				entryID = committedEntry.ID
+			}
+			if committedTrig != nil {
+				trigID = committedTrig.ID
+			}
+			st.setRefIDs(entryID, trigID)
+		},
 	})
 	if err != nil {
 		b.logger.Warn("ingest wecom message failed", "msgid", msg.MsgID, "err", err)
@@ -304,7 +317,7 @@ func (b *Bus) HandleWeComMessage(ctx context.Context, msg wecom.IncomingMessage)
 		}
 		return
 	}
-	if st != nil {
+	if st != nil && st.getTriggerID() == "" {
 		entryID, trigID := "", ""
 		if en != nil {
 			entryID = en.ID

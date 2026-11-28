@@ -18,8 +18,8 @@ const (
 	apiRouterInflightKVKey             = "api_router_inflight"
 	apiRouterTurnDeadline              = 420 * time.Second
 	apiRouterStepDeadline              = 210 * time.Second
-	maxAPIRouterSteps                  = 8
-	maxAPIRouterToolCalls              = 12
+	maxAPIRouterSteps                  = 10
+	maxAPIRouterToolCalls              = 16
 	maxAPIRouterBareTextRetries        = 2
 	maxAPIToolOutputRunes              = 4000
 	maxSameAPITriggerFails             = 3
@@ -38,6 +38,7 @@ type routerState struct {
 	failCount, sameTriggerFails              int
 	lastFailTriggerID, lastErr, pendingAckID string
 	authPaused                               bool
+	compacting                               map[string]bool
 }
 
 func (s *routerState) resetFailuresLocked(bumpEpoch bool) {
@@ -55,6 +56,9 @@ type apiRouterTurn struct {
 	flags             atomic.Uint32
 	mu                sync.Mutex
 	summaryOps        []string
+	replyText         string
+	toolTraces        []string
+	workItemIDs       []string
 }
 
 func (t *apiRouterTurn) hasFlag(bit uint32) bool { return t.flags.Load()&bit != 0 }
@@ -70,6 +74,52 @@ func (t *apiRouterTurn) opsText() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return orStr(strings.Join(t.summaryOps, "；"), "已执行变更")
+}
+func (t *apiRouterTurn) addWorkItemIDs(ids ...string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id != "" && !slices.Contains(t.workItemIDs, id) {
+			t.workItemIDs = append(t.workItemIDs, id)
+		}
+	}
+}
+func (t *apiRouterTurn) recordToolTrace(line string, workIDs ...string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if line = strings.TrimSpace(line); line != "" {
+		t.toolTraces = append(t.toolTraces, line)
+	}
+	for _, raw := range workIDs {
+		id := strings.TrimSpace(raw)
+		if id != "" && !slices.Contains(t.workItemIDs, id) {
+			t.workItemIDs = append(t.workItemIDs, id)
+		}
+	}
+}
+func (t *apiRouterTurn) recordReply(text string, workID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if s := strings.TrimSpace(text); s != "" {
+		t.replyText = s
+	}
+	if id := strings.TrimSpace(workID); id != "" && !slices.Contains(t.workItemIDs, id) {
+		t.workItemIDs = append(t.workItemIDs, id)
+	}
+}
+func (t *apiRouterTurn) contextSnapshot() (traces []string, replyText, ops string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	traces = append([]string(nil), t.toolTraces...)
+	replyText = t.replyText
+	ops = strings.Join(t.summaryOps, "；")
+	return traces, replyText, ops
+}
+func (t *apiRouterTurn) recordedWorkItemIDs() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.workItemIDs...)
 }
 
 type apiRouterInflight struct {
@@ -189,9 +239,13 @@ func (e *Engine) deliverAPIRouter(ctx context.Context, list []*model.Trigger) {
 		e.mu.Unlock()
 		return
 	}
-	slices.SortFunc(list, func(a, b *model.Trigger) int { return int(a.Seq - b.Seq) })
-	trig := *list[0]
-	trig.Targets, trig.Media = append([]string(nil), list[0].Targets...), append([]model.MediaRef(nil), list[0].Media...)
+	picked := selectNextAPIRouterTrigger(list)
+	if picked == nil {
+		e.mu.Unlock()
+		return
+	}
+	trig := *picked
+	trig.Targets, trig.Media = append([]string(nil), picked.Targets...), append([]model.MediaRef(nil), picked.Media...)
 	rootCtx := e.runCtx
 	if rootCtx == nil {
 		rootCtx = context.Background()
@@ -243,6 +297,7 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		}
 		e.notifyChanged()
 		e.wake()
+		e.wakeRouter()
 	}()
 	if e.store != nil {
 		fresh, err := e.store.GetTrigger(ctx, trig.ID)
@@ -258,51 +313,68 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		return
 	}
 	turnMeta, allowSilent := e.resolveTurnConsentMeta(ctx, trig), canAPIRouterSilence(trig)
-	messages, tools := e.buildAPIRouterMessages(ctx, trig, turnMeta), apiRouterToolDefs()
+	epoch, messages, peekedBgNotes := e.buildThreadContextMessages(ctx, turn.thread, trig, turnMeta)
+	tools := apiRouterToolDefs()
 	var progress []string
-	res := e.runLLMToolLoop(ctx, llmToolLoopConfig{
-		ClientCfg:          cfg,
-		Model:              modelName,
-		Effort:             effort,
-		CacheKey:           cacheKey,
-		Tools:              tools,
-		Messages:           messages,
-		MaxSteps:           maxAPIRouterSteps,
-		MaxToolCalls:       maxAPIRouterToolCalls,
-		MaxToolOutputRunes: maxAPIToolOutputRunes,
-		StepDeadline:       apiRouterStepDeadline,
-		LogLabel:           "api router step",
-		LogIDKey:           "trigger",
-		LogIDVal:           trig.ID,
-		MaxBareTextRetries: maxAPIRouterBareTextRetries,
-		BareTextForceTools: true,
-		BareTextNudge: func(int) string {
-			if turn.hasFlag(turnFlagReplied) {
-				return ""
-			}
-			return condStr(allowSilent,
-				"[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。需通知用户请调用 reply_user，否则调用 no_action(reason)。",
-				"[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。本轮必须调用工具，回复请走 reply_user。")
-		},
-		FinalStepNudge: func() (string, bool) {
-			if turn.hasFlag(turnFlagReplied) {
-				return "", false
-			}
-			return condStr(allowSilent,
-				"[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 汇报结论，或调用 no_action(reason) 静默结束。",
-				"[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 向用户给出明确答复，勿再继续拉取详情。"), true
-		},
-		IsClosingTool:         func(name string) bool { return name == "reply_user" || name == "no_action" },
-		BlockClosingOnStepErr: true,
-		ToolBudgetErrMsg: condStr(allowSilent,
-			"本轮工具调用次数已达上限（12次），请立刻用 reply_user 汇总结论，或调用 no_action 静默结束。",
-			"本轮工具调用次数已达上限（12次），请立刻用 reply_user 汇总结论。"),
-		StepErrClosingMsg: "同一步前置工具执行失败，请先查看报错并处理后再决定回复或结束。",
-		ExecTool: func(_ int, tc LLMToolCall) (string, bool) {
-			e.pushToolProgress(ctx, bg, turn, tc, &progress)
-			return e.execAPIRouterTool(ctx, turn, trig, turnMeta, tc)
-		},
-	})
+	runLoop := func(curEpoch int, curMsgs []LLMMessage) llmToolLoopResult {
+		return e.runLLMToolLoop(ctx, llmToolLoopConfig{
+			ClientCfg:          cfg,
+			Model:              modelName,
+			Effort:             effort,
+			CacheKey:           fmt.Sprintf("%s:%s:e%d", cacheKey, turn.thread, curEpoch),
+			Tools:              tools,
+			Messages:           curMsgs,
+			MaxSteps:           maxAPIRouterSteps,
+			MaxToolCalls:       maxAPIRouterToolCalls,
+			MaxToolOutputRunes: maxAPIToolOutputRunes,
+			StepDeadline:       apiRouterStepDeadline,
+			MaxStepRetries: func(step int) int {
+				if step > 0 && turn.hasFlag(turnFlagMutated) {
+					return 2
+				}
+				return 0
+			},
+			LogLabel:           "api router step",
+			LogIDKey:           "trigger",
+			LogIDVal:           trig.ID,
+			MaxBareTextRetries: maxAPIRouterBareTextRetries,
+			BareTextForceTools: true,
+			BareTextNudge: func(int) string {
+				if turn.hasFlag(turnFlagReplied) {
+					return ""
+				}
+				return condStr(allowSilent,
+					"[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。需通知用户请调用 reply_user，否则调用 no_action(reason)。",
+					"[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。本轮必须调用工具，回复请走 reply_user。")
+			},
+			FinalStepNudge: func() (string, bool) {
+				if turn.hasFlag(turnFlagReplied) {
+					return "", false
+				}
+				return condStr(allowSilent,
+					"[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 汇报结论，或调用 no_action(reason) 静默结束。",
+					"[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 向用户给出明确答复，勿再继续拉取详情。"), true
+			},
+			IsClosingTool:         func(name string) bool { return name == "reply_user" || name == "no_action" },
+			BlockClosingOnStepErr: true,
+			ToolBudgetErrMsg: condStr(allowSilent,
+				fmt.Sprintf("本轮工具调用次数已达上限（%d次），请立刻用 reply_user 汇总结论，或调用 no_action 静默结束。", maxAPIRouterToolCalls),
+				fmt.Sprintf("本轮工具调用次数已达上限（%d次），请立刻用 reply_user 汇总结论。", maxAPIRouterToolCalls)),
+			StepErrClosingMsg: "同一步前置工具执行失败，请先查看报错并处理后再决定回复或结束。",
+			ExecTool: func(_ int, tc LLMToolCall) (string, bool) {
+				e.pushToolProgress(ctx, bg, turn, tc, &progress)
+				return e.execAPIRouterTool(ctx, turn, trig, turnMeta, tc)
+			},
+		})
+	}
+	res := runLoop(epoch, messages)
+	if res.Err != nil && !turn.hasFlag(turnFlagMutated) && !turn.hasFlag(turnFlagStopped) && isContextOverflowError(res.Err) {
+		e.logger.Warn("api router hit context overflow; attempting automatic recovery", "trigger", trig.ID, "thread", turn.thread, "err", res.Err)
+		if e.tryRecoverContextOverflow(ctx, turn.thread, cfg, modelName, effort) {
+			epoch, messages, peekedBgNotes = e.buildThreadContextMessages(ctx, turn.thread, trig, turnMeta)
+			res = runLoop(epoch, messages)
+		}
+	}
 	if res.Err != nil {
 		if turn.hasFlag(turnFlagStopped) {
 			e.ackAPITriggerOnce(bg, turn, trig)
@@ -319,6 +391,12 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		sealReason = "error"
 	}
 	e.ackAPITriggerOnce(bg, turn, trig)
+	if peekedBgNotes > 0 && !turn.hasFlag(turnFlagNoAction) && !turn.hasFlag(turnFlagStopped) && sealReason != "error" {
+		e.commitDirectBgNotes(peekedBgNotes)
+	}
+	if sealReason != "error" {
+		e.recordCompletedRouterTurn(bg, turn, trig, turnMeta, epoch, res.LastUsage, cfg, modelName, effort)
+	}
 	switch {
 	case turn.hasFlag(turnFlagReplied):
 		sealReason = ""
@@ -369,6 +447,7 @@ func (e *Engine) handleAPIRouterFailure(ctx context.Context, turn *apiRouterTurn
 	backoff := min(5*time.Second<<min(fails-1, 5), 2*time.Minute)
 	e.router.failCount, e.router.backoffUntil, e.router.lastErr = fails, time.Now().Add(backoff), msg
 	e.mu.Unlock()
+	e.wakeRouter()
 	if fails == 1 || fails == 3 {
 		e.addEvent(ctx, turn.thread, fmt.Sprintf("原生 API 大脑暂不可用（%s 后自动重试）：%s", backoff.Round(time.Second), oneLineClip(msg, 120)), trig.ID, "error")
 	}

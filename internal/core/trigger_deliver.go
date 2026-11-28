@@ -46,7 +46,11 @@ func (e *Engine) deliverQueuedWithFleet(ctx context.Context, live map[string]liv
 
 	for target, list := range batches {
 		if target == model.RouterName {
-			e.deliverAPIRouter(ctx, list)
+			if e.backgroundRunCtx() != nil {
+				e.wakeRouter()
+			} else {
+				e.deliverAPIRouter(ctx, list)
+			}
 			continue
 		}
 		if !fleetOK {
@@ -179,6 +183,9 @@ func (e *Engine) rerouteDeadWorkerTriggers(ctx context.Context, target string, l
 	}
 	for _, t := range list {
 		_ = e.store.RerouteTriggerTarget(ctx, t.ID, target, model.RouterName)
+	}
+	if len(list) > 0 {
+		e.wakeRouter()
 	}
 }
 

@@ -99,6 +99,7 @@ func (e *Engine) normalizeSettingsForSave(prev, ns model.Settings, preserveRoute
 	if ns.ReplyChars <= 0 {
 		ns.ReplyChars = model.DefaultReplyChars
 	}
+	ns.RouterContextBudgetTokens = ns.EffectiveRouterContextBudgetTokens()
 	if ns.StallMinutes <= 0 {
 		ns.StallMinutes = 12
 	}
@@ -301,8 +302,9 @@ func (e *Engine) commitConfigUnlocked(ctx context.Context, st *model.Settings, p
 	if writeEvent && summary != "" {
 		e.addEvent(ctx, model.MainThread, "配置已更新："+oneLineClip(summary, 180), "", "info")
 	}
-	if apiChanged {
+	if apiChanged || (st != nil && !nextSt.Paused) {
 		e.wake()
+		e.wakeRouter()
 	}
 	sink.OnStateChanged()
 	return CloneSettings(nextSt), ClonePolicies(nextPols), nil

@@ -83,6 +83,7 @@ type (
 			Role             string        `json:"role"`
 			Content          string        `json:"content"`
 			ReasoningContent string        `json:"reasoning_content,omitempty"`
+			Reasoning        string        `json:"reasoning,omitempty"`
 			ToolCalls        []LLMToolCall `json:"tool_calls,omitempty"`
 		} `json:"message"`
 	}
@@ -214,6 +215,11 @@ func doChatCompletionAttempt(
 	if len(parsed.Choices) == 0 {
 		return nil, false, fmt.Errorf("llm returned empty choices")
 	}
+	for i := range parsed.Choices {
+		if parsed.Choices[i].Message.ReasoningContent == "" && parsed.Choices[i].Message.Reasoning != "" {
+			parsed.Choices[i].Message.ReasoningContent = parsed.Choices[i].Message.Reasoning
+		}
+	}
 	return &parsed, false, nil
 }
 
@@ -291,7 +297,7 @@ func parseLLMStreamResponse(body io.Reader, apiKey string, start time.Time, onAc
 					}
 					finishReason = orStr(ch.FinishReason, finishReason)
 					contentBuf.WriteString(ch.Delta.Content)
-					reasoningBuf.WriteString(ch.Delta.ReasoningContent)
+					reasoningBuf.WriteString(orStr(ch.Delta.ReasoningContent, ch.Delta.Reasoning))
 					for _, dtc := range ch.Delta.ToolCalls {
 						idx := lastIdx
 						if dtc.Index != nil {

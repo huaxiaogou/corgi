@@ -38,23 +38,24 @@ func ExtractQuoteWorkerTag(quotedText string) string {
 
 // SayRequest represents an incoming human message from Web, WeCom, or CLI.
 type SayRequest struct {
-	Thread        string           `json:"thread"`
-	Channel       string           `json:"channel"` // web | wecom | cli
-	From          string           `json:"from"`
-	Text          string           `json:"text"`
-	ReEntryID     string           `json:"re"`
-	InPlace       bool             `json:"in_place,omitempty"`
-	ActionID      string           `json:"action_id,omitempty"`
-	PromptContext string           `json:"-"`
-	QuoteText     string           `json:"quote_text,omitempty"`
-	Machine       string           `json:"machine,omitempty"`
-	Kind          string           `json:"kind,omitempty"`
-	Model         string           `json:"model,omitempty"`
-	Effort        string           `json:"effort,omitempty"`
-	ProjectID     string           `json:"project_id,omitempty"`
-	Media         []model.MediaRef `json:"media,omitempty"`
-	IdemKey       string           `json:"idem_key,omitempty"`
-	ClientMsgID   string           `json:"client_msg_id,omitempty"`
+	Thread        string                             `json:"thread"`
+	Channel       string                             `json:"channel"` // web | wecom | cli
+	From          string                             `json:"from"`
+	Text          string                             `json:"text"`
+	ReEntryID     string                             `json:"re"`
+	InPlace       bool                               `json:"in_place,omitempty"`
+	ActionID      string                             `json:"action_id,omitempty"`
+	PromptContext string                             `json:"-"`
+	QuoteText     string                             `json:"quote_text,omitempty"`
+	Machine       string                             `json:"machine,omitempty"`
+	Kind          string                             `json:"kind,omitempty"`
+	Model         string                             `json:"model,omitempty"`
+	Effort        string                             `json:"effort,omitempty"`
+	ProjectID     string                             `json:"project_id,omitempty"`
+	Media         []model.MediaRef                   `json:"media,omitempty"`
+	IdemKey       string                             `json:"idem_key,omitempty"`
+	ClientMsgID   string                             `json:"client_msg_id,omitempty"`
+	OnCommitted   func(*model.Entry, *model.Trigger) `json:"-"`
 }
 
 // Say ingests a human message from Web, WeCom, or CLI.
@@ -190,6 +191,9 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 	if dup {
 		return savedEntry, savedTrig, nil
 	}
+	if req.OnCommitted != nil {
+		req.OnCommitted(savedEntry, savedTrig)
+	}
 
 	if strings.TrimSpace(req.ActionID) == "" {
 		e.autoResolvePendingOnUserReply(ctx, thread, req.ReEntryID, req.QuoteText, channel, text)
@@ -200,6 +204,9 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 	e.mu.Unlock()
 	sink.OnUserMessage(ctx, savedEntry)
 	sink.OnStateChanged()
+	if savedTrig != nil && savedTrig.Status == "queued" && (len(savedTrig.Targets) == 0 || slices.Contains(savedTrig.Targets, model.RouterName)) {
+		e.wakeRouter()
+	}
 	return savedEntry, savedTrig, nil
 }
 

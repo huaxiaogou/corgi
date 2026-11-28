@@ -134,6 +134,7 @@ func isManagedL1SettingKey(k string) bool {
 		"kind_defaults", "machine_kind_overrides",
 		"active_hours", "idle_patrol_minutes", "stall_minutes", "stale_archive_days",
 		"worker_idle_gc_minutes", "worker_max_live_per_machine", "reply_chars",
+		"router_context_budget_tokens",
 		"morning_digest", "dream_at", "notify_level", "ask_permissions":
 		return true
 	default:
@@ -343,6 +344,12 @@ func (e *Engine) applyOneManagedSetting(ctx context.Context, st *model.Settings,
 			return fmt.Errorf("reply_chars 必须为 40–4000")
 		}
 		st.ReplyChars = v
+	case "router_context_budget_tokens":
+		var v int
+		if err := decodeStrictJSON(raw, &v); err != nil || v < model.MinRouterContextBudgetTokens || v > model.MaxRouterContextBudgetTokens {
+			return fmt.Errorf("router_context_budget_tokens 必须为 %d–%d", model.MinRouterContextBudgetTokens, model.MaxRouterContextBudgetTokens)
+		}
+		st.RouterContextBudgetTokens = v
 	case "morning_digest":
 		var v bool
 		if err := decodeStrictJSON(raw, &v); err != nil {

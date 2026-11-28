@@ -92,6 +92,7 @@ func (e *Engine) runAPIDream(d *dreamRun) {
 		MaxSteps:              maxAPIDreamSteps,
 		MaxToolCalls:          maxAPIDreamToolCalls,
 		MaxToolOutputRunes:    maxAPIDreamToolOutputRunes,
+		MaxStepRetries:        func(int) int { return 1 },
 		LogLabel:              "api dream step",
 		LogIDKey:              "id",
 		LogIDVal:              d.id,

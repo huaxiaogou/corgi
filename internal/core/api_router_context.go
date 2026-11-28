@@ -29,7 +29,7 @@ const (
 4. 防越权边界：人类回合直接明确提出改代码并跑测试的新需求可直接 dispatch_work(mode="implement")（强制隔离 worktree）；指向已有原型/只读工作项时保持 prototype/readonly，转入源码修改（implement）必须先调用 reply_user 发含 choices 的决策卡并待人类点选拍板；后台非人类事件严禁改代码、发布、续派或追加指令，只能新派 readonly Worker 或发决策卡；合入/推送/部署上线必须先调用 reply_user 发含 choices 的决策卡，待人类点选拍板后在拍板回合开启 allow_release=true。
 5. 静默边界：response_mode=must_reply 必须调用 reply_user；仅 response_mode=optional_notify 且无需打扰用户时调用 no_action(reason)。
 6. 真实性约束：严禁编造路径或执行结果；未收到工具 ok:true 前严禁声称已完成操作；向用户回复必须调用 reply_user（禁止直接输出裸文本）。
-7. 配置管理边界：查看或修改项目工作区、派发默认项或巡检配置请调用 manage_config（仅限主线程；写操作仅限人类回合；高危删除或放宽权限自动发确认卡；严禁修改大脑 API 与企微凭据）。
+7. 配置与上下文管理边界：查看或修改项目工作区、派发默认项或巡检配置请调用 manage_config（仅限主线程；写操作仅限人类回合；高危删除或放宽权限自动发确认卡；严禁修改大脑 API 与企微凭据）。查看、按事项/轮次抛弃、压缩或清空当前工作上下文请调用 manage_context（仅修改大脑工作上下文，不影响聊天记录与长期记忆；写操作仅限人类回合）。
 8. 轻富文本表达：常规简短回复保持纯文本或列表；对比方案/进度汇报/关键指标可克制使用 Markdown 表格、Callout（> [!NOTE|WARNING]）及 metrics/steps 代码块；长文档或复杂交互原型继续由 Worker 产出独立文件交付。`
 )
 
@@ -119,18 +119,8 @@ func (e *Engine) resolveBoundWorkItemID(ctx context.Context, trig *model.Trigger
 
 func (e *Engine) buildAPIRouterMessages(ctx context.Context, trig *model.Trigger, meta *turnConsentMeta) []LLMMessage {
 	thread := orStr(strings.TrimSpace(trig.Thread), model.MainThread)
-	msgs := []LLMMessage{{Role: "system", Content: apiRouterSystemPromptV1}}
-	if memBlock := e.loadBoundedAPIMemory(); memBlock != "" {
-		msgs = append(msgs, LLMMessage{Role: "system", Content: memBlock})
-	}
-	combined := e.buildLiveTailState(ctx, thread, trig, meta)
-	if hist := e.buildThreadHistoryText(ctx, thread, trig); hist != "" {
-		combined = hist + "\n\n" + combined
-	}
-	if imgParts := e.loadTrustedTriggerImages(ctx, trig, meta); len(imgParts) > 0 {
-		return append(msgs, LLMMessage{Role: "user", Content: append([]LLMContentPart{{Type: "text", Text: combined}}, imgParts...)})
-	}
-	return append(msgs, LLMMessage{Role: "user", Content: combined})
+	_, msgs, _ := e.buildThreadContextMessages(ctx, thread, trig, meta)
+	return msgs
 }
 
 func (e *Engine) loadBoundedAPIMemory() string {
@@ -211,6 +201,11 @@ func (e *Engine) buildThreadHistoryText(ctx context.Context, thread string, trig
 }
 
 func (e *Engine) buildLiveTailState(ctx context.Context, thread string, trig *model.Trigger, meta *turnConsentMeta) string {
+	text, _ := e.buildLiveTailStatePeek(ctx, thread, trig, meta)
+	return text
+}
+
+func (e *Engine) buildLiveTailStatePeek(ctx context.Context, thread string, trig *model.Trigger, meta *turnConsentMeta) (string, int) {
 	var b strings.Builder
 	b.WriteString("## 当前实时状态（紧凑卡片，需详情请调用 read_detail）\n")
 	wiByID, openLines := map[string]*model.WorkItem{}, []string{}
@@ -227,10 +222,11 @@ func (e *Engine) buildLiveTailState(ctx context.Context, thread string, trig *mo
 				openLines = append(openLines, "- ... 其余开放事项可按需查询")
 				continue
 			}
+			artIDs := recentWorkArtifactIDs(wi.Artifacts, 3)
 			ln := fmt.Sprintf("- 「%s」(%s · scope=%s)", oneLineClip(wi.Title, 80), wi.ID, orStr(wi.Scope, "unset")) +
 				condStr(wi.NextStep != "", " | 下一步："+oneLineClip(wi.NextStep, 80), "") +
 				condStr(len(wi.Workers) > 0, " | workers="+strings.Join(wi.Workers, ","), "") +
-				condStr(len(wi.Artifacts) > 0, fmt.Sprintf(" | files=%d", len(wi.Artifacts)), "")
+				condStr(len(artIDs) > 0, " | artifacts="+strings.Join(artIDs, ","), condStr(len(wi.Artifacts) > 0, fmt.Sprintf(" | files=%d", len(wi.Artifacts)), ""))
 			openLines = append(openLines, ln)
 		}
 	}
@@ -259,8 +255,9 @@ func (e *Engine) buildLiveTailState(ctx context.Context, thread string, trig *mo
 		}
 		writeSection(&b, "底层执行会话（内部参考，向用户沟通请以所属事项名称为主语）", lines)
 	}
+	peekedBgNotes := 0
 	if thread == model.MainThread {
-		e.appendMainThreadFleetAndProjects(&b)
+		peekedBgNotes = e.appendMainThreadFleetAndProjects(&b)
 	}
 	if meta != nil && (meta.boundWorkItem != nil || meta.approvedAction != nil) {
 		var lines []string
@@ -289,7 +286,22 @@ func (e *Engine) buildLiveTailState(ctx context.Context, thread string, trig *mo
 		fmt.Fprintf(&b, " | 事项名称=「%s」", oneLineClip(wiTitle, 60))
 	}
 	b.WriteString("\n\n" + clipRunes(strings.TrimSpace(trig.Text), 2000, fmt.Sprintf("\n...[内容过长已截断，请调用 read_detail(kind=\"trigger\", target=%q) 查看全文]", trig.ID)))
-	return b.String()
+	return b.String(), peekedBgNotes
+}
+
+func recentWorkArtifactIDs(arts []model.WorkArtifact, maxCount int) []string {
+	if len(arts) == 0 || maxCount <= 0 {
+		return nil
+	}
+	var out []string
+	for i := len(arts) - 1; i >= 0 && len(out) < maxCount; i-- {
+		id := strings.TrimSpace(arts[i].ArtifactID)
+		if id != "" && !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	slices.Reverse(out)
+	return out
 }
 
 func writeSection(b *strings.Builder, heading string, lines []string) {
@@ -309,7 +321,7 @@ func formatWorkItemTag(wiByID map[string]*model.WorkItem, workID string, bracket
 	return condStr(bracket, " [work="+workID+"]", " work="+workID)
 }
 
-func (e *Engine) appendMainThreadFleetAndProjects(b *strings.Builder) {
+func (e *Engine) appendMainThreadFleetAndProjects(b *strings.Builder) int {
 	if e.fleet != nil {
 		if machines := e.fleet.Machines(); len(machines) > 0 {
 			parts := make([]string, len(machines))
@@ -330,13 +342,15 @@ func (e *Engine) appendMainThreadFleetAndProjects(b *strings.Builder) {
 		}
 		writeSection(b, "已配置项目工作区 (projects)", lines)
 	}
-	if notes := e.drainDirectBgNotes(); len(notes) > 0 {
+	if notes := e.peekDirectBgNotes(); len(notes) > 0 {
 		lines := make([]string, len(notes))
 		for i, n := range notes {
 			lines[i] = "- " + oneLineClip(n, 220)
 		}
 		writeSection(b, "后台直聊摘要（已直达用户，仅作上下文，勿重复推送）", lines)
+		return len(notes)
 	}
+	return 0
 }
 
 func (e *Engine) loadTrustedTriggerImages(ctx context.Context, trig *model.Trigger, meta *turnConsentMeta) []LLMContentPart {

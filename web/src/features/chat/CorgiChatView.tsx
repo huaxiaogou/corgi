@@ -576,6 +576,7 @@ export function CorgiChatView({
     <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
       <ChatHeader
         title={headerTitle}
+        thread={thread}
         isWeComGroup={isWeComGroup}
         router={router}
         paused={data?.paused}
@@ -595,6 +596,7 @@ export function CorgiChatView({
           if (!superReady) return;
           void togglePause();
         }}
+        onToast={onToast}
       />
 
       <ChatTopBanners

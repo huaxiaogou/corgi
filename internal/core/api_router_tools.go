@@ -22,7 +22,7 @@ func toolSpec(name, desc string, props map[string]any, req ...string) LLMToolDef
 	return LLMToolDef{Type: "function", Function: LLMToolFunctionSpec{Name: name, Description: desc, Parameters: map[string]any{"type": "object", "properties": props, "required": req}}}
 }
 
-// apiRouterToolDefs returns the 9 deterministic, strictly ordered native Go tool definitions.
+// apiRouterToolDefs returns the 10 deterministic, strictly ordered native Go tool definitions.
 func apiRouterToolDefs() []LLMToolDef {
 	return []LLMToolDef{
 		toolSpec("dispatch_work", "启动新 Coding CLI Worker 或 resume 续聊已有 Worker。非人类回合仅允许新派 readonly。", map[string]any{
@@ -39,14 +39,15 @@ func apiRouterToolDefs() []LLMToolDef {
 			"allow_release": prop("boolean", "仅人类在含 choices 的决策卡上点选批准合入/推送/发版部署时设为 true（仅限决策卡拍板回合 + implement；普通文本消息需先发确认卡）"),
 		}, "mode", "goal"),
 		configRouterToolDef(),
+		manageContextToolDef(),
 		toolSpec("manage_timer", "列出、创建或删除本线程的定时提醒/巡检任务（固定唤醒大脑）。", map[string]any{
 			"action":   propEnum([]string{"list", "add", "remove"}, "操作类型"),
 			"spec":     prop("string", "add 时必填，如 'in 30m', 'daily 09:00', 'every 2h', 'at 2026-11-28 10:00'"),
 			"text":     prop("string", "add 时必填，到点提醒内容"),
 			"timer_id": prop("string", "remove 时必填的 timer ID"),
 		}, "action"),
-		toolSpec("manage_work", "管理工作项（新建/更新/关闭）或控制活跃 Worker（停止/保活）。", map[string]any{
-			"action":    propEnum([]string{"create_work", "update_work", "close_work", "stop_worker", "keep_worker"}, "操作类型"),
+		toolSpec("manage_work", "管理工作项（新建/更新/关闭/重开）或控制活跃 Worker（停止/保活）。", map[string]any{
+			"action":    propEnum([]string{"create_work", "update_work", "close_work", "reopen_work", "stop_worker", "keep_worker"}, "操作类型"),
 			"target":    prop("string", "work_item ID 或 worker 名称"),
 			"title":     prop("string", "工作项标题"),
 			"next_step": prop("string", "下一步说明"),
@@ -132,27 +133,36 @@ func canAPIRouterSilence(t *model.Trigger) bool {
 }
 
 func (e *Engine) execAPIRouterTool(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, meta *turnConsentMeta, tc LLMToolCall) (string, bool) {
+	var (
+		out       string
+		earlyExit bool
+	)
 	switch tc.Function.Name {
 	case "reply_user":
 		return e.toolReplyUser(ctx, turn, trig, tc.Function.Arguments)
 	case "no_action":
 		return e.toolNoAction(ctx, turn, trig, tc.Function.Arguments)
 	case "dispatch_work":
-		return e.toolDispatchWork(ctx, turn, trig, meta, tc.Function.Arguments), false
+		out = e.toolDispatchWork(ctx, turn, trig, meta, tc.Function.Arguments)
 	case "manage_config":
-		return e.toolManageConfig(ctx, turn, trig, meta, tc.Function.Arguments)
+		out, earlyExit = e.toolManageConfig(ctx, turn, trig, meta, tc.Function.Arguments)
+	case "manage_context":
+		out = e.toolManageContext(ctx, turn, meta, tc.Function.Arguments)
 	case "steer_worker":
-		return e.toolSteerWorker(ctx, turn, trig, meta, tc.Function.Arguments), false
+		out = e.toolSteerWorker(ctx, turn, trig, meta, tc.Function.Arguments)
 	case "manage_work":
-		return e.toolManageWork(ctx, turn, trig, tc.Function.Arguments), false
+		out = e.toolManageWork(ctx, turn, trig, tc.Function.Arguments)
 	case "manage_timer":
-		return e.toolManageTimer(ctx, turn, trig, tc.Function.Arguments), false
+		out = e.toolManageTimer(ctx, turn, trig, tc.Function.Arguments)
 	case "read_detail":
-		return e.toolReadDetail(ctx, turn, tc.Function.Arguments), false
+		out = e.toolReadDetail(ctx, turn, tc.Function.Arguments)
 	case "save_memory":
-		return e.toolSaveMemory(ctx, turn, tc.Function.Arguments), false
+		out = e.toolSaveMemory(ctx, turn, tc.Function.Arguments)
+	default:
+		return toolErr("未知工具：" + tc.Function.Name), false
 	}
-	return toolErr("未知工具：" + tc.Function.Name), false
+	e.recordAPIToolTrace(ctx, turn, tc, out)
+	return out, earlyExit
 }
 
 func (e *Engine) toolNoAction(_ context.Context, turn *apiRouterTurn, trig *model.Trigger, rawArgs string) (string, bool) {
@@ -222,6 +232,28 @@ func (e *Engine) toolReplyUser(ctx context.Context, turn *apiRouterTurn, trig *m
 		return toolErr("发送回复失败：" + err.Error()), false
 	}
 	_ = e.recordAPIRouterInflight(context.Background(), trig, "reply_user", res.Entry.ID)
+	replySummary := text
+	if len(args.Choices) >= 2 {
+		replySummary += "\n[附带决策卡选项: " + strings.Join(args.Choices, " / ") + "]"
+	}
+	if res.Entry != nil && len(res.Entry.Artifacts) > 0 {
+		names := make([]string, 0, len(res.Entry.Artifacts))
+		for _, a := range res.Entry.Artifacts {
+			if a.ID != "" {
+				names = append(names, a.Name+"("+a.ID+")")
+			} else if a.Name != "" {
+				names = append(names, a.Name)
+			}
+		}
+		if len(names) > 0 {
+			replySummary += "\n[已交付附件: " + strings.Join(names, ", ") + "]"
+		}
+	}
+	effWorkID := workID
+	if effWorkID == "" && res.Entry != nil {
+		effWorkID = res.Entry.WorkItemID
+	}
+	turn.recordReply(replySummary, effWorkID)
 	turn.markMutated("已回复 " + res.Entry.ID)
 	turn.flags.Or(turnFlagReplied)
 	e.ackAPITriggerOnce(context.Background(), turn, trig)

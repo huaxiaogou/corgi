@@ -25,7 +25,7 @@ var (
 	ErrDuplicateTrigger = errors.New("duplicate trigger")
 )
 
-const currentSchemaVersion = 5
+const currentSchemaVersion = 6
 
 var migrations = []struct {
 	version int
@@ -186,6 +186,39 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_expires ON artifacts(expires_at);
 		version: 5,
 		sql: `
 ALTER TABLE triggers ADD COLUMN dispatch_json TEXT NOT NULL DEFAULT '';
+`,
+	},
+	{
+		version: 6,
+		sql: `
+CREATE TABLE IF NOT EXISTS router_context_state (
+	thread             TEXT PRIMARY KEY,
+	epoch              INTEGER NOT NULL DEFAULT 1,
+	compaction_count   INTEGER NOT NULL DEFAULT 0,
+	last_prompt_tokens INTEGER NOT NULL DEFAULT 0,
+	last_cached_tokens INTEGER NOT NULL DEFAULT 0,
+	total_est_tokens   INTEGER NOT NULL DEFAULT 0,
+	updated_at         INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS router_context_turns (
+	id             TEXT PRIMARY KEY,
+	seq            INTEGER NOT NULL,
+	thread         TEXT NOT NULL,
+	epoch          INTEGER NOT NULL,
+	kind           TEXT NOT NULL,
+	trigger_id     TEXT NOT NULL DEFAULT '',
+	source         TEXT NOT NULL DEFAULT '',
+	work_item_id   TEXT NOT NULL DEFAULT '',
+	work_item_ids  TEXT NOT NULL DEFAULT '[]',
+	user_text      TEXT NOT NULL,
+	assistant_text TEXT NOT NULL,
+	est_tokens     INTEGER NOT NULL DEFAULT 0,
+	dropped        INTEGER NOT NULL DEFAULT 0,
+	drop_reason    TEXT NOT NULL DEFAULT '',
+	created_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rc_turns_active ON router_context_turns(thread, epoch, dropped, seq);
 `,
 	},
 }

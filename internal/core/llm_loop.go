@@ -18,6 +18,8 @@ type llmToolLoopConfig struct {
 	MaxToolCalls       int
 	MaxToolOutputRunes int
 	StepDeadline       time.Duration
+	StepRetryBaseDelay time.Duration
+	MaxStepRetries     func(step int) int
 	LogLabel           string
 	LogIDKey           string
 	LogIDVal           string
@@ -45,7 +47,72 @@ type llmToolLoopResult struct {
 	Exhausted  bool
 	NoToolExit bool
 	FailedStep int
+	LastUsage  LLMUsage
 	Err        error
+}
+
+func isRetryableLLMStepError(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, ErrLLMAuth) || errors.Is(err, ErrLLMBadRequest) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	return true
+}
+
+func (e *Engine) callLLMStepWithRetry(ctx context.Context, cfg llmToolLoopConfig, step int, req LLMChatRequest, toolChoiceOK *bool) (*LLMChatResponse, error) {
+	baseDelay := cfg.StepRetryBaseDelay
+	if baseDelay <= 0 {
+		baseDelay = 1200 * time.Millisecond
+	}
+	maxStepRetries := 0
+	if cfg.MaxStepRetries != nil {
+		maxStepRetries = max(cfg.MaxStepRetries(step), 0)
+	}
+	var lastErr error
+	for attempt := 0; attempt <= maxStepRetries; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		stepCtx := ctx
+		var stepCancel context.CancelFunc
+		if cfg.StepDeadline > 0 {
+			stepCtx, stepCancel = context.WithTimeout(ctx, cfg.StepDeadline)
+		}
+		resp, callErr := e.llm.ChatCompletion(stepCtx, cfg.ClientCfg, req)
+		if callErr != nil && req.ToolChoice != nil && errors.Is(callErr, ErrLLMBadRequest) {
+			*toolChoiceOK, req.ToolChoice = false, nil
+			if e.logger != nil {
+				e.logger.Warn(cfg.LogLabel+" provider rejected tool_choice=required, retrying without tool_choice",
+					cfg.LogIDKey, cfg.LogIDVal, "model", cfg.Model, "err", callErr)
+			}
+			resp, callErr = e.llm.ChatCompletion(stepCtx, cfg.ClientCfg, req)
+		}
+		if stepCancel != nil {
+			stepCancel()
+		}
+		if callErr == nil {
+			return resp, nil
+		}
+		lastErr = callErr
+		if attempt >= maxStepRetries || !isRetryableLLMStepError(ctx, callErr) {
+			return nil, callErr
+		}
+		delay := baseDelay * time.Duration(1<<attempt)
+		if e.logger != nil {
+			e.logger.Warn(cfg.LogLabel+" transient llm error; retrying step",
+				cfg.LogIDKey, cfg.LogIDVal, "attempt", attempt+1, "delay", delay, "err", callErr)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, lastErr
 }
 
 // runLLMToolLoop drives the shared OpenAI-compatible multi-step tool calling loop
@@ -55,6 +122,7 @@ func (e *Engine) runLLMToolLoop(ctx context.Context, cfg llmToolLoopConfig) llmT
 	messages := append([]LLMMessage(nil), cfg.Messages...)
 	totalCalls, bareRetries, nudgeIdx := 0, 0, -1
 	forceTools, toolChoiceOK, exhausted := false, true, false
+	var lastUsage LLMUsage
 	outLimit := cfg.MaxToolOutputRunes
 	if outLimit <= 0 {
 		outLimit = maxAPIToolOutputRunes
@@ -62,7 +130,7 @@ func (e *Engine) runLLMToolLoop(ctx context.Context, cfg llmToolLoopConfig) llmT
 
 	for step := 0; step < cfg.MaxSteps; step++ {
 		if ctx.Err() != nil {
-			return llmToolLoopResult{StepsRun: step, TotalCalls: totalCalls, FailedStep: step, Err: ctx.Err()}
+			return llmToolLoopResult{StepsRun: step, TotalCalls: totalCalls, FailedStep: step, LastUsage: lastUsage, Err: ctx.Err()}
 		}
 		if cfg.OnStepStart != nil {
 			cfg.OnStepStart(step)
@@ -81,25 +149,12 @@ func (e *Engine) runLLMToolLoop(ctx context.Context, cfg llmToolLoopConfig) llmT
 			req.ToolChoice = "required"
 		}
 
-		stepCtx := ctx
-		var stepCancel context.CancelFunc
-		if cfg.StepDeadline > 0 {
-			stepCtx, stepCancel = context.WithTimeout(ctx, cfg.StepDeadline)
-		}
-		resp, callErr := e.llm.ChatCompletion(stepCtx, cfg.ClientCfg, req)
-		if callErr != nil && req.ToolChoice != nil && errors.Is(callErr, ErrLLMBadRequest) {
-			toolChoiceOK, req.ToolChoice = false, nil
-			if e.logger != nil {
-				e.logger.Warn(cfg.LogLabel+" provider rejected tool_choice=required, retrying without tool_choice",
-					cfg.LogIDKey, cfg.LogIDVal, "model", cfg.Model, "err", callErr)
-			}
-			resp, callErr = e.llm.ChatCompletion(stepCtx, cfg.ClientCfg, req)
-		}
-		if stepCancel != nil {
-			stepCancel()
-		}
+		resp, callErr := e.callLLMStepWithRetry(ctx, cfg, step, req, &toolChoiceOK)
 		if callErr != nil {
-			return llmToolLoopResult{StepsRun: step, TotalCalls: totalCalls, FailedStep: step + 1, Err: callErr}
+			return llmToolLoopResult{StepsRun: step, TotalCalls: totalCalls, FailedStep: step + 1, LastUsage: lastUsage, Err: callErr}
+		}
+		if resp.Usage.PromptTokens > 0 || resp.Usage.TotalTokens > 0 {
+			lastUsage = resp.Usage
 		}
 
 		choice := resp.Choices[0].Message
@@ -126,7 +181,7 @@ func (e *Engine) runLLMToolLoop(ctx context.Context, cfg llmToolLoopConfig) llmT
 					continue
 				}
 			}
-			return llmToolLoopResult{StepsRun: step + 1, TotalCalls: totalCalls, NoToolExit: true}
+			return llmToolLoopResult{StepsRun: step + 1, TotalCalls: totalCalls, NoToolExit: true, LastUsage: lastUsage}
 		}
 
 		forceTools, nudgeIdx = false, -1
@@ -173,7 +228,7 @@ func (e *Engine) runLLMToolLoop(ctx context.Context, cfg llmToolLoopConfig) llmT
 			}
 		}
 		if earlyExit {
-			return llmToolLoopResult{StepsRun: step + 1, TotalCalls: totalCalls, EarlyExit: true}
+			return llmToolLoopResult{StepsRun: step + 1, TotalCalls: totalCalls, EarlyExit: true, LastUsage: lastUsage}
 		}
 		if step == cfg.MaxSteps-2 && cfg.FinalStepNudge != nil && ctx.Err() == nil {
 			if msg, force := cfg.FinalStepNudge(); msg != "" {
@@ -184,5 +239,5 @@ func (e *Engine) runLLMToolLoop(ctx context.Context, cfg llmToolLoopConfig) llmT
 		exhausted = step == cfg.MaxSteps-1
 	}
 
-	return llmToolLoopResult{StepsRun: cfg.MaxSteps, TotalCalls: totalCalls, Exhausted: exhausted}
+	return llmToolLoopResult{StepsRun: cfg.MaxSteps, TotalCalls: totalCalls, Exhausted: exhausted, LastUsage: lastUsage}
 }

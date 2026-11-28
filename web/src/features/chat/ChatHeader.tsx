@@ -3,9 +3,11 @@ import { List, MoreHorizontal, Pause, Play, RotateCw, Search } from "lucide-reac
 import { StatusDot } from "../../components/CorgiMark";
 import type { DerivedWorkStatus, NotebookMode } from "../../lib/workItems";
 import type { FollowView, RouterView } from "../../types/api";
+import { ContextManagePopover } from "./ContextManagePopover";
 
 interface Props {
   title: string;
+  thread?: string;
   isWeComGroup: boolean;
   router?: RouterView;
   paused?: boolean;
@@ -19,10 +21,12 @@ interface Props {
   onToggleSearch: () => void;
   onRestartRouter: () => void;
   onTogglePause: () => void;
+  onToast?: (msg: string) => void;
 }
 
 export function ChatHeader({
   title,
+  thread = "chat:main",
   isWeComGroup,
   router,
   paused,
@@ -36,6 +40,7 @@ export function ChatHeader({
   onToggleSearch,
   onRestartRouter,
   onTogglePause,
+  onToast,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -88,6 +93,12 @@ export function ChatHeader({
       </div>
 
       <div className="flex items-center gap-1.5 relative">
+        <ContextManagePopover
+          thread={thread}
+          context={router?.context}
+          disabled={actionsDisabled}
+          onToast={onToast}
+        />
         {onToggleNotebook && (
           <>
             {/* Compact pill on mobile/narrow viewports */}

@@ -277,6 +277,7 @@ func (b *Bus) formatWeComHelp(ctx context.Context, focusKey string) string {
 			"**快捷命令**\n"+
 			"- `/d`：查看所有待拍板事项并唤起拍板卡（`/d <编号>` 唤起指定项）\n"+
 			"- `/w`：弹出事项卡片切换直聊（也支持 `/w 1` 或 `/w 关键词`）\n"+
+			"- `/ctx`：查看大脑上下文占用与缓存命中（`/ctx compact` 压缩 · `/ctx clear` 清空重开）\n"+
 			"- `/back`：返回 Corgi 主对话\n"+
 			"- `/help`：查看当前状态与命令\n\n"+
 			"提示：长按引用带 `↳ 直聊` 标记的消息可单次追问该会话；直聊中长按引用 Corgi 回复可单次问回 Corgi 而不退出当前直聊。",
@@ -295,6 +296,9 @@ func (b *Bus) handleWeComControlOrDirect(ctx context.Context, msg wecom.Incoming
 	// 0. Instant help & current conversation status.
 	if isHelpCommand(text) {
 		b.sendInstantWeComText(ctx, replyChatID, msg.ReqID, b.formatWeComHelp(ctx, focusKey))
+		return true
+	}
+	if b.handleWeComContextCommand(ctx, replyChatID, msg.ReqID, thread, text) {
 		return true
 	}
 

@@ -7,11 +7,14 @@ import (
 )
 
 const (
-	MainThread          = "chat:main"
-	RouterName          = "corgi"
-	DreamName           = "corgi-dream"
-	DefaultReplyChars   = 200
-	PendingActionMaxAge = 7 * 24 * time.Hour
+	MainThread                       = "chat:main"
+	RouterName                       = "corgi"
+	DreamName                        = "corgi-dream"
+	DefaultReplyChars                = 200
+	DefaultRouterContextBudgetTokens = 80000
+	MinRouterContextBudgetTokens     = 16000
+	MaxRouterContextBudgetTokens     = 400000
+	PendingActionMaxAge              = 7 * 24 * time.Hour
 )
 
 // Quote references an earlier message, worker report, or timer that a reply answers.
@@ -396,37 +399,38 @@ type RouterAPISecret struct {
 
 // Settings holds durable Corgi configuration.
 type Settings struct {
-	RouterAPIProvider       string                                `json:"router_api_provider,omitempty"` // tokenhub | openai
-	RouterAPIBaseURL        string                                `json:"router_api_base_url,omitempty"`
-	RouterAPIModel          string                                `json:"router_api_model,omitempty"`
-	RouterAPIEffort         string                                `json:"router_api_effort,omitempty"`
-	WorkerKind              string                                `json:"worker_kind"`
-	WorkerModel             string                                `json:"worker_model,omitempty"`
-	WorkerEffort            string                                `json:"worker_effort,omitempty"`
-	KindDefaults            map[string]ModelEffortSpec            `json:"kind_defaults,omitempty"`
-	MachineKindOverrides    map[string]map[string]ModelEffortSpec `json:"machine_kind_overrides,omitempty"`
-	Projects                []ProjectWorkspace                    `json:"projects,omitempty"`
-	WorkerCwd               string                                `json:"worker_cwd"`
-	WorkerMachine           string                                `json:"worker_machine,omitempty"`
-	ReplyChars              int                                   `json:"reply_chars"`
-	StallMinutes            int                                   `json:"stall_minutes"`
-	IdlePatrolMinutes       int                                   `json:"idle_patrol_minutes,omitempty"`         // 0 = default 30, -1 = off
-	ActiveHours             string                                `json:"active_hours,omitempty"`                // "" = default "09:00-22:30", "24h" = always
-	StaleArchiveDays        int                                   `json:"stale_archive_days,omitempty"`          // 0 = default 3, -1 = off
-	WorkerIdleGCMinutes     int                                   `json:"worker_idle_gc_minutes,omitempty"`      // 0 = default 120, -1 = off (disables all auto worker GC)
-	WorkerMaxLivePerMachine int                                   `json:"worker_max_live_per_machine,omitempty"` // 0 = default 6, -1 = unlimited
-	MorningDigest           *bool                                 `json:"morning_digest,omitempty"`              // nil = default true
-	DreamAt                 string                                `json:"dream_at,omitempty"`                    // "HH:MM", "" = "04:00", "off" = disabled
-	AutoUpdate              bool                                  `json:"auto_update,omitempty"`                 // opt-in overnight idle auto-update (default false)
-	PublicURL               string                                `json:"public_url,omitempty"`                  // optional canonical Hub base URL for outbound preview links
-	NotifyLevel             string                                `json:"notify_level,omitempty"`                // quiet | normal
-	AskPermissions          bool                                  `json:"ask_permissions,omitempty"`
-	Paused                  bool                                  `json:"paused,omitempty"`
-	WeComEnabled            bool                                  `json:"wecom_enabled,omitempty"`
-	WeComBotID              string                                `json:"wecom_bot_id,omitempty"`
-	WeComSecret             string                                `json:"wecom_secret,omitempty"`
-	WeComAllowUsers         []string                              `json:"wecom_allow_users,omitempty"`
-	WeComDefaultTo          string                                `json:"wecom_default_to,omitempty"` // default single-chat userid for proactive push
+	RouterAPIProvider         string                                `json:"router_api_provider,omitempty"` // tokenhub | openai
+	RouterAPIBaseURL          string                                `json:"router_api_base_url,omitempty"`
+	RouterAPIModel            string                                `json:"router_api_model,omitempty"`
+	RouterAPIEffort           string                                `json:"router_api_effort,omitempty"`
+	RouterContextBudgetTokens int                                   `json:"router_context_budget_tokens,omitempty"` // 0 = default 80000, range 16000..400000
+	WorkerKind                string                                `json:"worker_kind"`
+	WorkerModel               string                                `json:"worker_model,omitempty"`
+	WorkerEffort              string                                `json:"worker_effort,omitempty"`
+	KindDefaults              map[string]ModelEffortSpec            `json:"kind_defaults,omitempty"`
+	MachineKindOverrides      map[string]map[string]ModelEffortSpec `json:"machine_kind_overrides,omitempty"`
+	Projects                  []ProjectWorkspace                    `json:"projects,omitempty"`
+	WorkerCwd                 string                                `json:"worker_cwd"`
+	WorkerMachine             string                                `json:"worker_machine,omitempty"`
+	ReplyChars                int                                   `json:"reply_chars"`
+	StallMinutes              int                                   `json:"stall_minutes"`
+	IdlePatrolMinutes         int                                   `json:"idle_patrol_minutes,omitempty"`         // 0 = default 30, -1 = off
+	ActiveHours               string                                `json:"active_hours,omitempty"`                // "" = default "09:00-22:30", "24h" = always
+	StaleArchiveDays          int                                   `json:"stale_archive_days,omitempty"`          // 0 = default 3, -1 = off
+	WorkerIdleGCMinutes       int                                   `json:"worker_idle_gc_minutes,omitempty"`      // 0 = default 120, -1 = off (disables all auto worker GC)
+	WorkerMaxLivePerMachine   int                                   `json:"worker_max_live_per_machine,omitempty"` // 0 = default 6, -1 = unlimited
+	MorningDigest             *bool                                 `json:"morning_digest,omitempty"`              // nil = default true
+	DreamAt                   string                                `json:"dream_at,omitempty"`                    // "HH:MM", "" = "04:00", "off" = disabled
+	AutoUpdate                bool                                  `json:"auto_update,omitempty"`                 // opt-in overnight idle auto-update (default false)
+	PublicURL                 string                                `json:"public_url,omitempty"`                  // optional canonical Hub base URL for outbound preview links
+	NotifyLevel               string                                `json:"notify_level,omitempty"`                // quiet | normal
+	AskPermissions            bool                                  `json:"ask_permissions,omitempty"`
+	Paused                    bool                                  `json:"paused,omitempty"`
+	WeComEnabled              bool                                  `json:"wecom_enabled,omitempty"`
+	WeComBotID                string                                `json:"wecom_bot_id,omitempty"`
+	WeComSecret               string                                `json:"wecom_secret,omitempty"`
+	WeComAllowUsers           []string                              `json:"wecom_allow_users,omitempty"`
+	WeComDefaultTo            string                                `json:"wecom_default_to,omitempty"` // default single-chat userid for proactive push
 }
 
 // MorningDigestEnabled reports whether daily morning summary digests are active (defaults to true).
@@ -478,6 +482,21 @@ func (s Settings) EffectiveWorkerMaxLivePerMachine() int {
 	return s.WorkerMaxLivePerMachine
 }
 
+// EffectiveRouterContextBudgetTokens returns the normalized auto-compaction budget in tokens
+// (default 80000, clamped to 16000..400000).
+func (s Settings) EffectiveRouterContextBudgetTokens() int {
+	if s.RouterContextBudgetTokens <= 0 {
+		return DefaultRouterContextBudgetTokens
+	}
+	if s.RouterContextBudgetTokens < MinRouterContextBudgetTokens {
+		return MinRouterContextBudgetTokens
+	}
+	if s.RouterContextBudgetTokens > MaxRouterContextBudgetTokens {
+		return MaxRouterContextBudgetTokens
+	}
+	return s.RouterContextBudgetTokens
+}
+
 // EffectiveActiveHours returns normalized active hours (defaults to "09:00-22:30").
 func (s Settings) EffectiveActiveHours() string {
 	if s.ActiveHours == "" {
@@ -490,21 +509,22 @@ func (s Settings) EffectiveActiveHours() string {
 func DefaultSettings(_ string) Settings {
 	on := true
 	return Settings{
-		RouterAPIProvider:       "tokenhub",
-		RouterAPIModel:          "hy4",
-		RouterAPIEffort:         "high",
-		WorkerKind:              "claude",
-		WorkerCwd:               "~",
-		ReplyChars:              DefaultReplyChars,
-		StallMinutes:            12,
-		IdlePatrolMinutes:       30,
-		ActiveHours:             "09:00-22:30",
-		StaleArchiveDays:        3,
-		WorkerIdleGCMinutes:     120,
-		WorkerMaxLivePerMachine: 6,
-		MorningDigest:           &on,
-		DreamAt:                 "04:00",
-		NotifyLevel:             "quiet",
+		RouterAPIProvider:         "tokenhub",
+		RouterAPIModel:            "hy4",
+		RouterAPIEffort:           "high",
+		RouterContextBudgetTokens: DefaultRouterContextBudgetTokens,
+		WorkerKind:                "claude",
+		WorkerCwd:                 "~",
+		ReplyChars:                DefaultReplyChars,
+		StallMinutes:              12,
+		IdlePatrolMinutes:         30,
+		ActiveHours:               "09:00-22:30",
+		StaleArchiveDays:          3,
+		WorkerIdleGCMinutes:       120,
+		WorkerMaxLivePerMachine:   6,
+		MorningDigest:             &on,
+		DreamAt:                   "04:00",
+		NotifyLevel:               "quiet",
 	}
 }
 

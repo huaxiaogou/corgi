@@ -257,6 +257,7 @@ func (e *Engine) SubmitChatSay(ctx context.Context, req SayRequest, mode string)
 		if err == nil {
 			e.markDrainCooldown(scope)
 			e.wake()
+			e.wakeRouter()
 		}
 		return false, nil, entry, trig, err
 	}
@@ -291,6 +292,7 @@ func (e *Engine) SubmitChatSay(ctx context.Context, req SayRequest, mode string)
 			}
 			e.notifyChanged()
 			e.wake()
+			e.wakeRouter()
 			return true, item, nil, nil, nil
 		}
 	}
@@ -300,6 +302,7 @@ func (e *Engine) SubmitChatSay(ctx context.Context, req SayRequest, mode string)
 	if err == nil {
 		e.markDrainCooldown(scope)
 		e.wake()
+		e.wakeRouter()
 	}
 	return false, nil, entry, trig, err
 }
@@ -337,6 +340,7 @@ func (e *Engine) SteerChatPrompt(ctx context.Context, thread, qid string) (*mode
 	e.markDrainCooldown(scope)
 	e.notifyChanged()
 	e.wake()
+	e.wakeRouter()
 	return entry, trig, nil
 }
 
@@ -380,6 +384,9 @@ func (e *Engine) ResumeQueue(scope string) {
 	e.clearDrainCooldown(scope)
 	e.notifyChanged()
 	e.wake()
+	if strings.HasPrefix(scope, routerQueuePrefix) {
+		e.wakeRouter()
+	}
 }
 
 // PaneQueuesSnapshot returns all queued single-agent pane prompts grouped by pane_id plus paused flags.

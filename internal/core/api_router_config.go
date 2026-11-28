@@ -274,18 +274,19 @@ func (e *Engine) BuildRedactedConfigView(ctx context.Context, section string) ma
 		"ask_permissions":        st.AskPermissions,
 	}
 	scheduleView := map[string]any{
-		"active_hours":                st.EffectiveActiveHours(),
-		"idle_patrol_minutes":         st.IdlePatrolMinutes,
-		"stall_minutes":               st.StallMinutes,
-		"stale_archive_days":          st.StaleArchiveDays,
-		"worker_idle_gc_minutes":      st.WorkerIdleGCMinutes,
-		"worker_max_live_per_machine": st.WorkerMaxLivePerMachine,
-		"reply_chars":                 st.ReplyChars,
-		"morning_digest":              st.MorningDigestEnabled(),
-		"dream_at":                    orStr(st.DreamAt, "04:00"),
-		"notify_level":                orStr(st.NotifyLevel, "quiet"),
-		"paused":                      st.Paused,
-		"auto_update":                 st.AutoUpdate,
+		"active_hours":                 st.EffectiveActiveHours(),
+		"idle_patrol_minutes":          st.IdlePatrolMinutes,
+		"stall_minutes":                st.StallMinutes,
+		"stale_archive_days":           st.StaleArchiveDays,
+		"worker_idle_gc_minutes":       st.WorkerIdleGCMinutes,
+		"worker_max_live_per_machine":  st.WorkerMaxLivePerMachine,
+		"reply_chars":                  st.ReplyChars,
+		"router_context_budget_tokens": st.EffectiveRouterContextBudgetTokens(),
+		"morning_digest":               st.MorningDigestEnabled(),
+		"dream_at":                     orStr(st.DreamAt, "04:00"),
+		"notify_level":                 orStr(st.NotifyLevel, "quiet"),
+		"paused":                       st.Paused,
+		"auto_update":                  st.AutoUpdate,
 	}
 	machinesView := []map[string]any{}
 	if e.fleet != nil {

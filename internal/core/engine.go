@@ -85,6 +85,7 @@ type Engine struct {
 	router routerState
 
 	wakeCh                     chan struct{}
+	routerWakeCh               chan struct{}
 	configWriteSem             chan struct{}
 	onSettingsApplied          func(model.Settings)
 	queueMu                    sync.Mutex
@@ -144,6 +145,7 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		idleCheckAt:        map[string]time.Time{},
 		noAgent:            map[string]time.Time{},
 		wakeCh:             make(chan struct{}, 1),
+		routerWakeCh:       make(chan struct{}, 1),
 		configWriteSem:     make(chan struct{}, 1),
 		pausedQueues:       map[string]bool{},
 		drainCooldown:      map[string]time.Time{},
@@ -277,6 +279,9 @@ func (e *Engine) IngestWithMeta(ctx context.Context, source, thread, from, text,
 	}
 	e.touchThread(ctx, thread, "", "")
 	e.notifyChanged()
+	if t.Status == "queued" && (len(t.Targets) == 0 || slices.Contains(t.Targets, model.RouterName)) {
+		e.wakeRouter()
+	}
 	return t, nil
 }
 

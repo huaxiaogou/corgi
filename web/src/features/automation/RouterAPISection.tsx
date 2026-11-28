@@ -231,6 +231,25 @@ export function RouterAPISection({ draft, setDraft, routerAPISecret, onUpdateAPI
           </label>
         </div>
 
+        <label className="block space-y-1">
+          <span className="text-muted">工作上下文换代阈值（达到后自动后台压缩，保留最近轮次原文）</span>
+          <select
+            value={draft.router_context_budget_tokens ?? 80000}
+            onChange={(e) =>
+              setDraft((prev) => ({
+                ...prev,
+                router_context_budget_tokens: Number(e.target.value) || 80000,
+              }))
+            }
+            className="w-full sm:w-1/2 px-3 py-2 rounded-lg surface-rail border border-hairline"
+          >
+            <option value={32000}>32K tokens（轻快省流）</option>
+            <option value={80000}>80K tokens（默认均衡）</option>
+            <option value={160000}>160K tokens（超长连续）</option>
+            <option value={300000}>300K tokens（极限长会话）</option>
+          </select>
+        </label>
+
         <div className="p-3 rounded-lg surface-rail border border-hairline space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="font-medium text-secondary">API Key（独立安全存储，不随普通设置回传）</span>

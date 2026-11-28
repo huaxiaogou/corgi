@@ -615,13 +615,24 @@ func (e *Engine) appendDirectBgNote(note string) {
 	}
 }
 
-func (e *Engine) drainDirectBgNotes() []string {
+func (e *Engine) peekDirectBgNotes() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if len(e.directBgNotes) == 0 {
 		return nil
 	}
-	out := append([]string(nil), e.directBgNotes...)
-	e.directBgNotes = nil
-	return out
+	return append([]string(nil), e.directBgNotes...)
+}
+
+func (e *Engine) commitDirectBgNotes(n int) {
+	if n <= 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if n >= len(e.directBgNotes) {
+		e.directBgNotes = nil
+		return
+	}
+	e.directBgNotes = append([]string(nil), e.directBgNotes[n:]...)
 }
