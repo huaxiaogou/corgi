@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent } from "react";
 import { ArrowDown, ArrowLeft, ArrowUp, GitBranch, Keyboard, Paperclip, Square, Trash2, X } from "lucide-react";
+import { ChunkErrorBoundary } from "../../components/ChunkErrorBoundary";
 import { AgentGlyph } from "../../components/CorgiMark";
 import { PromptQueueTray } from "../../components/PromptQueueTray";
-import { TerminalScreen } from "../../components/TerminalScreen";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { formatAgentComposerContext, formatPaneHandle } from "../../lib/agentIdentity";
 import { api, uploadFile } from "../../lib/api";
@@ -21,6 +21,10 @@ interface Props {
   onOpenFile?: (path: string, machine?: string) => void;
   onToast: (msg: string) => void;
 }
+
+const LazyTerminalScreen = lazy(() =>
+  import("../../components/TerminalScreen").then((m) => ({ default: m.TerminalScreen }))
+);
 
 const SETUP_RE = /choose your color scheme|welcome to antigravity|select login method|waiting for auth|do you trust|trust this folder|terms of service/i;
 
@@ -539,7 +543,22 @@ export function AgentPaneView({
         <div ref={containerRef} onScroll={onScroll} className="flex-1 overflow-y-auto scroll-chat px-5 py-5 min-h-0">
           {mode === "screen" ? (
             <div className="h-full max-w-[960px] mx-auto">
-              <TerminalScreen frame={logText} onKey={(k) => void sendKey(k)} onText={(t) => void api(`/api/panes/${encodeURIComponent(pane.pane_id)}/text`, { text: t, enter: false })} onToast={onToast} />
+              <ChunkErrorBoundary resetKey={`${pane.pane_id}:${mode}`}>
+                <Suspense
+                  fallback={
+                    <div className="w-full h-full min-h-[360px] rounded-xl border border-hairline surface-rail flex items-center justify-center text-xs text-muted">
+                      正在加载终端视图…
+                    </div>
+                  }
+                >
+                  <LazyTerminalScreen
+                    frame={logText}
+                    onKey={(k) => void sendKey(k)}
+                    onText={(t) => void api(`/api/panes/${encodeURIComponent(pane.pane_id)}/text`, { text: t, enter: false })}
+                    onToast={onToast}
+                  />
+                </Suspense>
+              </ChunkErrorBoundary>
             </div>
           ) : mode === "chat" ? (
             <div ref={contentRef}>

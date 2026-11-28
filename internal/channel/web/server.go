@@ -48,9 +48,9 @@ type Server struct {
 	ExecutablePath string
 	ExecFn         func(exe string)
 
-	buildOnce sync.Once
-	buildTag  string
-	etags     sync.Map
+	buildOnce    sync.Once
+	buildTag     string
+	staticAssets sync.Map
 
 	startMu sync.Mutex
 	started map[string]time.Time
@@ -570,43 +570,6 @@ func (s *Server) webBuildTag() string {
 		s.buildTag = hex.EncodeToString(h.Sum(nil)[:6])
 	})
 	return s.buildTag
-}
-
-func (s *Server) staticHandler() http.Handler {
-	fileSrv := http.FileServerFS(s.StaticFS)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := strings.TrimPrefix(r.URL.Path, "/")
-		if p == "" {
-			p = "index.html"
-		}
-		if _, err := fs.Stat(s.StaticFS, p); err != nil {
-			p = "index.html"
-			r.URL.Path = "/"
-		}
-		if tag := s.fileETag(p); tag != "" {
-			w.Header().Set("ETag", tag)
-			w.Header().Set("Cache-Control", "no-cache")
-			if r.Header.Get("If-None-Match") == tag {
-				w.WriteHeader(http.StatusNotModified)
-				return
-			}
-		}
-		fileSrv.ServeHTTP(w, r)
-	})
-}
-
-func (s *Server) fileETag(p string) string {
-	if v, ok := s.etags.Load(p); ok {
-		return v.(string)
-	}
-	b, err := fs.ReadFile(s.StaticFS, p)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(b)
-	tag := `"` + hex.EncodeToString(sum[:8]) + `"`
-	s.etags.Store(p, tag)
-	return tag
 }
 
 func setTokenCookie(w http.ResponseWriter, r *http.Request, token string) {
