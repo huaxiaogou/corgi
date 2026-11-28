@@ -269,7 +269,11 @@ func (e *Engine) buildLiveTailState(ctx context.Context, thread string, trig *mo
 		"optional_notify（后台巡检/外部事件：确有需用户知晓或拍板的新事项时调用 reply_user，否则调用 no_action）",
 		"must_reply（必须调用 reply_user 向用户答复，严禁静默）")
 	fmt.Fprintf(&b, "\n## 本轮待处理事件\ntrigger_id=%s | thread=%s | source=%s | policy=%s | response_mode=%s", trig.ID, thread, trig.Source, trig.Policy, respMode)
-	for _, kv := range [][2]string{{"from", trig.From}, {"ref", trig.Ref}, {"work_item", trig.WorkItemID}, {"artifact", trig.ArtifactID}} {
+	kvs := [][2]string{{"from", trig.From}, {"ref", trig.Ref}, {"work_item", trig.WorkItemID}, {"artifact", trig.ArtifactID}}
+	if d := trig.Dispatch; d != nil {
+		kvs = append(kvs, [2]string{"dispatch_machine", d.Machine}, [2]string{"dispatch_kind", d.Kind}, [2]string{"dispatch_model", d.Model}, [2]string{"dispatch_effort", d.Effort}, [2]string{"dispatch_project", d.ProjectID})
+	}
+	for _, kv := range kvs {
 		if kv[1] != "" {
 			fmt.Fprintf(&b, " | %s=%s", kv[0], kv[1])
 		}

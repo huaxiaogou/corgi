@@ -25,7 +25,7 @@ var (
 	ErrDuplicateTrigger = errors.New("duplicate trigger")
 )
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 var migrations = []struct {
 	version int
@@ -180,6 +180,12 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_work ON artifacts(work_item_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_artifacts_expires ON artifacts(expires_at);
+`,
+	},
+	{
+		version: 5,
+		sql: `
+ALTER TABLE triggers ADD COLUMN dispatch_json TEXT NOT NULL DEFAULT '';
 `,
 	},
 }

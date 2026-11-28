@@ -117,7 +117,16 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 	}
 
 	st := e.Settings()
-	reqMachine := strings.TrimSpace(args.Machine)
+	var ov model.DispatchOverride
+	if trig != nil && trig.Dispatch != nil {
+		ov = *trig.Dispatch
+	}
+	reqMachine := orStr(strings.TrimSpace(args.Machine), ov.Machine)
+	reqKind := orStr(strings.TrimSpace(args.Kind), ov.Kind)
+	reqModel, reqEffort := "", ""
+	if strings.TrimSpace(args.Kind) == "" || ov.Kind == "" || strings.EqualFold(strings.TrimSpace(args.Kind), ov.Kind) {
+		reqModel, reqEffort = ov.Model, ov.Effort
+	}
 	effMachine := st.WorkerMachine
 	if reqMachine != "" {
 		effMachine = reqMachine
@@ -129,7 +138,7 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		effMachine = ""
 	}
 	var resolvedCwd, resolvedProjID string
-	if projRef := strings.TrimSpace(args.Project); projRef != "" {
+	if projRef := orStr(strings.TrimSpace(args.Project), ov.ProjectID); projRef != "" {
 		proj := ResolveProject(st.Projects, projRef)
 		if proj == nil {
 			return toolErr("未找到已配置的项目：" + projRef)
@@ -148,7 +157,7 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 	if err != nil {
 		return toolErr("分配 Worker 编号失败：" + err.Error())
 	}
-	reservedName := fmt.Sprintf("%s-%d", orStr(strings.TrimSpace(args.Kind), orStr(st.WorkerKind, "claude")), seq)
+	reservedName := fmt.Sprintf("%s-%d", orStr(reqKind, orStr(st.WorkerKind, "claude")), seq)
 	if err := e.recordAPIRouterInflight(context.Background(), trig, "dispatch_work", reservedName); err != nil {
 		return toolErr("记录防重标记失败，已中止派发：" + err.Error())
 	}
@@ -157,7 +166,7 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		origReq = meta.verbatimRequest
 	}
 	wk, err := e.Spawn(ctx, SpawnRequest{
-		Name: reservedName, Kind: strings.TrimSpace(args.Kind), Machine: reqMachine, Cwd: resolvedCwd,
+		Name: reservedName, Kind: reqKind, Machine: reqMachine, Model: reqModel, Effort: reqEffort, Cwd: resolvedCwd,
 		Task: goal, Thread: turn.thread, By: model.RouterName, Worktree: wtMode,
 		WorkID: targetWorkID, WorkTitle: strings.TrimSpace(args.Title), ProjectID: resolvedProjID,
 		OriginalRequest: origReq, Constraint: buildModeConstraint(mode, args.AllowRelease, rawConstraint), Mode: mode,

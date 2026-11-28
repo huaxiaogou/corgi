@@ -320,6 +320,14 @@ export interface Policy {
   allow?: string[];
 }
 
+export interface DispatchOverride {
+  machine?: string;
+  kind?: string;
+  model?: string;
+  effort?: string;
+  project_id?: string;
+}
+
 export interface TriggerView {
   id: string;
   source: string;
@@ -329,6 +337,7 @@ export interface TriggerView {
   at: string;
   policy: string;
   status: string;
+  dispatch?: DispatchOverride;
 }
 
 export interface RouterAPISecretStatus {

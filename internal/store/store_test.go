@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -250,5 +251,66 @@ func TestListKVByPrefixEscapesWildcards(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestTriggerDispatchMigrationV4ToV5AndAtomicCommit(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "v4.db")
+
+	// Seed a real v4 schema DB without triggers.dispatch_json.
+	rawDB, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations {
+		if m.version > 4 {
+			continue
+		}
+		if _, err := rawDB.Exec(m.sql); err != nil {
+			t.Fatalf("seed v%d: %v", m.version, err)
+		}
+	}
+	if _, err := rawDB.Exec(`PRAGMA user_version = 4`); err != nil {
+		t.Fatal(err)
+	}
+	legacyTrig := `{"id":"t1","seq":1,"source":"chat","thread":"chat:main","from":"you","text":"legacy","at":"2026-11-28T00:00:00Z","policy":"respond","status":"queued"}`
+	if _, err := rawDB.Exec(`INSERT INTO triggers(id, seq, source, thread, status, idem_key, data, created_at) VALUES('t1', 1, 'chat', 'chat:main', 'queued', '', ?, 1)`, legacyTrig); err != nil {
+		t.Fatal(err)
+	}
+	_ = rawDB.Close()
+
+	// Reopen via Store.Open -> runs v4->v5 migration cleanly.
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open v4->v5 migration: %v", err)
+	}
+	defer st.Close()
+
+	var ver int
+	if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != currentSchemaVersion {
+		t.Fatalf("expected PRAGMA user_version=%d, got %d err=%v", currentSchemaVersion, ver, err)
+	}
+	if gotLegacy, err := st.GetTrigger(ctx, "t1"); err != nil || gotLegacy.Text != "legacy" || gotLegacy.Dispatch != nil {
+		t.Fatalf("unexpected legacy trigger after migration: %+v err=%v", gotLegacy, err)
+	}
+
+	// Atomic CommitSayEntryAndTrigger persists structured DispatchOverride cleanly.
+	en := &model.Entry{ID: "e2", Seq: 2, Role: "user", Thread: model.MainThread, Channel: "web", Text: "用 codex 查一下", At: time.Now()}
+	tr := &model.Trigger{
+		ID: "t3", Seq: 3, Source: "chat", Thread: model.MainThread, From: "you", Text: "用 codex 查一下",
+		At: time.Now(), Policy: "respond", Status: "queued", Ref: "e2", IdemKey: "web:msg-dispatch-1",
+		Dispatch: &model.DispatchOverride{Machine: "gpu-1", Kind: "codex", Model: "gpt-5.4", Effort: "high", ProjectID: "corgi"},
+	}
+	if _, _, dup, err := st.CommitSayEntryAndTrigger(ctx, en, tr); err != nil || dup {
+		t.Fatalf("CommitSayEntryAndTrigger failed: dup=%v err=%v", dup, err)
+	}
+	reloaded, err := st.GetTrigger(ctx, "t3")
+	if err != nil || reloaded.Dispatch == nil || *reloaded.Dispatch != *tr.Dispatch {
+		t.Fatalf("expected structured DispatchOverride persisted, got %+v err=%v", reloaded, err)
+	}
+	var dispCol string
+	if err := st.db.QueryRow(`SELECT dispatch_json FROM triggers WHERE id = 't3'`).Scan(&dispCol); err != nil || dispCol == "" {
+		t.Fatalf("expected non-empty dispatch_json column, got %q err=%v", dispCol, err)
 	}
 }

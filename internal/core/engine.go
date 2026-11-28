@@ -484,15 +484,12 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 		Media:    append([]model.MediaRef(nil), req.Media...),
 	}
 
-	// Build prompt payload enriched with one-off dispatch overrides or quote context.
+	// Build prompt payload enriched with quote context; one-off dispatch overrides are persisted structurally on Trigger.
 	promptText := text
 	if strings.TrimSpace(req.PromptContext) != "" {
 		promptText = strings.TrimSpace(req.PromptContext) + "\n" + promptText
 	} else if quote != nil {
 		promptText = fmt.Sprintf("[In reply to: %q]\n%s", quote.Text, promptText)
-	}
-	if hint := e.buildDispatchHint(req); hint != "" {
-		promptText += "\n\n" + hint
 	}
 
 	// Fast-path quote routing: dedicated direct-chat markers ("↳ 直聊" / "↳ 直聊中" / "↳ 单次直问")
@@ -514,19 +511,20 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 		decision = "ignore"
 	}
 	trig := &model.Trigger{
-		ID:      tid,
-		Seq:     tseq,
-		Source:  source,
-		Thread:  thread,
-		From:    req.From,
-		Text:    promptText,
-		At:      now,
-		Policy:  decision,
-		Status:  "queued",
-		IdemKey: idemKey,
-		Ref:     entry.ID,
-		Steer:   steer,
-		Media:   append([]model.MediaRef(nil), req.Media...),
+		ID:       tid,
+		Seq:      tseq,
+		Source:   source,
+		Thread:   thread,
+		From:     req.From,
+		Text:     promptText,
+		At:       now,
+		Policy:   decision,
+		Status:   "queued",
+		IdemKey:  idemKey,
+		Ref:      entry.ID,
+		Steer:    steer,
+		Media:    append([]model.MediaRef(nil), req.Media...),
+		Dispatch: e.buildDispatchOverride(req),
 	}
 	if decision == "ignore" {
 		trig.Status = "ignored"
@@ -623,12 +621,9 @@ func (e *Engine) entryInReplyChain(ctx context.Context, fromID, targetID string)
 	return false
 }
 
-func (e *Engine) buildDispatchHint(req SayRequest) string {
+func (e *Engine) buildDispatchOverride(req SayRequest) *model.DispatchOverride {
 	st := e.Settings()
-	var hints []string
-	addHint := func(key, val string) {
-		hints = append(hints, key+"="+val)
-	}
+	var ov model.DispatchOverride
 	effMachine := st.WorkerMachine
 	if m := strings.TrimSpace(req.Machine); m != "" {
 		resolved := m
@@ -637,41 +632,34 @@ func (e *Engine) buildDispatchHint(req SayRequest) string {
 		}
 		effMachine = resolved
 		if resolved != st.WorkerMachine {
-			name := resolved
-			if name == "" {
-				name = "hub"
-			}
-			addHint("machine", name)
+			ov.Machine = orStr(resolved, "hub")
 		}
 	}
 	effKind := agent.NormalizeKind(st.WorkerKind)
 	if k := agent.NormalizeKind(req.Kind); k != "" {
 		effKind = k
 		if k != agent.NormalizeKind(st.WorkerKind) {
-			addHint("kind", k)
+			ov.Kind = k
 		}
 	}
 	baseModel, baseEffort, _ := ResolveWorkerModel(st, effMachine, effKind, "", "")
 	if m := strings.TrimSpace(req.Model); m != "" && agent.ModelNameRe.MatchString(m) && m != baseModel {
-		addHint("model", m)
+		ov.Model = m
 	}
 	if ef := strings.TrimSpace(req.Effort); ef != "" && agent.ModelNameRe.MatchString(ef) && ef != baseEffort {
-		addHint("effort", ef)
+		ov.Effort = ef
 	}
 	if pid := strings.TrimSpace(req.ProjectID); pid != "" {
 		if proj := ResolveProject(st.Projects, pid); proj != nil {
-			addHint("project", proj.ID)
-			if p := ProjectPathForMachine(proj, effMachine); p != "" {
-				addHint("cwd", p)
-			}
+			ov.ProjectID = proj.ID
 		} else {
-			addHint("project", pid)
+			ov.ProjectID = pid
 		}
 	}
-	if len(hints) == 0 {
-		return ""
+	if ov == (model.DispatchOverride{}) {
+		return nil
 	}
-	return "[用户本次指定运行参数（对应 dispatch_work 参数）: " + strings.Join(hints, " ") + "]"
+	return &ov
 }
 
 // ReplyRequest describes a Corgi outbound reply with optional quick-choice buttons,

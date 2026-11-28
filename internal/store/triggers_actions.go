@@ -14,16 +14,41 @@ import (
 
 // ---------------------------------------------------------------- Triggers
 
+func encodeDispatchOverride(d *model.DispatchOverride) (string, error) {
+	if d == nil || *d == (model.DispatchOverride{}) {
+		return "", nil
+	}
+	return mustJSON(d)
+}
+
+func decodeTriggerRow(raw, dispatchJSON string) (*model.Trigger, error) {
+	var t model.Trigger
+	if err := json.Unmarshal([]byte(raw), &t); err != nil {
+		return nil, err
+	}
+	if t.Dispatch == nil && strings.TrimSpace(dispatchJSON) != "" {
+		var d model.DispatchOverride
+		if err := json.Unmarshal([]byte(dispatchJSON), &d); err == nil && d != (model.DispatchOverride{}) {
+			t.Dispatch = &d
+		}
+	}
+	return &t, nil
+}
+
 // InsertTrigger persists a new trigger, enforcing uniqueness on non-empty IdemKey.
 func (s *Store) InsertTrigger(ctx context.Context, t *model.Trigger) error {
 	data, err := mustJSON(t)
 	if err != nil {
 		return fmt.Errorf("encode trigger: %w", err)
 	}
+	dispatchJSON, err := encodeDispatchOverride(t.Dispatch)
+	if err != nil {
+		return fmt.Errorf("encode trigger dispatch: %w", err)
+	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO triggers(id, seq, source, thread, status, idem_key, data, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.ID, t.Seq, t.Source, t.Thread, t.Status, t.IdemKey, data, t.At.Unix())
+		INSERT INTO triggers(id, seq, source, thread, status, idem_key, data, dispatch_json, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.ID, t.Seq, t.Source, t.Thread, t.Status, t.IdemKey, data, dispatchJSON, t.At.Unix())
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: triggers.idem_key") {
 			return ErrDuplicateTrigger
@@ -39,7 +64,11 @@ func (s *Store) UpdateTrigger(ctx context.Context, t *model.Trigger) error {
 	if err != nil {
 		return fmt.Errorf("encode trigger: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE triggers SET status = ?, data = ? WHERE id = ?`, t.Status, data, t.ID)
+	dispatchJSON, err := encodeDispatchOverride(t.Dispatch)
+	if err != nil {
+		return fmt.Errorf("encode trigger dispatch: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE triggers SET status = ?, data = ?, dispatch_json = ? WHERE id = ?`, t.Status, data, dispatchJSON, t.ID)
 	if err != nil {
 		return fmt.Errorf("update trigger %s: %w", t.ID, err)
 	}
@@ -181,19 +210,19 @@ func (s *Store) GetTriggerByIdemKey(ctx context.Context, idemKey string) (*model
 	if idemKey == "" {
 		return nil, ErrNotFound
 	}
-	var raw string
-	err := s.db.QueryRowContext(ctx, `SELECT data FROM triggers WHERE idem_key = ?`, idemKey).Scan(&raw)
+	var raw, dispatchJSON string
+	err := s.db.QueryRowContext(ctx, `SELECT data, dispatch_json FROM triggers WHERE idem_key = ?`, idemKey).Scan(&raw, &dispatchJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get trigger by idem_key %q: %w", idemKey, err)
 	}
-	var t model.Trigger
-	if err := json.Unmarshal([]byte(raw), &t); err != nil {
+	t, err := decodeTriggerRow(raw, dispatchJSON)
+	if err != nil {
 		return nil, fmt.Errorf("decode trigger by idem_key %q: %w", idemKey, err)
 	}
-	return &t, nil
+	return t, nil
 }
 
 // CommitSayEntryAndTrigger atomically persists a human chat entry and its trigger in one SQLite
@@ -210,18 +239,22 @@ func (s *Store) CommitSayEntryAndTrigger(ctx context.Context, e *model.Entry, t 
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("encode trigger: %w", err)
 	}
+	dispatchJSON, err := encodeDispatchOverride(t.Dispatch)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("encode trigger dispatch: %w", err)
+	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO triggers(id, seq, source, thread, status, idem_key, data, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.ID, t.Seq, t.Source, t.Thread, t.Status, t.IdemKey, trigData, t.At.Unix())
+		INSERT INTO triggers(id, seq, source, thread, status, idem_key, data, dispatch_json, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.ID, t.Seq, t.Source, t.Thread, t.Status, t.IdemKey, trigData, dispatchJSON, t.At.Unix())
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: triggers.idem_key") && t.IdemKey != "" {
-			var rawTrig string
-			if qErr := tx.QueryRowContext(ctx, `SELECT data FROM triggers WHERE idem_key = ?`, t.IdemKey).Scan(&rawTrig); qErr != nil {
+			var rawTrig, rawDisp string
+			if qErr := tx.QueryRowContext(ctx, `SELECT data, dispatch_json FROM triggers WHERE idem_key = ?`, t.IdemKey).Scan(&rawTrig, &rawDisp); qErr != nil {
 				return nil, nil, true, nil
 			}
-			var existingTrig model.Trigger
-			if json.Unmarshal([]byte(rawTrig), &existingTrig) != nil {
+			existingTrig, dErr := decodeTriggerRow(rawTrig, rawDisp)
+			if dErr != nil {
 				return nil, nil, true, nil
 			}
 			var existingEntry *model.Entry
@@ -234,7 +267,7 @@ func (s *Store) CommitSayEntryAndTrigger(ctx context.Context, e *model.Entry, t 
 					}
 				}
 			}
-			return existingEntry, &existingTrig, true, nil
+			return existingEntry, existingTrig, true, nil
 		}
 		return nil, nil, false, fmt.Errorf("insert trigger %s: %w", t.ID, err)
 	}
@@ -262,24 +295,24 @@ func (s *Store) CommitSayEntryAndTrigger(ctx context.Context, e *model.Entry, t 
 
 // GetTrigger loads one trigger by ID.
 func (s *Store) GetTrigger(ctx context.Context, id string) (*model.Trigger, error) {
-	var raw string
-	err := s.db.QueryRowContext(ctx, `SELECT data FROM triggers WHERE id = ?`, id).Scan(&raw)
+	var raw, dispatchJSON string
+	err := s.db.QueryRowContext(ctx, `SELECT data, dispatch_json FROM triggers WHERE id = ?`, id).Scan(&raw, &dispatchJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get trigger %s: %w", id, err)
 	}
-	var t model.Trigger
-	if err := json.Unmarshal([]byte(raw), &t); err != nil {
+	t, err := decodeTriggerRow(raw, dispatchJSON)
+	if err != nil {
 		return nil, fmt.Errorf("decode trigger %s: %w", id, err)
 	}
-	return &t, nil
+	return t, nil
 }
 
 // ListQueuedTriggers returns all triggers currently awaiting delivery (oldest first).
 func (s *Store) ListQueuedTriggers(ctx context.Context) ([]*model.Trigger, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT data FROM triggers WHERE status = 'queued' ORDER BY seq ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT data, dispatch_json FROM triggers WHERE status = 'queued' ORDER BY seq ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list queued triggers: %w", err)
 	}
@@ -292,7 +325,7 @@ func (s *Store) ListTriggers(ctx context.Context, limit int) ([]*model.Trigger, 
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT data FROM triggers ORDER BY seq DESC LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT data, dispatch_json FROM triggers ORDER BY seq DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list triggers: %w", err)
 	}
@@ -305,7 +338,7 @@ func (s *Store) ListThreadTriggers(ctx context.Context, thread string, limit int
 	if limit <= 0 {
 		limit = 40
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT data FROM triggers WHERE thread = ? ORDER BY seq DESC LIMIT ?`, thread, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT data, dispatch_json FROM triggers WHERE thread = ? ORDER BY seq DESC LIMIT ?`, thread, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list thread triggers: %w", err)
 	}
@@ -337,13 +370,12 @@ func (s *Store) ListWorkerTriggers(ctx context.Context, workerName string, limit
 func scanTriggers(rows *sql.Rows) ([]*model.Trigger, error) {
 	out := []*model.Trigger{}
 	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
+		var raw, dispatchJSON string
+		if err := rows.Scan(&raw, &dispatchJSON); err != nil {
 			return nil, err
 		}
-		var t model.Trigger
-		if json.Unmarshal([]byte(raw), &t) == nil {
-			out = append(out, &t)
+		if t, err := decodeTriggerRow(raw, dispatchJSON); err == nil {
+			out = append(out, t)
 		}
 	}
 	return out, rows.Err()

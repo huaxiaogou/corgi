@@ -146,24 +146,34 @@ type SearchResult struct {
 	HasMore bool        `json:"has_more"`
 }
 
+// DispatchOverride stores one-off per-message worker dispatch parameters selected in Web Composer.
+type DispatchOverride struct {
+	Machine   string `json:"machine,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Effort    string `json:"effort,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+}
+
 // Trigger is one durable event in the Super-Agent inbox.
 type Trigger struct {
-	ID         string     `json:"id"`
-	Seq        int64      `json:"seq"`
-	Source     string     `json:"source"` // chat | wecom | timer | worker | router | system
-	Thread     string     `json:"thread"`
-	From       string     `json:"from,omitempty"`
-	Text       string     `json:"text"`
-	At         time.Time  `json:"at"`
-	Policy     string     `json:"policy"` // respond | candidate | ignore
-	Status     string     `json:"status"` // queued | delivered | ignored
-	Targets    []string   `json:"targets,omitempty"`
-	IdemKey    string     `json:"idem_key,omitempty"`
-	Ref        string     `json:"ref,omitempty"`
-	Steer      bool       `json:"steer,omitempty"`
-	ArtifactID string     `json:"artifact_id,omitempty"`
-	WorkItemID string     `json:"work_item_id,omitempty"`
-	Media      []MediaRef `json:"media,omitempty"`
+	ID         string            `json:"id"`
+	Seq        int64             `json:"seq"`
+	Source     string            `json:"source"` // chat | wecom | timer | worker | router | system
+	Thread     string            `json:"thread"`
+	From       string            `json:"from,omitempty"`
+	Text       string            `json:"text"`
+	At         time.Time         `json:"at"`
+	Policy     string            `json:"policy"` // respond | candidate | ignore
+	Status     string            `json:"status"` // queued | delivered | ignored
+	Targets    []string          `json:"targets,omitempty"`
+	IdemKey    string            `json:"idem_key,omitempty"`
+	Ref        string            `json:"ref,omitempty"`
+	Steer      bool              `json:"steer,omitempty"`
+	ArtifactID string            `json:"artifact_id,omitempty"`
+	WorkItemID string            `json:"work_item_id,omitempty"`
+	Media      []MediaRef        `json:"media,omitempty"`
+	Dispatch   *DispatchOverride `json:"dispatch,omitempty"`
 }
 
 // Thread groups triggers and worker subscriptions for a conversation or WeCom group topic.

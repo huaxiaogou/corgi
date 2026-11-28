@@ -475,3 +475,92 @@ func TestMemoryManagerOSRootSandbox(t *testing.T) {
 		}
 	}
 }
+
+func TestStructuredTriggerDispatchOverrideReplacesHint(t *testing.T) {
+	ctx := context.Background()
+	eng, st, _, dir := newTestAPIEngine(t, nil)
+
+	projDir := filepath.Join(dir, "demo-proj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := eng.Settings()
+	cfg.WorkerKind = "claude"
+	cfg.Projects = []model.ProjectWorkspace{{ID: "demo", Name: "Demo", Paths: map[string]string{"hub": projDir}}}
+	if err := eng.SaveConfig(ctx, &cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		mu          sync.Mutex
+		createdCwd  string
+		startedCmd  string
+		startedArgs []string
+	)
+	hc := newFakeHerdrClient(func(method string, params map[string]any) (any, *herdr.Error) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch method {
+		case "workspace.create":
+			createdCwd, _ = params["cwd"].(string)
+			return map[string]any{
+				"workspace": map[string]any{"workspace_id": "w-ov"},
+				"root_pane": map[string]any{"pane_id": "w-ov:p1"},
+			}, nil
+		case "agent.start":
+			startedCmd, _ = params["agent"].(string)
+			if raw, ok := params["args"].([]any); ok {
+				for _, a := range raw {
+					if s, ok := a.(string); ok {
+						startedArgs = append(startedArgs, s)
+					}
+				}
+			}
+			return map[string]any{"pane_id": "w-ov:p1", "workspace_id": "w-ov", "session": "s-ov", "pid": 4242}, nil
+		default:
+			return map[string]any{}, nil
+		}
+	})
+	eng.fleet = fleet.NewFleet(hc, "hub", dir, "test", []string{"claude", "codex"})
+
+	// 1. Say persists structured DispatchOverride and does NOT pollute trig.Text with buildDispatchHint.
+	_, trig, err := eng.Say(ctx, SayRequest{
+		Thread:    model.MainThread,
+		Channel:   "web",
+		From:      "you",
+		Text:      "排查一下登录报错",
+		Kind:      "codex",
+		Model:     "gpt-5.4-mini",
+		Effort:    "high",
+		ProjectID: "demo",
+	})
+	if err != nil {
+		t.Fatalf("Say: %v", err)
+	}
+	if strings.Contains(trig.Text, "用户本次指定运行参数") {
+		t.Fatalf("trig.Text must not contain legacy buildDispatchHint text, got %q", trig.Text)
+	}
+	reloaded, err := st.GetTrigger(ctx, trig.ID)
+	if err != nil || reloaded.Dispatch == nil || reloaded.Dispatch.Kind != "codex" || reloaded.Dispatch.Model != "gpt-5.4-mini" || reloaded.Dispatch.Effort != "high" || reloaded.Dispatch.ProjectID != "demo" {
+		t.Fatalf("unexpected persisted DispatchOverride: %+v err=%v", reloaded, err)
+	}
+
+	// 2. Live tail state exposes structured override fields cleanly.
+	meta := eng.resolveTurnConsentMeta(ctx, reloaded)
+	tail := eng.buildLiveTailState(ctx, model.MainThread, reloaded, meta)
+	if !strings.Contains(tail, "dispatch_kind=codex") || !strings.Contains(tail, "dispatch_project=demo") {
+		t.Fatalf("expected structured dispatch override in live tail state, got: %s", tail)
+	}
+
+	// 3. toolDispatchWork automatically applies persisted DispatchOverride (kind/model/effort/project->cwd) on Spawn.
+	out := eng.toolDispatchWork(ctx, &apiRouterTurn{thread: model.MainThread, triggerID: reloaded.ID}, reloaded, meta, `{"mode":"readonly","goal":"只读排查登录报错"}`)
+	if !strings.Contains(out, `"ok":true`) || !strings.Contains(out, `"kind":"codex"`) || !strings.Contains(out, `"model":"gpt-5.4-mini"`) {
+		t.Fatalf("expected dispatch_work to inherit structured Trigger.Dispatch, got %s", out)
+	}
+	mu.Lock()
+	gotCwd := createdCwd
+	mu.Unlock()
+	if gotCwd != projDir {
+		t.Fatalf("expected Spawn cwd=%q from Trigger.Dispatch.ProjectID, got %q (cmd=%q args=%v)", projDir, gotCwd, startedCmd, startedArgs)
+	}
+}
