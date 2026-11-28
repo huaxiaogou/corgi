@@ -56,7 +56,6 @@ export function ComposerBar({
   working = false,
   stopping = false,
   disabled = false,
-  queuedCount = 0,
   embedded = false,
   onStop,
   onOpenSettings,
@@ -387,7 +386,7 @@ export function ComposerBar({
               void submit(e);
             }
           }}
-          placeholder={working || queuedCount > 0 ? "告诉 Corgi 你要做什么（运行中自动排队）…" : "告诉 Corgi 你要做什么（支持粘贴、拖入图片或文件）…"}
+          placeholder="告诉 Corgi 你要做什么（支持粘贴、拖入图片或文件）…"
           className="block w-full resize-none bg-transparent text-[14px] leading-[1.5] min-h-[24px] max-h-[180px] overscroll-contain outline-none"
         />
 
@@ -480,7 +479,7 @@ export function ComposerBar({
               onPointerDown={(e) => {
                 if (document.activeElement === textareaRef.current) e.preventDefault();
               }}
-              title={disabled ? "正在同步实时状态…" : working || queuedCount > 0 ? "加入待发队列" : "发送"}
+              title={disabled ? "正在同步实时状态…" : "发送"}
               className="w-7 h-7 rounded-full btn-accent flex items-center justify-center cursor-pointer disabled:opacity-30"
             >
               <ArrowUp className="w-4 h-4" strokeWidth={2} />

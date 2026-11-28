@@ -121,7 +121,6 @@ export function CorgiChatView({
   const [linkedWork, setLinkedWork] = useState<WorkItem | null>(null);
   const [draftSeed, setDraftSeed] = useState<{ seq: number; text: string } | null>(null);
 
-  const tmpSeqRef = useRef(0);
   const draftSeqRef = useRef(0);
   const highlightTimerRef = useRef<number | null>(null);
   const inlineOpenersRef = useRef<Map<string, (mode: InlineReplyMode) => void>>(new Map());
@@ -450,38 +449,21 @@ export function CorgiChatView({
       }
       return;
     }
-    const shouldQueue = router?.status === "working" || effectiveQueue.length > 0;
     const clientMsgId =
       typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
         ? crypto.randomUUID()
         : `ip-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const tmpId = shouldQueue ? `tmp-${++tmpSeqRef.current}` : "";
-    if (tmpId) {
-      setOptimisticQueued((prev) => [
-        ...prev,
-        { id: tmpId, thread, text: replyText, re: entry.id, in_place: true, created_at: new Date().toISOString() },
-      ]);
-    }
     try {
-      const res = await api<{ ok: boolean; queued?: boolean; item?: QueuedPrompt }>("/api/super/say", {
+      await api<{ ok: boolean }>("/api/super/say", {
         thread,
         text: replyText,
         re: entry.id,
         in_place: true,
         client_msg_id: clientMsgId,
-        mode: shouldQueue ? "queue" : "auto",
+        mode: "auto",
       });
-      if (tmpId) {
-        setOptimisticQueued((prev) => {
-          const without = prev.filter((x) => x.id !== tmpId);
-          return res.queued && res.item ? [...without, res.item] : without;
-        });
-      } else if (res.queued && res.item) {
-        setOptimisticQueued((prev) => [...prev, res.item!]);
-      }
-      onToast(res.queued ? "已加入待发队列（原位）" : "已原位补充");
+      onToast("已原位补充");
     } catch (err) {
-      if (tmpId) setOptimisticQueued((prev) => prev.filter((x) => x.id !== tmpId));
       onToast(err instanceof Error ? err.message : "发送失败");
       throw err;
     }
@@ -872,17 +854,9 @@ export function CorgiChatView({
                   return;
                 }
                 const finalText = linkedWork ? formatWorkItemPrompt(linkedWork, text) : text;
-                const shouldQueue = router?.status === "working" || effectiveQueue.length > 0;
-                const tmpId = shouldQueue ? `tmp-${++tmpSeqRef.current}` : "";
                 if (isInPlaceSend) captureVisibleAnchor();
-                if (tmpId) {
-                  setOptimisticQueued((prev) => [
-                    ...prev,
-                    { id: tmpId, thread, text: finalText, re: reId || undefined, in_place: isInPlaceSend || undefined, created_at: new Date().toISOString() },
-                  ]);
-                }
                 try {
-                  const res = await api<{ ok: boolean; queued?: boolean; item?: QueuedPrompt }>("/api/super/say", {
+                  await api<{ ok: boolean }>("/api/super/say", {
                     thread,
                     text: finalText,
                     re: reId,
@@ -894,23 +868,14 @@ export function CorgiChatView({
                     project_id: projectId,
                     media,
                     client_msg_id: clientMsgId,
-                    mode: shouldQueue ? "queue" : "auto",
+                    mode: "auto",
                   });
                   setReplyTo(null);
                   setReplyInPlace(false);
                   setReplyActionTarget(null);
                   setLinkedWork(null);
-                  if (tmpId) {
-                    setOptimisticQueued((prev) => {
-                      const without = prev.filter((x) => x.id !== tmpId);
-                      return res.queued && res.item ? [...without, res.item] : without;
-                    });
-                  } else if (res.queued && res.item) {
-                    setOptimisticQueued((prev) => [...prev, res.item!]);
-                  }
-                  if (!res.queued && !isInPlaceSend) scrollToBottom(true);
+                  if (!isInPlaceSend) scrollToBottom(true);
                 } catch (err) {
-                  if (tmpId) setOptimisticQueued((prev) => prev.filter((x) => x.id !== tmpId));
                   onToast(err instanceof Error ? err.message : "发送失败");
                   throw err;
                 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -217,8 +216,10 @@ func (e *Engine) StopPane(ctx context.Context, target string) (bool, error) {
 	return paused, nil
 }
 
-// SubmitChatSay submits a human chat message to Corgi Router, queueing it while Router is busy.
-// mode may be ""/"auto", "queue", or "steer".
+// SubmitChatSay submits a human chat message to Corgi Router.
+// Default/auto mode commits immediately to entries + triggers (matching WeCom), letting the
+// independent API Router loop process it with human-first priority as soon as the current turn ends.
+// Explicit mode="queue" is retained only for backward compatibility.
 func (e *Engine) SubmitChatSay(ctx context.Context, req SayRequest, mode string) (bool, *model.QueuedPrompt, *model.Entry, *model.Trigger, error) {
 	text := strings.TrimSpace(req.Text)
 	if text == "" {
@@ -262,45 +263,40 @@ func (e *Engine) SubmitChatSay(ctx context.Context, req SayRequest, mode string)
 		return false, nil, entry, trig, err
 	}
 
-	if req.Channel == "web" {
-		existing, _ := e.store.ListQueuedPrompts(ctx, scope)
-		routerWorking := e.isRouterWorking(ctx)
-		if mode == "queue" || len(existing) > 0 || routerWorking {
-			id, seq, err := e.store.NextID(ctx, "q")
-			if err != nil {
-				return false, nil, nil, nil, err
-			}
-			item := &model.QueuedPrompt{
-				ID:          id,
-				Seq:         seq,
-				Scope:       scope,
-				Thread:      thread,
-				Text:        text,
-				ReEntryID:   req.ReEntryID,
-				InPlace:     req.InPlace,
-				Machine:     req.Machine,
-				Kind:        req.Kind,
-				Model:       req.Model,
-				Effort:      req.Effort,
-				ProjectID:   req.ProjectID,
-				Media:       append([]model.MediaRef(nil), req.Media...),
-				ClientMsgID: clientMsgID,
-				CreatedAt:   time.Now(),
-			}
-			if err := e.store.InsertQueuedPrompt(ctx, item); err != nil {
-				return false, nil, nil, nil, err
-			}
-			e.notifyChanged()
-			e.wake()
-			e.wakeRouter()
-			return true, item, nil, nil, nil
+	if req.Channel == "web" && mode == "queue" {
+		id, seq, err := e.store.NextID(ctx, "q")
+		if err != nil {
+			return false, nil, nil, nil, err
 		}
+		item := &model.QueuedPrompt{
+			ID:          id,
+			Seq:         seq,
+			Scope:       scope,
+			Thread:      thread,
+			Text:        text,
+			ReEntryID:   req.ReEntryID,
+			InPlace:     req.InPlace,
+			Machine:     req.Machine,
+			Kind:        req.Kind,
+			Model:       req.Model,
+			Effort:      req.Effort,
+			ProjectID:   req.ProjectID,
+			Media:       append([]model.MediaRef(nil), req.Media...),
+			ClientMsgID: clientMsgID,
+			CreatedAt:   time.Now(),
+		}
+		if err := e.store.InsertQueuedPrompt(ctx, item); err != nil {
+			return false, nil, nil, nil, err
+		}
+		e.notifyChanged()
+		e.wake()
+		e.wakeRouter()
+		return true, item, nil, nil, nil
 	}
 
 	e.setQueuePaused(scope, false)
 	entry, trig, err := e.sayWithSteer(ctx, req, false)
 	if err == nil {
-		e.markDrainCooldown(scope)
 		e.wake()
 		e.wakeRouter()
 	}
@@ -436,8 +432,8 @@ func (e *Engine) isRouterWorking(_ context.Context) bool {
 	return busy
 }
 
-// drainRouterPrompts promotes at most one queued web chat prompt into a real Entry+Trigger
-// once Router is idle and has no pending triggers waiting.
+// drainRouterPrompts promotes any leftover legacy queued web chat prompts into real Entry+Trigger
+// records without artificial PTY cooldowns or background-trigger holdbacks.
 func (e *Engine) drainRouterPrompts(ctx context.Context) {
 	e.mu.Lock()
 	if e.hubUpdating || e.routerDispatching || e.router.turn != nil {
@@ -452,23 +448,12 @@ func (e *Engine) drainRouterPrompts(ctx context.Context) {
 		e.mu.Unlock()
 	}()
 
-	if queued, err := e.store.ListQueuedTriggers(ctx); err == nil {
-		for _, t := range queued {
-			if len(t.Targets) == 0 || slices.Contains(t.Targets, model.RouterName) {
-				return // wait until already-queued router triggers finish first
-			}
-		}
-	}
-
 	all, err := e.store.ListQueuedPrompts(ctx, "")
 	if err != nil || len(all) == 0 {
 		return
 	}
 	for _, item := range all {
-		if !strings.HasPrefix(item.Scope, routerQueuePrefix) {
-			continue
-		}
-		if e.isQueuePaused(item.Scope) || e.inDrainCooldown(item.Scope, 5*time.Second) {
+		if !strings.HasPrefix(item.Scope, routerQueuePrefix) || e.isQueuePaused(item.Scope) {
 			continue
 		}
 		if _, _, err := e.sayWithSteer(ctx, SayRequest{
@@ -490,9 +475,8 @@ func (e *Engine) drainRouterPrompts(ctx context.Context) {
 			return
 		}
 		_ = e.store.DeleteQueuedPrompt(ctx, item.ID)
-		e.markDrainCooldown(item.Scope)
 		e.notifyChanged()
-		return // one queued turn at a time
+		return
 	}
 }
 

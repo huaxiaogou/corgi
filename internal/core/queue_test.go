@@ -161,14 +161,21 @@ func TestMainChatQueueSteerAndDrain(t *testing.T) {
 	eng.router.turn = &apiRouterTurn{thread: model.MainThread, triggerID: "t0", done: make(chan struct{})}
 	eng.mu.Unlock()
 
-	// While Router is working, Web chat submissions queue cleanly without polluting entries.
-	q1, it1, entry1, _, err := eng.SubmitChatSay(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "第一条排队"}, "auto")
-	if err != nil || !q1 || it1 == nil || entry1 != nil {
-		t.Fatalf("expected web chat queued while router working: q=%v item=%v entry=%v err=%v", q1, it1, entry1, err)
+	// While native API Router is working, default Web chat ("auto") commits immediately into
+	// Entry + Trigger just like WeCom (never trapped in legacy PTY queued_prompts).
+	qAuto, itAuto, entryAuto, trigAuto, err := eng.SubmitChatSay(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "直接上屏无需排队"}, "auto")
+	if err != nil || qAuto || itAuto != nil || entryAuto == nil || trigAuto == nil {
+		t.Fatalf("expected web auto chat committed immediately while router busy: q=%v item=%v entry=%v trig=%v err=%v", qAuto, itAuto, entryAuto, trigAuto, err)
 	}
-	q2, it2, _, _, err := eng.SubmitChatSay(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "第二条插队引导"}, "auto")
+
+	// Explicit mode="queue" remains backward compatible for legacy clients / tests.
+	q1, it1, entry1, _, err := eng.SubmitChatSay(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "第一条显式排队"}, "queue")
+	if err != nil || !q1 || it1 == nil || entry1 != nil {
+		t.Fatalf("expected explicit queue mode queued: q=%v item=%v entry=%v err=%v", q1, it1, entry1, err)
+	}
+	q2, it2, _, _, err := eng.SubmitChatSay(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "第二条插队引导"}, "queue")
 	if err != nil || !q2 || it2 == nil {
-		t.Fatalf("expected second web chat queued: q=%v item=%v err=%v", q2, it2, err)
+		t.Fatalf("expected second explicit queued: q=%v item=%v err=%v", q2, it2, err)
 	}
 
 	// Steer #2 promotes it immediately into Entry + Trigger(Steer=true).

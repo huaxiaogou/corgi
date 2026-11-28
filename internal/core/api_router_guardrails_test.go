@@ -827,7 +827,7 @@ func TestCodexReviewRegressions(t *testing.T) {
 		queued, item, _, _, err := eng.SubmitChatSay(ctx, SayRequest{
 			Thread: model.MainThread, Channel: "web", From: "you", Text: "检查代码",
 			Machine: "hub", Kind: "codex", Model: "gpt-5.4-mini", Effort: "high", ProjectID: "corgi",
-		}, "auto")
+		}, "queue")
 		if err != nil || !queued || item == nil {
 			t.Fatalf("expected queued chat prompt: queued=%v item=%v err=%v", queued, item, err)
 		}
