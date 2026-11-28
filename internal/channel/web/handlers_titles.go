@@ -59,6 +59,7 @@ func (s *Server) localPaneSessions(ctx context.Context) map[string]model.PaneSes
 	if err != nil {
 		return out
 	}
+	s.reconcileLocalPanes(panes)
 	agents, _ := s.Fleet.Agents(ctx)
 	agentByPane := map[string]model.Agent{}
 	for _, a := range agents {
@@ -84,16 +85,30 @@ func (s *Server) localPaneSessions(ctx context.Context) map[string]model.PaneSes
 			continue
 		}
 		sess := ""
-		if ag, ok := agentByPane[p.ID]; ok && ag.Session != nil {
-			sess = extractSessionToken(ag.Session.Kind, ag.Session.Value)
+		workerName := ""
+		if ag, ok := agentByPane[p.ID]; ok {
+			workerName = deref(ag.Name)
+			if ag.Session != nil {
+				sess = extractSessionToken(ag.Session.Kind, ag.Session.Value)
+			}
 		}
 		cwd := deref(p.ForegroundCwd)
 		if cwd == "" {
 			cwd = deref(p.Cwd)
 		}
 		if sess == "" {
-			if trPath := ad.LocateTranscript(s.Home, cwd, "", s.startedAt(p.ID)); trPath != "" {
-				sess = extractSessionToken("path", trPath)
+			since := s.startedAt(p.ID)
+			res := agent.LocateTranscript(ad, s.Home, cwd, "", since, agent.LocateHint{
+				PaneID:     localID,
+				WorkerName: workerName,
+				SinceKnown: !since.IsZero(),
+			})
+			if res.Verified {
+				if res.SessionID != "" {
+					sess = res.SessionID
+				} else if res.Path != "" {
+					sess = extractSessionToken("path", res.Path)
+				}
 			}
 		}
 		var run *[2]string
@@ -317,7 +332,8 @@ func (s *Server) handleGetTranscript(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	trPath := ad.LocateTranscript(s.Home, s.expand(q.Get("cwd")), session, time.Time{})
+	res := agent.LocateTranscript(ad, s.Home, s.expand(q.Get("cwd")), session, time.Time{}, agent.LocateHint{})
+	trPath := res.Path
 	if trPath == "" {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "这台电脑上找不到该会话的记录文件"})
 		return

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
 	"github.com/kiperjing/corgi/internal/runtime/herdr"
@@ -1023,6 +1024,11 @@ func (e *Engine) hibernateWorker(ctx context.Context, cand workerGCCandidate) {
 		return
 	}
 
+	if wk.PaneID != "" && e.agents != nil {
+		if lp, m := fleet.SplitID(wk.PaneID); m == "" && lp != "" {
+			e.agents.ReleasePane(lp)
+		}
+	}
 	e.finalizeHibernatedWorker(ctx, wk, cand.reason, time.Now())
 }
 

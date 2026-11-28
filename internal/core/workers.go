@@ -1283,6 +1283,11 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 	if wk.WorkspaceID != "" && e.fleet != nil {
 		_ = e.fleet.CloseWorkspace(ctx, wk.WorkspaceID)
 	}
+	if wk.PaneID != "" && e.agents != nil {
+		if lp, m := fleet.SplitID(wk.PaneID); m == "" && lp != "" {
+			e.agents.ReleasePane(lp)
+		}
+	}
 	if wk.PaneID != "" {
 		e.recordRecentlyClosedPane(wk.PaneID, time.Now())
 	}

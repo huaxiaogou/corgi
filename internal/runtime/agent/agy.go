@@ -14,8 +14,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kiperjing/corgi/internal/model"
@@ -26,7 +26,17 @@ import (
 var agyUserRequestRe = regexp.MustCompile(`(?s)<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>`)
 
 // AgyAdapter adapts Antigravity CLI (agy) to Corgi's runtime.
-type AgyAdapter struct{}
+// All caches and pane claims are strictly instance-scoped (zero package-level globals).
+type AgyAdapter struct {
+	indexMu   sync.Mutex
+	indexAt   time.Time
+	indexRoot string
+	indexWS   map[string][]string
+
+	claimMu   sync.Mutex
+	claimed   map[string]agyPaneClaim
+	paneOwner map[string]string
+}
 
 func (a *AgyAdapter) Kind() string        { return "agy" }
 func (a *AgyAdapter) DisplayName() string { return "Antigravity" }
@@ -287,62 +297,6 @@ func parseAgyModelsOutput(raw string) []model.ModelOpt {
 		})
 	}
 	return models
-}
-
-func (a *AgyAdapter) LocateTranscript(home, cwd, sessionID string, since time.Time) string {
-	root := agyHome(home)
-	brain := filepath.Join(root, "brain")
-	if sessionID != "" {
-		for _, b := range []string{brain, filepath.Join(home, ".gemini", "antigravity", "brain")} {
-			if p := preferFullTranscript(filepath.Join(b, sessionID, ".system_generated", "logs", "transcript.jsonl")); p != "" {
-				return p
-			}
-		}
-		return ""
-	}
-	if cwd == "" {
-		return ""
-	}
-	cwd = strings.TrimSuffix(filepath.Clean(cwd), "/")
-	if since.IsZero() {
-		since = time.Now().Add(-6 * time.Hour)
-	}
-	workspaces := agyWorkspaces(root)
-	files, _ := filepath.Glob(filepath.Join(brain, "*", ".system_generated", "logs", "transcript.jsonl"))
-	type cand struct {
-		path string
-		mod  time.Time
-	}
-	var cands []cand
-	for _, f := range files {
-		convDir := filepath.Dir(filepath.Dir(filepath.Dir(f)))
-		convID := filepath.Base(convDir)
-		if !slices.Contains(workspaces[convID], cwd) {
-			continue
-		}
-		fi, err := os.Stat(f)
-		if err != nil || fi.ModTime().Before(since.Add(-10*time.Second)) {
-			continue
-		}
-		cands = append(cands, cand{path: preferFullTranscript(f), mod: fi.ModTime()})
-	}
-	if len(cands) == 0 {
-		return ""
-	}
-	sort.Slice(cands, func(i, j int) bool { return cands[i].mod.After(cands[j].mod) })
-	return cands[0].path
-}
-
-func preferFullTranscript(path string) string {
-	if full := strings.TrimSuffix(path, "transcript.jsonl") + "transcript_full.jsonl"; full != path {
-		if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
-			return full
-		}
-	}
-	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
-		return path
-	}
-	return ""
 }
 
 func (a *AgyAdapter) ParseTranscriptLine(line []byte, _ string) ([]*model.Message, bool) {
@@ -665,33 +619,4 @@ func agyHome(home string) string {
 		return p
 	}
 	return filepath.Join(home, ".gemini", "antigravity")
-}
-
-func agyWorkspaces(root string) map[string][]string {
-	out := map[string][]string{}
-	dbPath := filepath.Join(root, "conversation_summaries.db")
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(2000)")
-	if err != nil {
-		return out
-	}
-	defer db.Close()
-	cutoff := time.Now().Add(-48 * time.Hour).UTC().Format("2006-01-02 15:04:05")
-	rows, err := db.Query(`SELECT conversation_id, workspace_uris FROM conversation_summaries WHERE last_modified_time > ?`, cutoff)
-	if err != nil {
-		return out
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, raw string
-		if rows.Scan(&id, &raw) != nil {
-			continue
-		}
-		var uris []string
-		if json.Unmarshal([]byte(raw), &uris) == nil {
-			for _, u := range uris {
-				out[id] = append(out[id], strings.TrimSuffix(strings.TrimPrefix(u, "file://"), "/"))
-			}
-		}
-	}
-	return out
 }

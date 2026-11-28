@@ -58,6 +58,48 @@ func sortEffortsCanonical(efforts []string) []string {
 // ModelNameRe validates CLI-safe model and effort flags.
 var ModelNameRe = regexp.MustCompile(`^[A-Za-z0-9._:/@\[\]-]{0,120}$`)
 
+// LocateHint carries pane-scoped context for deterministic transcript attribution.
+type LocateHint struct {
+	PaneID     string // normalized local paneID for local claimed mutual exclusion
+	WorkerName string // Corgi worker name or herdr agent name for first-line identity check
+	SinceKnown bool   // true when since is a known session start timestamp
+}
+
+// LocateResult carries the resolved transcript path and attribution confidence.
+type LocateResult struct {
+	Path      string // transcript path; empty when ownership cannot be uniquely confirmed
+	SessionID string // associated conversation/session ID (persistable only when Verified)
+	Verified  bool   // true when matched by explicit ID or uniquely confirmed & atomically claimed
+}
+
+// ContextTranscriptLocator is optionally implemented by adapters that support
+// anti-crosstalk session attribution and pane-scoped claim lifecycle management.
+type ContextTranscriptLocator interface {
+	LocateTranscriptWithHint(home, cwd, sessionID string, since time.Time, hint LocateHint) LocateResult
+	ReleasePane(paneID string)
+	ReconcileLivePanes(livePaneIDs map[string]bool)
+}
+
+// LocateTranscript locates a transcript using context-aware attribution when supported.
+func LocateTranscript(ad Adapter, home, cwd, sessionID string, since time.Time, hint LocateHint) LocateResult {
+	if ad == nil {
+		return LocateResult{}
+	}
+	if cl, ok := ad.(ContextTranscriptLocator); ok {
+		return cl.LocateTranscriptWithHint(home, cwd, sessionID, since, hint)
+	}
+	p := ad.LocateTranscript(home, cwd, sessionID, since)
+	if p == "" {
+		return LocateResult{}
+	}
+	sid := strings.TrimSpace(sessionID)
+	return LocateResult{
+		Path:      p,
+		SessionID: sid,
+		Verified:  sid != "",
+	}
+}
+
 // Adapter encapsulates CLI-specific differences for Claude Code, Codex, Antigravity, and CodeBuddy.
 type Adapter interface {
 	Kind() string
@@ -188,4 +230,29 @@ func (r *Registry) Models(ctx context.Context, home, rawKind string, refresh boo
 	r.modelCache[a.Kind()] = cachedCatalog{at: time.Now(), catalog: cat}
 	r.mu.Unlock()
 	return cat, nil
+}
+
+// ReleasePane notifies all context-aware adapters that a local pane has closed.
+func (r *Registry) ReleasePane(paneID string) {
+	if r == nil || strings.TrimSpace(paneID) == "" {
+		return
+	}
+	for _, ad := range r.adapters {
+		if cl, ok := ad.(ContextTranscriptLocator); ok {
+			cl.ReleasePane(paneID)
+		}
+	}
+}
+
+// ReconcileLivePanes drops stale pane claims on all context-aware adapters using a
+// fresh snapshot of live local pane IDs.
+func (r *Registry) ReconcileLivePanes(livePaneIDs map[string]bool) {
+	if r == nil {
+		return
+	}
+	for _, ad := range r.adapters {
+		if cl, ok := ad.(ContextTranscriptLocator); ok {
+			cl.ReconcileLivePanes(livePaneIDs)
+		}
+	}
 }

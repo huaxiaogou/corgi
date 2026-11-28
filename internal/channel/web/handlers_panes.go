@@ -455,11 +455,13 @@ func (s *Server) handleSendKeys(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCloseWorkspace(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	localPanes := s.localPanesInWorkspace(r.Context(), id)
 	if s.Engine != nil {
 		if err := s.Engine.CloseManagedWorkspace(r.Context(), id); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
 		}
+		s.releaseLocalPanes(localPanes)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
@@ -467,7 +469,66 @@ func (s *Server) handleCloseWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}
+	s.releaseLocalPanes(localPanes)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) localPanesInWorkspace(ctx context.Context, workspaceID string) []string {
+	if s.Fleet == nil || s.Agents == nil {
+		return nil
+	}
+	localWS, machine := fleet.SplitID(workspaceID)
+	if machine != "" || localWS == "" {
+		return nil
+	}
+	panes, err := s.Fleet.Panes(ctx)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, p := range panes {
+		lp, pm := fleet.SplitID(p.ID)
+		lw, _ := fleet.SplitID(p.WorkspaceID)
+		if pm == "" && lw == localWS && lp != "" {
+			out = append(out, lp)
+		}
+	}
+	return out
+}
+
+func (s *Server) releaseLocalPanes(localPaneIDs []string) {
+	for _, lp := range localPaneIDs {
+		if s.Agents != nil {
+			s.Agents.ReleasePane(lp)
+		}
+		s.forgetStarted(lp)
+	}
+}
+
+func (s *Server) reconcileLocalAgents(agents []model.Agent) {
+	if s.Agents == nil {
+		return
+	}
+	live := make(map[string]bool, len(agents))
+	for _, a := range agents {
+		if lp, m := fleet.SplitID(a.PaneID); m == "" && lp != "" {
+			live[lp] = true
+		}
+	}
+	s.Agents.ReconcileLivePanes(live)
+}
+
+func (s *Server) reconcileLocalPanes(panes []model.Pane) {
+	if s.Agents == nil {
+		return
+	}
+	live := make(map[string]bool, len(panes))
+	for _, p := range panes {
+		if lp, m := fleet.SplitID(p.ID); m == "" && lp != "" {
+			live[lp] = true
+		}
+	}
+	s.Agents.ReconcileLivePanes(live)
 }
 
 func (s *Server) handleSeenPane(w http.ResponseWriter, r *http.Request) {
@@ -613,6 +674,9 @@ func (s *Server) readerForPane(ctx context.Context, id string) (*agent.Transcrip
 	if err != nil {
 		return nil, nil
 	}
+	s.reconcileLocalAgents(agents)
+	localPane, _ := fleet.SplitID(id)
+	since := s.startedAt(id)
 	for _, a := range agents {
 		if a.PaneID != id || a.Agent == nil {
 			continue
@@ -625,17 +689,22 @@ func (s *Server) readerForPane(ctx context.Context, id string) (*agent.Transcrip
 		if a.Session != nil {
 			sess = extractSessionToken(a.Session.Kind, a.Session.Value)
 		}
-		p := ad.LocateTranscript(s.Home, deref(a.Cwd), sess, s.startedAt(id))
-		if p == "" {
+		res := agent.LocateTranscript(ad, s.Home, deref(a.Cwd), sess, since, agent.LocateHint{
+			PaneID:     localPane,
+			WorkerName: deref(a.Name),
+			SinceKnown: !since.IsZero(),
+		})
+		if res.Path == "" {
 			return nil, nil
 		}
-		return agent.NewTranscriptReader(p, ad, filepath.Join(s.CorgiDir, "images")), ad
+		return agent.NewTranscriptReader(res.Path, ad, filepath.Join(s.CorgiDir, "images")), ad
 	}
 	return nil, nil
 }
 
 func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	localPane, _ := fleet.SplitID(id)
 	sse, ok := newSSE(w)
 	if !ok {
 		return
@@ -654,7 +723,10 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request) {
 	imgDir := filepath.Join(s.CorgiDir, "images")
 	for {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		agents, _ := s.Fleet.Agents(ctx)
+		agents, agentsErr := s.Fleet.Agents(ctx)
+		if agentsErr == nil {
+			s.reconcileLocalAgents(agents)
+		}
 		var cur *model.Agent
 		for i := range agents {
 			if agents[i].PaneID == id {
@@ -673,15 +745,39 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request) {
 				if cur.Session != nil {
 					sess = extractSessionToken(cur.Session.Kind, cur.Session.Value)
 				}
-				if p := ad.LocateTranscript(s.Home, deref(cur.Cwd), sess, s.startedAt(id)); p != "" && p != lastPath {
-					lastPath = p
-					reader = agent.NewTranscriptReader(p, ad, imgDir)
+				since := s.startedAt(id)
+				res := agent.LocateTranscript(ad, s.Home, deref(cur.Cwd), sess, since, agent.LocateHint{
+					PaneID:     localPane,
+					WorkerName: deref(cur.Name),
+					SinceKnown: !since.IsZero(),
+				})
+				if res.Path != "" && res.Path != lastPath {
+					lastPath = res.Path
+					reader = agent.NewTranscriptReader(res.Path, ad, imgDir)
 					reader.OpenTail()
 					ms = agent.MsgSync{}
 					lastLog = ""
+					usagePct = 0
+					usageRead = time.Time{}
+					_ = sse.send("reset", []byte(`{}`))
+				} else if res.Path == "" && reader != nil {
+					reader = nil
+					lastPath = ""
+					ms = agent.MsgSync{}
+					lastLog = ""
+					usagePct = 0
+					usageRead = time.Time{}
 					_ = sse.send("reset", []byte(`{}`))
 				}
 			}
+		} else if agentsErr == nil && reader != nil {
+			reader = nil
+			lastPath = ""
+			ms = agent.MsgSync{}
+			lastLog = ""
+			usagePct = 0
+			usageRead = time.Time{}
+			_ = sse.send("reset", []byte(`{}`))
 		}
 		if reader != nil {
 			changed := reader.Poll()
@@ -765,6 +861,12 @@ func (s *Server) startedAt(pane string) time.Time {
 		return time.Time{}
 	}
 	return s.started[pane]
+}
+
+func (s *Server) forgetStarted(pane string) {
+	s.startMu.Lock()
+	delete(s.started, pane)
+	s.startMu.Unlock()
 }
 
 func deref(p *string) string {

@@ -487,8 +487,13 @@ func (e *Engine) WorkerTranscriptSource(ctx context.Context, workerName string) 
 			}
 		}
 	}
-	p := ad.LocateTranscript(e.home, w.Cwd, sess, w.CreatedAt)
-	return paneID, "", p, ad
+	localPane, _ := fleet.SplitID(w.PaneID)
+	res := agent.LocateTranscript(ad, e.home, w.Cwd, sess, w.CreatedAt, agent.LocateHint{
+		PaneID:     localPane,
+		WorkerName: w.Name,
+		SinceKnown: !w.CreatedAt.IsZero(),
+	})
+	return paneID, "", res.Path, ad
 }
 
 // SendDirectWorkerMessage resolves or resumes the target Worker, queues or sends the prompt

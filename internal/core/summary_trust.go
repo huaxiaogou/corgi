@@ -168,7 +168,12 @@ func (e *Engine) lastWorkerTurnSnapshot(ctx context.Context, w *model.Worker) wo
 			}
 		}
 	} else if ad, err := e.agents.Get(w.Kind); err == nil {
-		if p := ad.LocateTranscript(e.home, w.Cwd, w.Session, w.CreatedAt); p != "" {
+		res := agent.LocateTranscript(ad, e.home, w.Cwd, w.Session, w.CreatedAt, agent.LocateHint{
+			PaneID:     localPane,
+			WorkerName: w.Name,
+			SinceKnown: !w.CreatedAt.IsZero(),
+		})
+		if p := res.Path; p != "" {
 			tr := agent.NewTranscriptReader(p, ad, "")
 			tr.OpenTail()
 			st := tr.InspectLastTurn(128000)
@@ -235,7 +240,12 @@ func (e *Engine) workerTurnToolStats(ctx context.Context, w *model.Worker) (*mod
 	if err != nil {
 		return nil, false
 	}
-	p := ad.LocateTranscript(e.home, w.Cwd, w.Session, w.CreatedAt)
+	res := agent.LocateTranscript(ad, e.home, w.Cwd, w.Session, w.CreatedAt, agent.LocateHint{
+		PaneID:     localPane,
+		WorkerName: w.Name,
+		SinceKnown: !w.CreatedAt.IsZero(),
+	})
+	p := res.Path
 	if p == "" {
 		return nil, false
 	}
