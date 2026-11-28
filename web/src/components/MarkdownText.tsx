@@ -8,6 +8,7 @@ import {
   type InlineContext,
   type MarkdownImagePayload,
 } from "./markdown/InlineText";
+import { MermaidBlock } from "./markdown/MermaidBlock";
 import { parseMarkdownBlocks, type MarkdownBlock } from "./markdown/parseBlocks";
 import { CalloutBlock, MetricsStrip, StepsTimeline, TaskListItem } from "./markdown/RichBlocks";
 
@@ -26,6 +27,9 @@ function renderBlocks(blocks: MarkdownBlock[], ctx: InlineContext): ReactNode[] 
   return blocks.map((b, idx) => {
     switch (b.type) {
       case "code":
+        if (b.lang.trim().toLowerCase() === "mermaid") {
+          return <MermaidBlock key={idx} code={b.code} />;
+        }
         return <CodeBlock key={idx} lang={b.lang} code={b.code} />;
       case "metrics":
         return <MetricsStrip key={idx} items={b.items} />;

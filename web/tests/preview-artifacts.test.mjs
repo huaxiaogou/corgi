@@ -17,7 +17,7 @@ async function loadModule(entryRel) {
     bundle: true,
     format: "esm",
     jsx: "automatic",
-    external: ["react", "react/jsx-runtime", "react-dom", "react-dom/server", "lucide-react"],
+    external: ["react", "react/jsx-runtime", "react-dom", "react-dom/server", "lucide-react", "mermaid"],
   });
   try {
     return await import(`${pathToFileURL(outFile).href}?t=${Date.now()}`);
