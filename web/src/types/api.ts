@@ -164,18 +164,12 @@ export interface MediaRef {
 
 export interface RouterView {
   alive: boolean;
-  mode?: "pty" | "api" | string;
   status: string;
-  pane_id?: string;
   kind: string;
   model?: string;
   effort?: string;
-  context?: number;
-  rotate_at: number;
-  handover?: boolean;
   dreaming?: boolean;
   replied?: boolean;
-  pending?: boolean;
 }
 
 export interface FollowView {
@@ -345,14 +339,10 @@ export interface RouterAPISecretStatus {
 }
 
 export interface Settings {
-  router_mode?: "pty" | "api" | string;
   router_api_provider?: "tokenhub" | "openai" | string;
   router_api_base_url?: string;
   router_api_model?: string;
   router_api_effort?: string;
-  router_kind: string;
-  router_model?: string;
-  router_effort?: string;
   worker_kind: string;
   worker_model?: string;
   worker_effort?: string;
@@ -369,7 +359,6 @@ export interface Settings {
   worker_idle_gc_minutes?: number;
   worker_max_live_per_machine?: number;
   morning_digest?: boolean;
-  rotate_pct?: number;
   dream_at?: string;
   auto_update?: boolean;
   public_url?: string;
@@ -401,7 +390,6 @@ export interface MemorySnapshot {
   files: MemoryFile[];
   dreams: MemoryFile[];
   up_front: number;
-  messages: number;
   budget: number;
   dreaming?: boolean;
   last_dream?: string;

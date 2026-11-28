@@ -119,17 +119,7 @@ func (b *Bus) startRouterStream(ctx context.Context, thread, chatID, reqID strin
 		startedAt:    time.Now(),
 		initThink:    initThink,
 		lastChangeAt: time.Now(),
-		locateFn: func(c context.Context) (string, agent.Adapter) {
-			if b.engine == nil {
-				return "", nil
-			}
-			return b.engine.RouterTranscriptInfo(c)
-		},
 	}
-
-	// Establish the transcript baseline BEFORE ingesting the user's message so prior turns
-	// never leak into this turn's <think> block.
-	st.attachLocalTranscript(watchCtx, true)
 
 	// Send Frame 1 immediately so WeCom shows native "思考中..." within ~100ms.
 	if err := sess.SendProgress(watchCtx, initThink, "", true); err != nil {
@@ -336,15 +326,6 @@ func filterMessagesAfterOffset(msgs []*model.Message, afterOffset int64) []*mode
 	return out
 }
 
-func (st *activeWeComStream) idleSinceChange() time.Duration {
-	st.pollMu.Lock()
-	defer st.pollMu.Unlock()
-	if st.lastChangeAt.IsZero() {
-		return time.Since(st.startedAt)
-	}
-	return time.Since(st.lastChangeAt)
-}
-
 // abort cancels background transcript polling without transmitting a finish frame
 // (used when a newer reply must queue behind an older unsent FIFO outbox item).
 func (st *activeWeComStream) abort() {
@@ -375,24 +356,6 @@ func (st *activeWeComStream) seal(ctx context.Context, think, body string) (bool
 		}
 	}
 	return st.session.Finish(sctx, think, body)
-}
-
-func (b *Bus) recordRouterReplyAt(thread string, at time.Time) {
-	if thread == "" {
-		return
-	}
-	b.mu.Lock()
-	if b.lastRouterReplyAt == nil {
-		b.lastRouterReplyAt = map[string]time.Time{}
-	}
-	b.lastRouterReplyAt[thread] = at
-	b.mu.Unlock()
-}
-
-func (b *Bus) routerReplyAt(thread string) time.Time {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.lastRouterReplyAt[thread]
 }
 
 func (b *Bus) takeRouterStream(thread string) *activeWeComStream {
@@ -534,54 +497,13 @@ func (b *Bus) watchRouterStream(ctx context.Context, st *activeWeComStream) {
 	defer timer.Stop()
 	defer st.cancel()
 
-	tick := time.NewTicker(500 * time.Millisecond)
-	defer tick.Stop()
-	ticks := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			b.clearRouterStreamIfMatch(st)
-			_, _ = st.seal(ctx, "", "仍在后台处理中，完成后会自动发给你。")
-			return
-		case <-tick.C:
-			if st.session.Finished() {
-				return
-			}
-			ticks++
-			if st.getAPIProgress() == "" {
-				recheck := ticks%4 == 0 // recheck transcript path every ~2s for newly rotated sessions
-				if think, _ := st.pollLocalThink(ctx, recheck); think != "" {
-					_ = st.session.SendProgress(ctx, think, "", false)
-				}
-			}
-			if b.engine == nil {
-				continue
-			}
-			idle := b.engine.RouterContinuousIdle()
-			// If Router genuinely merged 2 consecutive user messages into a single reply
-			// (a reply landed after st.startedAt) and Router has now stayed idle >= 8s with
-			// no queued triggers left, cleanly close the leftover extra stream.
-			if replyAt := b.routerReplyAt(st.thread); replyAt.After(st.startedAt) &&
-				time.Since(replyAt) >= 8*time.Second &&
-				idle >= 8*time.Second &&
-				!b.engine.HasQueuedRouterTriggers(ctx) {
-				b.clearRouterStreamIfMatch(st)
-				_, _ = st.seal(ctx, "", "已合并回复于上一条。")
-				return
-			}
-			// Otherwise only auto-seal a silent Router turn after prolonged, verified continuous idle
-			// (never on brief 3s tool-call flickers).
-			if time.Since(st.startedAt) >= 45*time.Second &&
-				st.idleSinceChange() >= 15*time.Second &&
-				idle >= 30*time.Second &&
-				!b.engine.HasQueuedRouterTriggers(ctx) {
-				b.clearRouterStreamIfMatch(st)
-				_, _ = st.seal(ctx, "", "本轮处理超时未收到答复，请重试或补充说明。")
-				return
-			}
-		}
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+		b.clearRouterStreamIfMatch(st)
+		_, _ = st.seal(ctx, "", "仍在后台处理中，完成后会自动发给你。")
+		return
 	}
 }
 

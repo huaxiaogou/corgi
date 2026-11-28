@@ -152,40 +152,14 @@ func TestMainChatQueueSteerAndDrain(t *testing.T) {
 	}
 	defer st.Close()
 
-	var (
-		mu      sync.Mutex
-		status  = "working"
-		prompts []string
-	)
-	fl := newMockHerdrFleet(t, func(method string, params map[string]any) (any, *herdr.Error) {
-		mu.Lock()
-		defer mu.Unlock()
-		switch method {
-		case "agent.list":
-			name := model.RouterName
-			kind := "claude"
-			return map[string]any{
-				"agents": []map[string]any{{
-					"name":              name,
-					"pane_id":           "w0:p1",
-					"workspace_id":      "w0",
-					"agent":             kind,
-					"agent_status":      status,
-					"interactive_ready": true,
-				}},
-			}, nil
-		case "agent.prompt":
-			prompts = append(prompts, params["text"].(string))
-			return map[string]any{"ok": true}, nil
-		default:
-			return map[string]any{}, nil
-		}
-	})
-
-	eng, err := NewEngine(ctx, st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	eng, err := NewEngine(ctx, st, nil, agent.NewRegistry(), dir, dir, "corgi", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Mark native API Router busy with an active turn.
+	eng.mu.Lock()
+	eng.apiTurn = &apiRouterTurn{thread: model.MainThread, triggerID: "t0", done: make(chan struct{})}
+	eng.mu.Unlock()
 
 	// While Router is working, Web chat submissions queue cleanly without polluting entries.
 	q1, it1, entry1, _, err := eng.SubmitChatSay(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "第一条排队"}, "auto")
@@ -197,17 +171,10 @@ func TestMainChatQueueSteerAndDrain(t *testing.T) {
 		t.Fatalf("expected second web chat queued: q=%v item=%v err=%v", q2, it2, err)
 	}
 
-	// Steer #2 mid-turn -> creates Entry + Trigger(Steer=true) and delivers while Router is still working!
-	if _, trig, err := eng.SteerChatPrompt(ctx, model.MainThread, it2.ID); err != nil || trig == nil || !trig.Steer {
+	// Steer #2 promotes it immediately into Entry + Trigger(Steer=true).
+	if _, trig, err := eng.SteerChatPrompt(ctx, model.MainThread, it2.ID); err != nil || trig == nil || !trig.Steer || !strings.Contains(trig.Text, "第二条插队引导") {
 		t.Fatalf("SteerChatPrompt failed: trig=%+v err=%v", trig, err)
 	}
-	live := map[string]liveInfo{model.RouterName: {pane: "w0:p1", status: "working", ready: true, kind: "claude"}}
-	eng.deliverQueued(ctx, live, map[string]bool{"": true})
-	mu.Lock()
-	if len(prompts) != 1 || !strings.Contains(prompts[0], "第二条插队引导") {
-		t.Fatalf("expected steered #2 delivered mid-turn, got %v", prompts)
-	}
-	mu.Unlock()
 
 	// Cancel remaining #1 leaves zero queued items.
 	if err := eng.CancelQueuedPrompt(ctx, RouterQueueScope(model.MainThread), it1.ID); err != nil {

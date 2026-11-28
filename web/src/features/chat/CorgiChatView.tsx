@@ -464,9 +464,8 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
         notebookMode={notebookMode}
         onToggleNotebook={toggleNotebook}
         onToggleSearch={() => setSearchOpen((v) => !v)}
-        onRestartRouter={() => void api("/api/super/router/restart", {}).then(() => onToast("正在重启 Corgi 会话"))}
+        onRestartRouter={() => void api("/api/super/router/restart", {}).then(() => onToast("已重置 Corgi 大脑状态"))}
         onTogglePause={() => void togglePause()}
-        onOpenRouterPane={onSelectWorker}
       />
 
       {wecomFocus && wecomFocusLabel && (
@@ -796,21 +795,6 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                         <span className="px-1.5 py-0.5 rounded-full border border-hairline surface-rail text-[10.5px] text-secondary shrink-0">
                           {badge.label}
                         </span>
-                      </button>
-                    </div>
-                  );
-                }
-                if (entry.ref === "corgi" && router?.pane_id) {
-                  return (
-                    <div key={entry.id} id={`entry-${entry.id}`} data-entry-id={entry.id} className={`flex items-center gap-2.5 text-xs text-muted ${hlClass}`}>
-                      <StatusDot status={entry.tone === "error" || entry.tone === "blocked" ? "blocked" : "idle"} />
-                      <span className="font-mono-code text-[11px]">{new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-                      <button
-                        type="button"
-                        onClick={() => router.pane_id && onSelectWorker(router.pane_id)}
-                        className="text-left hover:text-primary hover:underline cursor-pointer"
-                      >
-                        {entry.text}
                       </button>
                     </div>
                   );
@@ -1280,7 +1264,7 @@ export function CorgiChatView({ data, machines, thread, focusSeq = 0, onSelectWo
                 }`}
               >
                 {routerWorking && <StatusDot status="working" />}
-                <span>{routerWorking ? (router?.replied && router?.mode !== "api" ? "已回复，在整理记忆…" : "Corgi 在想…") : "\u00A0"}</span>
+                <span>{routerWorking ? "Corgi 在想…" : "\u00A0"}</span>
               </div>
             )}
           </div>

@@ -134,24 +134,14 @@ func (e *Engine) formatWorkerWorkItemContext(ctx context.Context, wk *model.Work
 		return ""
 	}
 	state := e.store.GetWorkItemTitleState(ctx, wi.ID)
-	apiMode := e.isAPIRouterMode()
-	bin := orStr(strings.TrimSpace(e.binPath), "corgi")
 	var tag string
 	switch state {
 	case store.WorkItemTitleDraft:
-		if apiMode {
-			tag = fmt.Sprintf(" (draft — 请顺手调用 manage_work(action=\"update_work\", target=%q, title=\"...\", next_step=\"...\") 凝练8-18字标题并写明下一步)", wi.ID)
-		} else {
-			tag = fmt.Sprintf(" (draft — 请顺手用 `%s task set %s --title \"...\" --next \"...\"` 凝练8-18字标题并写明下一步)", bin, wi.ID)
-		}
+		tag = fmt.Sprintf(" (draft — 请顺手调用 manage_work(action=\"update_work\", target=%q, title=\"...\", next_step=\"...\") 凝练8-18字标题并写明下一步)", wi.ID)
 	case store.WorkItemTitleLocked:
 		tag = " (user-locked title)"
 	default:
-		if apiMode {
-			tag = fmt.Sprintf(" (阶段演进时可顺手调用 manage_work(action=\"update_work\" 或 \"close_work\", target=%q))", wi.ID)
-		} else {
-			tag = fmt.Sprintf(" (阶段演进时可顺手 `%s task set %s --title/--next`)", bin, wi.ID)
-		}
+		tag = fmt.Sprintf(" (阶段演进时可顺手调用 manage_work(action=\"update_work\" 或 \"close_work\", target=%q))", wi.ID)
 	}
 	next := oneLineClip(wi.NextStep, 80)
 	if next == "" {
@@ -428,42 +418,4 @@ func (e *Engine) cleanupClosedWorkItemWorktrees(ctx context.Context, workItemID 
 		e.logger.Info("cleaned closed work item worktree",
 			"work_item", workItemID, "worker", wk.Name, "note", clRes.Note)
 	}
-}
-
-// formatOpenWorkItemsSummary formats a compact Hub ledger summary injected on normal Router turns
-// so internal CLI compactions can never erase visibility of active user work.
-func formatOpenWorkItemsSummary(items []*model.WorkItem, binPath string) string {
-	if len(items) == 0 {
-		return ""
-	}
-	bin := strings.TrimSpace(binPath)
-	if bin == "" {
-		bin = "corgi"
-	}
-	total := len(items)
-	shown := items
-	var b strings.Builder
-	if total > maxInjectedWorkItems {
-		shown = items[:maxInjectedWorkItems]
-		fmt.Fprintf(&b, "\n[open work items: showing %d of %d — run `%s list` for complete list]\n", len(shown), total, bin)
-	} else {
-		fmt.Fprintf(&b, "\n[open work items: %d]\n", total)
-	}
-	for _, wi := range shown {
-		fmt.Fprintf(&b, "- %s · %s", wi.ID, oneLineClip(wi.Title, 72))
-		if wi.NextStep != "" {
-			fmt.Fprintf(&b, " · next: %s", oneLineClip(wi.NextStep, 80))
-		}
-		if len(wi.Workers) > 0 {
-			fmt.Fprintf(&b, " [workers: %s]", strings.Join(wi.Workers, ","))
-		}
-		if len(wi.Branches) > 0 {
-			fmt.Fprintf(&b, " [branches: %s]", strings.Join(wi.Branches, ","))
-		}
-		if len(wi.Artifacts) > 0 {
-			fmt.Fprintf(&b, " [delivered: %d]", len(wi.Artifacts))
-		}
-		b.WriteByte('\n')
-	}
-	return b.String()
 }

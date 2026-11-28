@@ -890,14 +890,10 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Settings != nil {
 		cur := s.Engine.Settings()
-		modifiesRouter := body.Settings.EffectiveRouterMode() != cur.EffectiveRouterMode() ||
-			body.Settings.RouterAPIProvider != cur.RouterAPIProvider ||
+		modifiesRouter := body.Settings.RouterAPIProvider != cur.RouterAPIProvider ||
 			body.Settings.RouterAPIBaseURL != cur.RouterAPIBaseURL ||
 			body.Settings.RouterAPIModel != cur.RouterAPIModel ||
-			body.Settings.RouterAPIEffort != cur.RouterAPIEffort ||
-			body.Settings.RouterKind != cur.RouterKind ||
-			body.Settings.RouterModel != cur.RouterModel ||
-			body.Settings.RouterEffort != cur.RouterEffort
+			body.Settings.RouterAPIEffort != cur.RouterAPIEffort
 		if modifiesRouter && !s.isOwnerRequest(r) {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "仅 Hub 管理员或已配对浏览器可修改大脑配置"})
 			return

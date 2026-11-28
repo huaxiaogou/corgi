@@ -4,7 +4,6 @@ import (
 	"context"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -264,7 +263,7 @@ func TestWorkingAndAskPermissionsWorkersAreNotInterrupted(t *testing.T) {
 	mu.Unlock()
 }
 
-func TestAnswerRestoredAgyEditDialogAndRouterBypassHeal(t *testing.T) {
+func TestAnswerRestoredAgyEditDialog(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "corgi.db"))
 	if err != nil {
@@ -275,7 +274,6 @@ func TestAnswerRestoredAgyEditDialogAndRouterBypassHeal(t *testing.T) {
 	var (
 		mu          sync.Mutex
 		sentAnswers []string
-		closedWS    []string
 	)
 	hc := newFakeHerdrClient(func(method string, params map[string]any) (any, *herdr.Error) {
 		mu.Lock()
@@ -286,17 +284,6 @@ func TestAnswerRestoredAgyEditDialogAndRouterBypassHeal(t *testing.T) {
 				"text": "  shift+tab to auto-approve file edits\nAccept this file edit?\n> 1. Yes, accept this change\n  2. No, reject this change\n  ↑/↓ Navigate · f full diff\nesc to cancel",
 			}}, nil
 		case "pane.process_info":
-			pid, _ := params["pane_id"].(string)
-			if pid == "wR:p1" {
-				return map[string]any{"process_info": map[string]any{
-					"pane_id":                     "wR:p1",
-					"shell_pid":                   10,
-					"foreground_process_group_id": 20,
-					"foreground_processes": []any{
-						map[string]any{"pid": 20, "name": "claude", "argv": []string{"claude", "--resume", "r-1"}},
-					},
-				}}, nil
-			}
 			return map[string]any{"process_info": map[string]any{
 				"pane_id":                     "w7:p1",
 				"shell_pid":                   100,
@@ -310,15 +297,6 @@ func TestAnswerRestoredAgyEditDialogAndRouterBypassHeal(t *testing.T) {
 				sentAnswers = append(sentAnswers, txt)
 			}
 			return map[string]any{}, nil
-		case "workspace.list":
-			return map[string]any{"workspaces": []any{
-				map[string]any{"workspace_id": "wR", "label": model.RouterLabel},
-			}}, nil
-		case "workspace.close":
-			if id, ok := params["workspace_id"].(string); ok {
-				closedWS = append(closedWS, id)
-			}
-			return map[string]any{}, nil
 		}
 		return map[string]any{}, nil
 	})
@@ -329,9 +307,6 @@ func TestAnswerRestoredAgyEditDialogAndRouterBypassHeal(t *testing.T) {
 		t.Fatal(err)
 	}
 	eng.bypassCheckInterval = 5 * time.Millisecond
-	eng.mu.Lock()
-	eng.routerLaunchAt = time.Now().Add(-5 * time.Minute)
-	eng.mu.Unlock()
 
 	ctx := context.Background()
 	wk := &model.Worker{
@@ -340,7 +315,7 @@ func TestAnswerRestoredAgyEditDialogAndRouterBypassHeal(t *testing.T) {
 	}
 	_ = st.UpsertWorker(ctx, wk)
 
-	// 1. Mid-turn file-edit dialog on restored agy pane missing bypass is auto-accepted without creating a pending card.
+	// Mid-turn file-edit dialog on restored agy pane missing bypass is auto-accepted without creating a pending card.
 	eng.handleWorkerBlocked(ctx, wk)
 	pending, err := st.ListPendingActions(ctx)
 	if err != nil || len(pending) != 0 {
@@ -351,31 +326,4 @@ func TestAnswerRestoredAgyEditDialogAndRouterBypassHeal(t *testing.T) {
 		t.Fatalf("expected choice '1' sent to w7:p1, got %v", sentAnswers)
 	}
 	mu.Unlock()
-
-	// 2. Router restored without bypass flag on Hub triggers clean RestartRouter.
-	restarted := eng.maybeHealRouterBypass(ctx, liveInfo{pane: "wR:p1", status: "idle", ready: true, kind: "claude"}, time.Now())
-	if !restarted {
-		t.Fatal("expected Router restored without bypass flag to restart cleanly")
-	}
-	mu.Lock()
-	if len(closedWS) != 1 || closedWS[0] != "wR" {
-		t.Fatalf("expected Router workspace wR closed for clean restart, got %v", closedWS)
-	}
-	mu.Unlock()
-
-	// Verify quiet info event recorded for Router recovery.
-	entries, _, err := st.ListEntries(ctx, model.MainThread, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	foundEvent := false
-	for _, en := range entries {
-		if en.Role == "event" && strings.Contains(en.Text, "恢复免审批模式") {
-			foundEvent = true
-			break
-		}
-	}
-	if !foundEvent {
-		t.Fatalf("expected router bypass-recovery event in thread entries, got %+v", entries)
-	}
 }

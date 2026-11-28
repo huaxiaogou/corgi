@@ -46,7 +46,6 @@ type Bus struct {
 	subs               map[chan struct{}]struct{}
 	outbox             map[string][]outboxItem
 	routerStreams      map[string][]*activeWeComStream
-	lastRouterReplyAt  map[string]time.Time
 	seenWeComMsgs      map[string]time.Time
 	pendingWebQuote    map[string]string
 	pendingFocusNotice map[string]string
@@ -69,7 +68,6 @@ func NewBus(eng *core.Engine, wc *wecom.Client, logger *slog.Logger) *Bus {
 		subs:               map[chan struct{}]struct{}{},
 		outbox:             map[string][]outboxItem{},
 		routerStreams:      map[string][]*activeWeComStream{},
-		lastRouterReplyAt:  map[string]time.Time{},
 		seenWeComMsgs:      map[string]time.Time{},
 		pendingWebQuote:    map[string]string{},
 		pendingFocusNotice: map[string]string{},
@@ -449,7 +447,6 @@ func formatPreviewLinksBlock(attachments []core.AttachmentFile) string {
 func (b *Bus) OnReply(ctx context.Context, entry *model.Entry, action *model.Action, attachments []core.AttachmentFile) core.ReplyDelivery {
 	chatID := threadToWeComChat(entry.Thread)
 	now := time.Now()
-	b.recordRouterReplyAt(entry.Thread, now)
 	suppress, wecomRecent := b.wecomDeliveryState(entry.Thread, now)
 	hasExplicitFiles := len(attachments) > 0 || len(entry.Files) > 0
 	linksBlock := formatPreviewLinksBlock(attachments)

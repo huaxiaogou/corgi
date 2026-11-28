@@ -32,7 +32,7 @@ const (
    - 若 notes/ 中某可复用流程已反复使用且趋于稳定、尚未做成 skill，可在 finish_dream 的 skill_candidates 中列出简短名称；
    - 若现有 skill 在日志中反复导致卡点或绕路，可在 finish_dream 的 skill_fixes 中以「名称（修复点）」列出；
    - 无则留空，不要硬凑。
-6. 严禁删除或篡改主人明确给出的长期规则（除非有更新的明确指令覆盖）。memory/messages.md 为系统只读文件，不可写入。
+6. 严禁删除或篡改主人明确给出的长期规则（除非有更新的明确指令覆盖）。
 7. 必须通过调用 finish_dream 完成本次做梦：提供一句精炼中文 summary（面向主人展示）和简洁 journal（≤30行变更与观察记录）。`
 )
 
@@ -75,7 +75,7 @@ func apiDreamToolDefs() []LLMToolDef {
 			Type: "function",
 			Function: LLMToolFunctionSpec{
 				Name:        "write_memory",
-				Description: "原子写入 memory/instructions.md 或单层 memory/notes/<slug>.md（≤32KB；禁止写 messages.md 与 tasks/）。",
+				Description: "原子写入 memory/instructions.md 或单层 memory/notes/<slug>.md（≤32KB）。",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -141,15 +141,8 @@ func (e *Engine) runAPIDream(d *dreamRun, _ model.Settings) {
 		}
 		return
 	}
-	if err := e.writeDreamInput(dreamCtx); err != nil {
-		errMsg = oneLineClip(err.Error(), 140)
-		if e.logger != nil {
-			e.logger.Warn("api dream write input failed", "id", d.id, "err", err)
-		}
-		return
-	}
 
-	userMsg := e.buildAPIDreamUserMessage(d.at)
+	userMsg := e.buildAPIDreamUserMessage(dreamCtx, d.at)
 	messages := []LLMMessage{
 		{Role: "system", Content: apiDreamSystemPromptV1},
 		{Role: "user", Content: userMsg},
@@ -282,7 +275,7 @@ func (e *Engine) runAPIDream(d *dreamRun, _ model.Settings) {
 	}
 }
 
-func (e *Engine) buildAPIDreamUserMessage(dreamAt time.Time) string {
+func (e *Engine) buildAPIDreamUserMessage(ctx context.Context, dreamAt time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "本次做梦时间：%s（日志文件名：dreams/%s.md，up-front 预算约 %d KB）\n",
 		dreamAt.Format("2006-01-02 15:04"), journalName(dreamAt), UpFrontBudgetBytes>>10)
@@ -321,16 +314,14 @@ func (e *Engine) buildAPIDreamUserMessage(dreamAt time.Time) string {
 		}
 	}
 
-	// Append dream/input.md within remaining rune budget (~36K total).
-	inputPath := filepath.Join(e.memory.RouterDir(), "dream", "input.md")
-	if raw, err := os.ReadFile(inputPath); err == nil {
-		inputText := strings.TrimSpace(string(raw))
+	// Build recent SQLite context directly in memory within remaining rune budget (~36K total).
+	if inputText := strings.TrimSpace(e.buildDreamInput(ctx)); inputText != "" {
 		remaining := maxAPIDreamInputRunes - len([]rune(b.String())) - 200
 		if remaining < 4000 {
 			remaining = 4000
 		}
 		inputText = clipDreamInputBudget(inputText, remaining)
-		b.WriteString("\n## 近期上下文（dream/input.md）\n")
+		b.WriteString("\n## 近期上下文\n")
 		b.WriteString(inputText)
 		b.WriteByte('\n')
 	}
@@ -348,7 +339,11 @@ func (e *Engine) listMemoryFileNames() []string {
 			return nil
 		}
 		if rel, rErr := filepath.Rel(root, p); rErr == nil {
-			out = append(out, filepath.ToSlash(rel))
+			sl := filepath.ToSlash(rel)
+			if sl == "messages.md" {
+				return nil
+			}
+			out = append(out, sl)
 		}
 		return nil
 	})

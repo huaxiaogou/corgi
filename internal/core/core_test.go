@@ -142,52 +142,18 @@ func TestMemoryManagerGuardrails(t *testing.T) {
 	if !found {
 		t.Fatalf("expected notes/shop.md in %+v", files)
 	}
-}
-
-func TestWriteRouterDocsIncludesDefaultWorkerMachine(t *testing.T) {
-	mm := NewMemoryManager(t.TempDir())
-	st := model.Settings{
-		ReplyChars:    200,
-		WorkerMachine: "kiperjing-mb0-2",
-		WorkerKind:    "agy",
-		WorkerModel:   "gemini-4-neon",
-		WorkerEffort:  "xhigh",
-		WorkerCwd:     "~",
+	// Legacy messages.md on disk must be skipped by ListFiles without deleting it.
+	legacyMsgPath := filepath.Join(mm.MemDir(), "messages.md")
+	if err := os.WriteFile(legacyMsgPath, []byte("legacy"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if err := mm.WriteRouterDocs("/usr/local/bin/corgi", st); err != nil {
-		t.Fatalf("WriteRouterDocs failed: %v", err)
-	}
-	mm.MarkRouterDocsRead()
-	b, err := os.ReadFile(filepath.Join(mm.RouterDir(), "CORGI.md"))
-	if err != nil {
-		t.Fatalf("read CORGI.md: %v", err)
-	}
-	doc := string(b)
-	for _, want := range []string{
-		"machine kiperjing-mb0-2",
-		"kind agy",
-		"model gemini-4-neon",
-		"effort xhigh",
-		"cwd ~",
-		"default computer (`kiperjing-mb0-2`)",
-		"Formatting & lists",
-		"lightweight `✓ 已看` reminder",
-		"stop WORKER",
-	} {
-		if !strings.Contains(doc, want) {
-			t.Fatalf("CORGI.md missing %q", want)
+	for _, f := range mm.ListFiles() {
+		if f.Name == "messages.md" {
+			t.Fatalf("ListFiles should skip legacy messages.md, got %+v", f)
 		}
 	}
-
-	// Changing WorkerMachine should report changed=true so Router hot-reloads CORGI.md.
-	st.WorkerMachine = ""
-	changed, err := mm.WriteRouterDocsChanged("/usr/local/bin/corgi", st)
-	if err != nil || !changed {
-		t.Fatalf("expected changed=true after WorkerMachine update, got changed=%v err=%v", changed, err)
-	}
-	b2, _ := os.ReadFile(filepath.Join(mm.RouterDir(), "CORGI.md"))
-	if !strings.Contains(string(b2), "machine hub (local)") {
-		t.Fatalf("expected fallback 'machine hub (local)' when WorkerMachine is empty")
+	if _, err := os.Stat(legacyMsgPath); err != nil {
+		t.Fatalf("ListFiles must not delete legacy messages.md: %v", err)
 	}
 }
 
@@ -689,54 +655,6 @@ func TestDecisionReceiptLinkingFollowUpAndSnapshot(t *testing.T) {
 	}
 	if !hasDialogEvent || !hasSnoozeEvent {
 		t.Fatalf("expected event entries linked to action_id: dialog=%v snooze=%v", hasDialogEvent, hasSnoozeEvent)
-	}
-}
-
-func TestDefaultRotatePctAndNormalization(t *testing.T) {
-	if got := model.DefaultSettings("").RotatePct; got != 70 {
-		t.Fatalf("DefaultSettings().RotatePct = %d, want 70", got)
-	}
-
-	dir := t.TempDir()
-	st, err := store.Open(filepath.Join(dir, "corgi.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"claude"})
-	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-
-	if snap := eng.Snapshot(ctx, model.MainThread); snap.Router.RotateAt != 70 {
-		t.Fatalf("initial Snapshot Router.RotateAt = %d, want 70", snap.Router.RotateAt)
-	}
-
-	cases := []struct {
-		name         string
-		input        int
-		wantRotateAt int
-	}{
-		{name: "zero falls back to 70", input: 0, wantRotateAt: 70},
-		{name: "negative disables handover", input: -1, wantRotateAt: 0},
-		{name: "valid explicit value kept", input: 75, wantRotateAt: 75},
-		{name: "below min resets to default 70", input: 10, wantRotateAt: 70},
-		{name: "above max resets to default 70", input: 99, wantRotateAt: 70},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := eng.Settings()
-			cfg.RotatePct = tc.input
-			if err := eng.SaveConfig(ctx, &cfg, nil); err != nil {
-				t.Fatalf("SaveConfig(%d): %v", tc.input, err)
-			}
-			if got := eng.Snapshot(ctx, model.MainThread).Router.RotateAt; got != tc.wantRotateAt {
-				t.Fatalf("RotateAt after SaveConfig(%d) = %d, want %d", tc.input, got, tc.wantRotateAt)
-			}
-		})
 	}
 }
 

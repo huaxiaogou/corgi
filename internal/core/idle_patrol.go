@@ -294,22 +294,13 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 		shown = shown[:patrolMaxSummaryItems]
 	}
 
-	apiMode := e.isAPIRouterMode()
 	var b strings.Builder
 	fmt.Fprintf(&b, "[corgi idle-patrol] %d idle work item(s)/session(s) reached patrol threshold (zero-token gate passed).\n", len(due))
 	b.WriteString("Triage strictly (WorkItem-centered):\n")
-	if apiMode {
-		b.WriteString("- 所有面向用户的表述必须以「事项名称」为主语，严禁把 wi/agy/codex/分支名等内部代号直接甩给用户（仅在需要用户决定未合入代码去留时附带说明）。\n")
-		b.WriteString("- 严禁把清理已关闭事项或无未合入改动的闲置 worktree / 底层会话包装成待拍板卡片。\n")
-		b.WriteString("- 若无真正需要用户拍板的新事项（或近期已汇报且无新进展），必须调用 no_action(reason) 结束。\n")
-		b.WriteString("- 2 项以上彼此独立的事项用 reply_user(purpose=\"answer\") 发 1 条清晰 Markdown 分条清单（禁加互斥按钮）；仅当存在单一明确拍板点时用 reply_user(purpose=\"attention\", title=\"事项名称 · 决策点\", choices=[...])。\n")
-	} else {
-		b.WriteString("- Always speak in terms of the human-readable WorkItem title rather than raw internal worker/branch slugs.\n")
-		b.WriteString("- If nothing genuinely needs a human decision, or you ALREADY reported these exact waiting items recently with zero new developments, stay COMPLETELY SILENT.\n")
-		b.WriteString("- NEVER include already-healthy / no-action status items (e.g. '已部署健康'). NEVER auto-stop manual sessions (created_by=you).\n")
-		b.WriteString("- If 2+ independent unrelated items still need attention: send ONE clean bulleted Markdown checklist via plain `reply - <<'EOF'` (NO `--opt`, NO fake mutually-exclusive A/B buttons).\n")
-		b.WriteString("- Use `reply --digest --category patrol --worker <name> --opt ...` ONLY when there is ONE single concrete decision with clear, unambiguous button labels.\n")
-	}
+	b.WriteString("- 所有面向用户的表述必须以「事项名称」为主语，严禁把 wi/agy/codex/分支名等内部代号直接甩给用户（仅在需要用户决定未合入代码去留时附带说明）。\n")
+	b.WriteString("- 严禁把清理已关闭事项或无未合入改动的闲置 worktree / 底层会话包装成待拍板卡片。\n")
+	b.WriteString("- 若无真正需要用户拍板的新事项（或近期已汇报且无新进展），必须调用 no_action(reason) 结束。\n")
+	b.WriteString("- 2 项以上彼此独立的事项用 reply_user 发 1 条清晰 Markdown 分条清单（禁加互斥按钮）；仅当存在单一明确拍板点时用 reply_user(title=\"事项名称 · 决策点\", choices=[...])。\n")
 	for i, c := range shown {
 		w := c.w
 		summary := strings.TrimSpace(w.LastReport)
@@ -635,23 +626,15 @@ func (e *Engine) tryEmitMorningDigest(
 		}
 	}
 
-	apiMode := e.isAPIRouterMode()
 	var b strings.Builder
 	fmt.Fprintf(&b, "[corgi morning-digest] Daily morning review (%s). Open/pending items: %d; stale >=%dd Corgi sessions: %d.\n",
 		now.Format("2006-01-02 15:04"), len(priorityItems), staleDays, len(staleWorkers))
 	b.WriteString("Formatting rules (WorkItem-centered):\n")
-	if apiMode {
-		b.WriteString("- 所有面向用户的标题与正文必须以「事项名称」为主语，严禁把 wi/agy/codex/分支名等内部代号当作主语甩给用户。\n")
-		b.WriteString("- 严禁把清理已关闭事项或无未合入改动的闲置 worktree / 底层会话包装成待拍板卡片（底层进程休眠由系统自动 GC 处理）。\n")
-		b.WriteString("- 仅汇报确实需要用户知晓或拍板的未结事项（最多 5 条）；若无需要打扰用户的事项，必须调用 no_action(reason) 结束。\n")
-		b.WriteString("- 2 项以上彼此独立的事项用 reply_user(purpose=\"answer\") 发 1 条清晰 Markdown 分条清单（每条写清「事项名称 + 当前进展与需决策点」，禁加互斥按钮）。\n")
-		b.WriteString("- 仅当存在单一明确拍板点时，才用 reply_user(purpose=\"attention\", title=\"事项名称 · 决策点\", choices=[...])。\n")
-	} else {
-		b.WriteString("- Always frame every item around its human-readable WorkItem title, not raw internal worker/branch slugs.\n")
-		b.WriteString("- Include ONLY genuinely unresolved items needing human action (Top 5 max; omit healthy/finished noise). If nothing truly needs action, stay SILENT.\n")
-		b.WriteString("- If there are 2+ independent unrelated items (and no single batch-archive action), send ONE plain bulleted Markdown summary via `reply - <<'EOF'` WITHOUT `--opt`.\n")
-		b.WriteString("- Use `reply --digest --category morning --opt ...` ONLY when there is a single clear decision or a batch-archive confirmation.\n")
-	}
+	b.WriteString("- 所有面向用户的标题与正文必须以「事项名称」为主语，严禁把 wi/agy/codex/分支名等内部代号当作主语甩给用户。\n")
+	b.WriteString("- 严禁把清理已关闭事项或无未合入改动的闲置 worktree / 底层会话包装成待拍板卡片（底层进程休眠由系统自动 GC 处理）。\n")
+	b.WriteString("- 仅汇报确实需要用户知晓或拍板的未结事项（最多 5 条）；若无需要打扰用户的事项，必须调用 no_action(reason) 结束。\n")
+	b.WriteString("- 2 项以上彼此独立的事项用 reply_user 发 1 条清晰 Markdown 分条清单（每条写清「事项名称 + 当前进展与需决策点」，禁加互斥按钮）。\n")
+	b.WriteString("- 仅当存在单一明确拍板点时，才用 reply_user(title=\"事项名称 · 决策点\", choices=[...])。\n")
 	if len(priorityItems) > 0 {
 		b.WriteString("\nCarryover & priority items:\n")
 		limit := len(priorityItems)
@@ -670,19 +653,11 @@ func (e *Engine) tryEmitMorningDigest(
 		for i := 0; i < len(staleWorkers) && i < patrolMaxStaleNames; i++ {
 			names = append(names, fmt.Sprintf("%s (%s)", staleWorkers[i].Name, formatIdleDuration(now.Sub(*staleWorkers[i].IdleSince))))
 		}
-		if apiMode {
-			fmt.Fprintf(&b, "\nStale Corgi sessions (>=%dd inactive, auto-GC disabled, lossless resume via dispatch_work): %s", staleDays, strings.Join(names, ", "))
-		} else {
-			fmt.Fprintf(&b, "\nStale Corgi sessions (>=%dd inactive, auto-GC disabled, lossless --resume if stopped): %s", staleDays, strings.Join(names, ", "))
-		}
+		fmt.Fprintf(&b, "\nStale Corgi sessions (>=%dd inactive, auto-GC disabled, lossless resume via dispatch_work): %s", staleDays, strings.Join(names, ", "))
 		if len(staleWorkers) > patrolMaxStaleNames {
 			fmt.Fprintf(&b, " (+%d more)", len(staleWorkers)-patrolMaxStaleNames)
 		}
-		if apiMode {
-			b.WriteString("\nIf the human prefers manual archival, offer a concise batch-archive option via reply_user(purpose=\"attention\").\n")
-		} else {
-			b.WriteString("\nOffer a single batch-archive option and remind the human they can reply with exceptions (e.g. '保留 X，其余归档' -> run `keep X` and `stop` the rest).\n")
-		}
+		b.WriteString("\nIf the human prefers manual archival, offer a concise batch-archive option via reply_user(choices=[...]).\n")
 	}
 
 	_, _ = e.Ingest(ctx, "system", model.MainThread, "corgi", b.String(), "", model.RouterName, "morning-digest")

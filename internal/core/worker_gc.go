@@ -439,7 +439,7 @@ func (e *Engine) checkWorkerGC(ctx context.Context, rawAgents []model.Agent, liv
 	if st.EffectiveWorkerIdleGCMinutes() <= 0 {
 		return
 	}
-	if st.Paused || e.isBlockingDream() || e.handingOver() || e.isHubUpdating() {
+	if st.Paused || e.isHubUpdating() {
 		return
 	}
 	grace := e.getWorkerGCGracePeriod()
@@ -840,7 +840,7 @@ func (e *Engine) hibernateWorker(ctx context.Context, cand workerGCCandidate) {
 
 	now := time.Now()
 	st := e.Settings()
-	if st.EffectiveWorkerIdleGCMinutes() <= 0 || st.Paused || e.isBlockingDream() || e.handingOver() || e.isHubUpdating() {
+	if st.EffectiveWorkerIdleGCMinutes() <= 0 || st.Paused || e.isHubUpdating() {
 		return
 	}
 

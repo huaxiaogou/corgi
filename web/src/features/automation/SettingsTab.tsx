@@ -11,7 +11,6 @@ import {
   resolveRouterAPIEffort,
 } from "../../lib/routerApiModels";
 import type { Machine, ModelCatalog, ModelEffortSpec, RouterAPISecretStatus, Settings } from "../../types/api";
-import { ModelEffortFields } from "./ModelEffortFields";
 
 const ALL_KINDS = [
   { id: "agy", label: "Antigravity" },
@@ -23,7 +22,6 @@ const ALL_KINDS = [
 interface Props {
   settings: Settings;
   routerAPISecret?: RouterAPISecretStatus;
-  hubAgents?: string[];
   machines?: Machine[];
   onSavePatch: (patch: Partial<Settings>, okMsg: string) => Promise<void>;
   onUpdateAPISecret?: (next: RouterAPISecretStatus) => void;
@@ -127,7 +125,6 @@ function KindModelRow({
 export function SettingsTab({
   settings,
   routerAPISecret,
-  hubAgents = [],
   machines = [],
   onSavePatch,
   onUpdateAPISecret,
@@ -149,7 +146,6 @@ export function SettingsTab({
     setDraft(settings);
   }, [settings]);
 
-  const routerMode = draft.router_mode === "api" ? "api" : "pty";
   const apiProvider = draft.router_api_provider === "openai" ? "openai" : "tokenhub";
   const effectiveAPIBaseURL = apiProvider === "tokenhub" ? TOKENHUB_BASE_URL : draft.router_api_base_url ?? "";
   const effectiveAPIModel = (draft.router_api_model ?? "").trim() || (apiProvider === "tokenhub" ? "hy4" : "");
@@ -366,14 +362,10 @@ export function SettingsTab({
     const activeDefault = cleanKindDefaults[wk];
     return onSavePatch(
       {
-        router_mode: routerMode,
         router_api_provider: apiProvider,
         router_api_base_url: effectiveAPIBaseURL,
         router_api_model: effectiveAPIModel,
         router_api_effort: effectiveAPIEffort,
-        router_kind: draft.router_kind,
-        router_model: draft.router_model,
-        router_effort: draft.router_effort,
         worker_kind: draft.worker_kind,
         worker_model: activeDefault?.model ?? draft.worker_model ?? "",
         worker_effort: activeDefault?.effort ?? draft.worker_effort ?? "",
@@ -392,50 +384,14 @@ export function SettingsTab({
   return (
     <div className="space-y-5">
       <section className="p-4 rounded-xl border border-hairline space-y-3">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <div className="font-semibold text-sm">Corgi 大脑（运行在 Hub）</div>
-            <div className="text-[11.5px] text-muted mt-0.5">
-              负责理解意图、快速查证、编排多机 Worker 和汇报结论；支持进程内原生 API（低延迟、免 Handover）与终端 CLI (PTY) 双模切换。
-            </div>
-          </div>
-          <div className="inline-flex p-0.5 rounded-lg surface-rail border border-hairline text-[11.5px] shrink-0">
-            <button
-              type="button"
-              onClick={() =>
-                setDraft((prev) => {
-                  const nextProv = prev.router_api_provider || "tokenhub";
-                  const nextModel = prev.router_api_model || (nextProv === "tokenhub" ? "hy4" : "");
-                  return {
-                    ...prev,
-                    router_mode: "api",
-                    router_api_provider: nextProv,
-                    router_api_base_url: prev.router_api_base_url || TOKENHUB_BASE_URL,
-                    router_api_model: nextModel,
-                    router_api_effort: resolveRouterAPIEffort(nextProv, nextModel, prev.router_api_effort),
-                  };
-                })
-              }
-              className={`px-2.5 py-1 rounded-md cursor-pointer ${
-                routerMode === "api" ? "surface-bg font-medium text-primary" : "text-secondary"
-              }`}
-            >
-              原生 API
-            </button>
-            <button
-              type="button"
-              onClick={() => setDraft((prev) => ({ ...prev, router_mode: "pty" }))}
-              className={`px-2.5 py-1 rounded-md cursor-pointer ${
-                routerMode === "pty" ? "surface-bg font-medium text-primary" : "text-secondary"
-              }`}
-            >
-              终端 CLI (PTY)
-            </button>
+        <div>
+          <div className="font-semibold text-sm">Corgi 原生大脑（运行在 Hub 进程内）</div>
+          <div className="text-[11.5px] text-muted mt-0.5">
+            负责理解意图、按需查证、编排多机 Worker 和汇报结论，直连上游模型 API（低延迟、无上下文交接）。
           </div>
         </div>
 
-        {routerMode === "api" ? (
-          <div className="space-y-3 pt-1">
+        <div className="space-y-3 pt-1">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <label className="space-y-1">
                 <span className="text-muted">模型服务商</span>
@@ -600,19 +556,7 @@ export function SettingsTab({
                 </div>
               )}
             </div>
-          </div>
-        ) : (
-          <ModelEffortFields
-            kind={draft.router_kind}
-            model={draft.router_model ?? ""}
-            effort={draft.router_effort ?? ""}
-            allowedKinds={hubAgents}
-            recommendLowEffort
-            onChange={({ kind, model, effort }) =>
-              setDraft((prev) => ({ ...prev, router_kind: kind, router_model: model, router_effort: effort }))
-            }
-          />
-        )}
+        </div>
       </section>
 
       <section className="p-4 rounded-xl border border-hairline space-y-4">

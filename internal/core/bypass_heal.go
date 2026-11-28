@@ -341,57 +341,6 @@ func isRetryableInPlaceStartErr(err error) bool {
 	return errors.As(err, &he) && (he.Code == "agent_name_taken" || he.Code == "agent_pane_busy")
 }
 
-// maybeHealRouterBypass restarts the resident Router cleanly when Hub's herdr restored it
-// without bypass permissions while AskPermissions is false.
-func (e *Engine) maybeHealRouterBypass(ctx context.Context, li liveInfo, now time.Time) bool {
-	if e.fleet == nil || li.pane == "" || li.kind == "" || e.Settings().AskPermissions {
-		return false
-	}
-	e.mu.Lock()
-	if e.routerLaunching || (!e.routerLaunchAt.IsZero() && now.Sub(e.routerLaunchAt) < 20*time.Second) {
-		e.mu.Unlock()
-		return false
-	}
-	if lastFail := e.bypassHealFailAt[li.pane]; !lastFail.IsZero() && now.Sub(lastFail) < defaultBypassHealFailBackoff {
-		e.mu.Unlock()
-		return false
-	}
-	if lastCheck := e.bypassCheckedAt[li.pane]; !lastCheck.IsZero() && now.Sub(lastCheck) < e.getBypassCheckInterval() {
-		e.mu.Unlock()
-		return false
-	}
-	e.bypassCheckedAt[li.pane] = now
-	e.mu.Unlock()
-
-	info, err := e.fleet.ProcessInfo(ctx, li.pane)
-	if err != nil {
-		return false
-	}
-	need, pid := agent.NeedsBypassHeal(li.kind, info)
-	if !need {
-		return false
-	}
-
-	e.mu.Lock()
-	if pid != 0 && e.bypassHealedPID[li.pane] == pid {
-		e.mu.Unlock()
-		return false
-	}
-	if pid != 0 {
-		e.bypassHealedPID[li.pane] = pid
-	}
-	e.mu.Unlock()
-
-	e.logger.Warn("router running without bypass permissions after herdr restore, restarting cleanly", "pane", li.pane, "kind", li.kind, "pid", pid)
-	if err := e.RestartRouter(ctx); err != nil {
-		e.recordBypassHealFailure(li.pane)
-		return false
-	}
-	e.addEvent(ctx, model.MainThread, "已自动重启 Corgi 大脑以恢复免审批模式（herdr 重启后自愈）", "", "info")
-	e.notifyChanged()
-	return true
-}
-
 // answerRestoredAgyEditDialog auto-accepts an Antigravity file-edit confirmation prompt when
 // AskPermissions is false AND pane.process_info confirms the pane lost --dangerously-skip-permissions
 // (for example, mid-turn after a herdr restart). It also invalidates the bypass check cache so

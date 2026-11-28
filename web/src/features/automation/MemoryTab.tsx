@@ -25,9 +25,6 @@ export function MemoryTab({ memory, settings, onSaveFile, onSaveSettingsPatch, o
   const [activeDream, setActiveDream] = useState("");
   const [dreamSummaryExpanded, setDreamSummaryExpanded] = useState(false);
   const [dreamAt, setDreamAt] = useState(settings?.dream_at ?? "04:00");
-  const [rotatePct, setRotatePct] = useState(
-    settings?.rotate_pct === undefined || settings.rotate_pct === 0 ? 70 : settings.rotate_pct
-  );
   const [undoState, setUndoState] = useState<{ prevText: string; label: string } | null>(null);
   const undoTimerRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -46,7 +43,6 @@ export function MemoryTab({ memory, settings, onSaveFile, onSaveSettingsPatch, o
   useEffect(() => {
     if (!settings) return;
     setDreamAt(settings.dream_at ?? "04:00");
-    setRotatePct(settings.rotate_pct === undefined || settings.rotate_pct === 0 ? 70 : settings.rotate_pct);
   }, [settings]);
 
   useEffect(() => {
@@ -197,21 +193,10 @@ export function MemoryTab({ memory, settings, onSaveFile, onSaveSettingsPatch, o
                 className="w-36 px-3 py-1.5 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
               />
             </label>
-            <label className="space-y-1">
-              <span className="text-muted block">上下文交接阈值 (%，-1 关闭)</span>
-              <input
-                type="number"
-                min={-1}
-                max={95}
-                value={rotatePct}
-                onChange={(e) => setRotatePct(Number(e.target.value))}
-                className="w-40 px-3 py-1.5 rounded-lg surface-rail border border-hairline font-mono-code outline-none"
-              />
-            </label>
             <button
               type="button"
               onClick={() =>
-                void onSaveSettingsPatch({ dream_at: dreamAt.trim() || "04:00", rotate_pct: rotatePct }, "做梦与交接配置已保存")
+                void onSaveSettingsPatch({ dream_at: dreamAt.trim() || "04:00" }, "做梦配置已保存")
               }
               className="px-3.5 py-1.5 rounded-lg btn-accent font-medium cursor-pointer"
             >
@@ -415,15 +400,12 @@ export function MemoryTab({ memory, settings, onSaveFile, onSaveSettingsPatch, o
                 ref={textareaRef}
                 rows={14}
                 value={draft}
-                readOnly={activeMem === "messages.md"}
                 onChange={(e) => setDraft(e.target.value)}
                 className="w-full p-3.5 rounded-xl font-mono-code surface-rail border border-hairline outline-none leading-relaxed"
               />
-              {activeMem !== "messages.md" && (
-                <button type="button" onClick={() => void onSaveFile(activeMem, draft)} className="px-4 py-2 rounded-lg btn-accent font-medium cursor-pointer">
-                  保存 {activeMem}
-                </button>
-              )}
+              <button type="button" onClick={() => void onSaveFile(activeMem, draft)} className="px-4 py-2 rounded-lg btn-accent font-medium cursor-pointer">
+                保存 {activeMem}
+              </button>
             </>
           )}
         </div>

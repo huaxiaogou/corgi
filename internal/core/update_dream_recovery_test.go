@@ -5,14 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
-	"github.com/kiperjing/corgi/internal/runtime/herdr"
 	"github.com/kiperjing/corgi/internal/store"
 )
 
@@ -114,9 +112,9 @@ func TestUnscannedRemoteMachinePreservesWorkerApprovalsAndTriggers(t *testing.T)
 }
 
 // TestDreamRestartRecoveryAcrossEngineInstances exercises restarting a Hub Engine mid-Dream:
-// 1) Pane already exited after writing fresh journal -> recovers exactly once, emits 1 event & 1 skill card set,
-//    commits last_dream + nightly_dream_slot atomically, preserves an already-running Router.
-// 2) Second Engine restart / replay does NOT duplicate events or cards.
+//  1. Fresh journal already written -> recovers exactly once, emits 1 event & 1 skill card,
+//     commits last_dream + nightly_dream_slot atomically.
+//  2. Second Engine restart / replay does NOT duplicate events or cards.
 func TestDreamRestartRecoveryAcrossEngineInstances(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "corgi.db"))
@@ -125,40 +123,7 @@ func TestDreamRestartRecoveryAcrossEngineInstances(t *testing.T) {
 	}
 	defer st.Close()
 
-	var (
-		mu         sync.Mutex
-		closedWS   []string
-		routerLive = true
-	)
-	hc := newFakeHerdrClient(func(method string, params map[string]any) (any, *herdr.Error) {
-		mu.Lock()
-		defer mu.Unlock()
-		switch method {
-		case "workspace.list":
-			ws := []map[string]any{
-				{"workspace_id": "ws-dream-1", "label": "corgi · dream · run-test-1"},
-			}
-			if routerLive {
-				ws = append(ws, map[string]any{"workspace_id": "ws-router", "label": model.RouterLabel})
-			}
-			return map[string]any{"workspaces": ws}, nil
-		case "workspace.close":
-			if id, _ := params["workspace_id"].(string); id != "" {
-				closedWS = append(closedWS, id)
-			}
-			return map[string]any{}, nil
-		case "agent.list":
-			ags := []map[string]any{}
-			if routerLive {
-				ags = append(ags, map[string]any{"pane_id": "w0:p1", "name": model.RouterName, "agent": "claude", "agent_status": "idle", "ready": true})
-			}
-			return map[string]any{"agents": ags}, nil
-		}
-		return map[string]any{}, nil
-	})
-
-	fl := fleet.NewFleet(hc, "hub", dir, "v0.1.41", []string{"claude"})
-	eng1, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	eng1, err := NewEngine(context.Background(), st, nil, agent.NewRegistry(), dir, dir, "corgi", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,13 +131,9 @@ func TestDreamRestartRecoveryAcrossEngineInstances(t *testing.T) {
 	ctx := context.Background()
 	runAt := time.Now().Add(-3 * time.Minute)
 	d1 := &dreamRun{
-		id:          "run-test-1",
-		at:          runAt,
-		observedAt:  runAt,
-		started:     true,
-		reason:      "nightly",
-		workspaceID: "ws-dream-1",
-		paneID:      "w1:p1",
+		id:     "run-test-1",
+		at:     runAt,
+		reason: "nightly",
 	}
 	if err := eng1.saveActiveDreamMarker(ctx, d1); err != nil {
 		t.Fatal(err)
@@ -184,7 +145,7 @@ func TestDreamRestartRecoveryAcrossEngineInstances(t *testing.T) {
 	}
 
 	// Simulate Hub restart: construct Engine 2 against the same SQLite DB.
-	eng2, err := NewEngine(ctx, st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	eng2, err := NewEngine(ctx, st, nil, agent.NewRegistry(), dir, dir, "corgi", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,10 +156,8 @@ func TestDreamRestartRecoveryAcrossEngineInstances(t *testing.T) {
 		t.Fatal("expected manual StartDream rejected while recovered Dream is still active")
 	}
 
-	// First tick sees corgi-dream gone + fresh journal -> finishes cleanly once.
-	eng2.checkDream(ctx, map[string]liveInfo{
-		model.RouterName: {pane: "w0:p1", status: "idle", ready: true, kind: "claude"},
-	}, false)
+	// First tick sees fresh journal -> finishes cleanly once.
+	eng2.checkDream(ctx, false)
 
 	if eng2.Dreaming() {
 		t.Fatal("expected recovered Dream finalized on first tick")
@@ -231,13 +190,6 @@ func TestDreamRestartRecoveryAcrossEngineInstances(t *testing.T) {
 	if len(acts) != 1 {
 		t.Fatalf("expected exactly 1 skill suggestion card, got %d", len(acts))
 	}
-	mu.Lock()
-	for _, id := range closedWS {
-		if id == "ws-router" {
-			t.Fatalf("recovery must NOT close an already-running Router workspace: %v", closedWS)
-		}
-	}
-	mu.Unlock()
 }
 
 // TestAutoUpdateBoundedB2AndReservation verifies Bounded B2 scheduling rules,
@@ -250,16 +202,7 @@ func TestAutoUpdateBoundedB2AndReservation(t *testing.T) {
 	}
 	defer st.Close()
 
-	hc := newFakeHerdrClient(func(method string, params map[string]any) (any, *herdr.Error) {
-		if method == "agent.list" {
-			return map[string]any{"agents": []map[string]any{
-				{"pane_id": "w0:p1", "name": model.RouterName, "agent": "claude", "agent_status": "idle", "ready": true},
-			}}, nil
-		}
-		return map[string]any{}, nil
-	})
-	fl := fleet.NewFleet(hc, "hub", dir, "v0.1.40", []string{"claude"})
-	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	eng, err := NewEngine(context.Background(), st, nil, agent.NewRegistry(), dir, dir, "corgi", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

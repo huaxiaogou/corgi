@@ -25,25 +25,10 @@ func (e *Engine) isHubUpdating() bool {
 	return e.hubUpdating
 }
 
-// TryReserveHubRestart verifies that the Hub is completely idle (no Dream, Handover,
-// active Router turn, queued Router trigger, or queued Web prompt) and claims an
-// exclusive reservation blocking new Router/Dream/Handover transitions until release()
-// is invoked (or the process replaces itself via syscall.Exec).
+// TryReserveHubRestart verifies that the Hub is completely idle (no Dream, active Router turn,
+// queued Router trigger, or queued Web prompt) and claims an exclusive reservation blocking new
+// Router/Dream transitions until release() is invoked (or the process replaces itself via syscall.Exec).
 func (e *Engine) TryReserveHubRestart(ctx context.Context) (func(), bool, string) {
-	if !e.isAPIRouterMode() && e.fleet != nil {
-		ags, scanned, err := e.fleet.AgentsWithScanned(ctx)
-		if err != nil || !scanned[""] {
-			return nil, false, "本地 herdr 状态暂不可用"
-		}
-		for _, a := range ags {
-			if a.Name != nil && *a.Name == model.RouterName && !strings.Contains(a.PaneID, "@") {
-				if a.AgentStatus != "idle" && a.AgentStatus != "done" {
-					return nil, false, "Corgi 正在处理任务"
-				}
-			}
-		}
-	}
-
 	if reason := e.checkRouterQueuesIdle(ctx); reason != "" {
 		return nil, false, reason
 	}
@@ -56,12 +41,9 @@ func (e *Engine) TryReserveHubRestart(ctx context.Context) (func(), bool, string
 	case e.dream != nil:
 		e.mu.Unlock()
 		return nil, false, "Corgi 正在做梦整理记忆"
-	case e.handover != nil:
+	case e.apiTurn != nil || e.routerDispatching:
 		e.mu.Unlock()
-		return nil, false, "Corgi 正在交接会话"
-	case e.apiTurn != nil || e.routerLaunching || e.routerDispatching || !e.routerAskedAt.IsZero():
-		e.mu.Unlock()
-		return nil, false, "Corgi 正在回复或启动中"
+		return nil, false, "Corgi 正在回复中"
 	case e.settings.Paused:
 		e.mu.Unlock()
 		return nil, false, "Corgi 当前已暂停"
@@ -139,18 +121,15 @@ func (e *Engine) IsAutoUpdateWindowEligible(ctx context.Context, now time.Time) 
 	return slot.Outcome == "ok" || slot.Outcome == "skipped"
 }
 
-func (e *Engine) checkAutoUpdate(ctx context.Context, live map[string]liveInfo, hasRouterQueued bool, now time.Time) {
+func (e *Engine) checkAutoUpdate(ctx context.Context, hasRouterQueued bool, now time.Time) {
 	e.mu.Lock()
 	updater := e.autoUpdater
 	enabled := e.settings.AutoUpdate
 	lastCheck := e.lastAutoUpdateCheck
-	busy := e.dream != nil || e.handover != nil || e.hubUpdating || e.apiTurn != nil || e.routerLaunching || e.routerDispatching || !e.routerAskedAt.IsZero() || e.settings.Paused
+	busy := e.dream != nil || e.hubUpdating || e.apiTurn != nil || e.routerDispatching || e.settings.Paused
 	runCtx := e.runCtx
 	e.mu.Unlock()
 	if updater == nil || !enabled || busy || hasRouterQueued || now.Sub(lastCheck) < time.Minute {
-		return
-	}
-	if li, alive := live[model.RouterName]; alive && li.status != "idle" && li.status != "done" {
 		return
 	}
 	if !e.IsAutoUpdateWindowEligible(ctx, now) {

@@ -240,21 +240,15 @@ type EndedSession struct {
 	EndedAt        time.Time `json:"ended_at"`
 }
 
-// RouterView summarizes the live state of Corgi's resident Router session.
+// RouterView summarizes the live state of Corgi's native in-process API Router.
 type RouterView struct {
 	Alive    bool   `json:"alive"`
-	Mode     string `json:"mode,omitempty"` // pty | api
 	Status   string `json:"status"`
-	PaneID   string `json:"pane_id,omitempty"`
 	Kind     string `json:"kind"`
 	Model    string `json:"model,omitempty"`
 	Effort   string `json:"effort,omitempty"`
-	Context  int    `json:"context,omitempty"`
-	RotateAt int    `json:"rotate_at"`
-	Handover bool   `json:"handover,omitempty"`
 	Dreaming bool   `json:"dreaming,omitempty"`
 	Replied  bool   `json:"replied,omitempty"`
-	Pending  bool   `json:"pending,omitempty"`
 }
 
 // FollowView summarizes the next upcoming self-wakeup timer for the UI header.

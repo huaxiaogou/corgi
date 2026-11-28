@@ -53,7 +53,6 @@ export function App() {
 
   const allAgents = paneState?.agents ?? [];
   const shells = paneState?.shells ?? [];
-  const routerPaneId = superView?.router.pane_id;
   const selectedPane =
     route.view === "agent" ? [...allAgents, ...shells].find((p) => p.pane_id === route.paneId) ?? null : null;
 
@@ -62,8 +61,8 @@ export function App() {
       document.title = "Corgi";
       return;
     }
-    document.title = formatDocumentTitle(route, selectedPane, routerPaneId);
-  }, [authed, route, selectedPane, routerPaneId]);
+    document.title = formatDocumentTitle(route, selectedPane);
+  }, [authed, route, selectedPane]);
 
   const toggleTheme = () => {
     const next = !dark;
@@ -84,7 +83,7 @@ export function App() {
   const machines = paneState?.machines ?? [];
   const pendingCount = (superView?.actions ?? []).filter((a) => a.status === "pending").length;
   const backToCorgi = () => selectRoute({ view: "corgi", thread: "chat:main" });
-  const mobileBar = route.view === "agent" ? formatMobileAgentBar(selectedPane, routerPaneId) : null;
+  const mobileBar = route.view === "agent" ? formatMobileAgentBar(selectedPane) : null;
 
   const jumpToWorkerRef = async (ref: EntryWorkerRef): Promise<boolean> => {
     const live = matchLiveWorkerForRef(ref, superView?.workers);
@@ -246,7 +245,6 @@ export function App() {
             <AgentPaneView
               key={selectedPane.pane_id}
               pane={selectedPane}
-              routerPaneId={routerPaneId}
               focusSeq={navSeq}
               queuedPrompts={paneState?.queued_prompts?.[selectedPane.pane_id] ?? []}
               queuePaused={Boolean(paneState?.paused_queues?.[selectedPane.pane_id])}

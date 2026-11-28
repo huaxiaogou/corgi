@@ -304,9 +304,8 @@ func TestAPIDreamRestartRecovery(t *testing.T) {
 			defer st.Close()
 			ctx := context.Background()
 
-			// Save settings in api mode and seed active_dream marker as if Hub crashed mid-API-dream.
+			// Save settings and seed active_dream marker as if Hub crashed mid-API-dream.
 			cfg, _ := st.LoadSettings(ctx, dir)
-			cfg.RouterMode = "api"
 			cfg.RouterAPIProvider = RouterAPIProviderTokenHub
 			cfg.RouterAPIModel = "hy4"
 			if err := st.SaveSettings(ctx, cfg); err != nil {
@@ -317,7 +316,6 @@ func TestAPIDreamRestartRecovery(t *testing.T) {
 				ID:     "20261128-040000.000000001",
 				At:     dreamAt,
 				Reason: "nightly",
-				Mode:   "api",
 			})
 			if err := st.SetKV(ctx, activeDreamKVKey, string(markerRaw)); err != nil {
 				t.Fatal(err)
@@ -424,14 +422,9 @@ func TestAPIDreamAsyncNonBlockingAndModeSwitchMutex(t *testing.T) {
 	}
 	<-dreamStarted
 
-	// Duplicate StartDream and api->pty mode switch must still be rejected while dreaming.
+	// Duplicate StartDream must still be rejected while dreaming.
 	if err := eng.StartDream(ctx, "manual"); err == nil {
 		t.Fatal("expected duplicate StartDream rejected while API dream is running")
-	}
-	st := eng.Settings()
-	st.RouterMode = "pty"
-	if err := eng.SaveConfig(ctx, &st, nil); err == nil || !strings.Contains(err.Error(), "做梦") {
-		t.Fatalf("expected mode switch rejected during active API dream, got %v", err)
 	}
 
 	// 2. Concurrent user chat MUST NOT be blocked by async API Dream!

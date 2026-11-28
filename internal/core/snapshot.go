@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/kiperjing/corgi/internal/model"
-	"github.com/kiperjing/corgi/internal/runtime/agent"
 	"github.com/kiperjing/corgi/internal/store"
 )
 
@@ -75,7 +74,6 @@ func (e *Engine) MemorySnapshot(ctx context.Context, displayDir string) MemorySn
 		Files:       e.memory.ListFiles(),
 		Dreams:      e.memory.ListDreams(),
 		UpFrontSize: e.memory.UpFrontSize(),
-		MsgSize:     e.memory.MessagesSize(),
 		Budget:      UpFrontBudgetBytes,
 		Dreaming:    e.Dreaming(),
 	}
@@ -161,111 +159,33 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 
 	e.mu.Lock()
 	st := e.settings
-	apiMode := st.EffectiveRouterMode() == "api"
 	apiTurn := e.apiTurn
 	apiAuthPaused := e.apiAuthPaused
 	rv := model.RouterView{
-		Mode:     st.EffectiveRouterMode(),
-		Kind:     st.RouterKind,
-		Model:    st.RouterModel,
-		Effort:   st.RouterEffort,
+		Kind:     "api",
+		Model:    orStr(st.RouterAPIModel, TokenHubDefaultModel),
+		Effort:   st.RouterAPIEffort,
 		Status:   "asleep",
-		Context:  e.routerUsage.Pct(),
-		RotateAt: e.rotatePctLocked(),
-		Handover: e.handover != nil,
 		Dreaming: e.dream != nil,
 	}
-	if apiMode {
-		rv.Kind = "api"
-		rv.Model = orStr(st.RouterAPIModel, TokenHubDefaultModel)
-		rv.Effort = st.RouterAPIEffort
-		rv.Context = 0
-		rv.RotateAt = 0
-		rv.Handover = false
-		if apiTurn != nil {
-			rv.Alive = true
-			rv.Status = "working"
-			rv.Replied = apiTurn.hasReplied()
-		} else if e.dream != nil {
-			rv.Alive = true
-			rv.Status = "dreaming"
-		}
-	} else {
-		if e.routerLaunching {
-			rv.Status = "starting"
-		}
-		if e.dream != nil {
-			rv.Status = "dreaming"
-		}
+	if apiTurn != nil {
+		rv.Alive = true
+		rv.Status = "working"
+		rv.Replied = apiTurn.hasReplied()
+	} else if e.dream != nil {
+		rv.Alive = true
+		rv.Status = "dreaming"
 	}
-	askedAt := e.routerAskedAt
-	repliedAt := e.routerRepliedAt
-	routerRun := e.routerRun
 	sink := e.sink
 	e.mu.Unlock()
 
-	if apiMode {
-		if rv.Status != "working" && rv.Status != "dreaming" {
-			if e.hasConfiguredRouterAPIKey(ctx, st) && !apiAuthPaused {
-				rv.Alive = true
-				rv.Status = "idle"
-			} else {
-				rv.Alive = false
-				rv.Status = "asleep"
-			}
-		}
-	} else if e.fleet != nil {
-		now := time.Now()
-		actx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		live, err := e.fleet.Agents(actx)
-		cancel()
-		if err == nil {
-			found := false
-			for _, a := range live {
-				if a.Name != nil && *a.Name == model.RouterName && isHubLocalPane(a.PaneID) {
-					found = true
-					kind := rv.Kind
-					if a.Agent != nil && *a.Agent != "" {
-						kind = *a.Agent
-					}
-					rv.Alive = true
-					rv.PaneID = a.PaneID
-					rv.Kind = kind
-					rv.Status = e.stabilizeRouterStatus(a.PaneID, kind, a.AgentStatus, now)
-					if routerRun != nil {
-						rv.Model, rv.Effort = routerRun[0], routerRun[1]
-						rv.Pending = *routerRun != [2]string{st.RouterModel, st.RouterEffort} ||
-							agent.NormalizeKind(rv.Kind) != agent.NormalizeKind(st.RouterKind)
-					}
-					break
-				}
-			}
-			if !found {
-				e.clearRouterLive()
-			}
-		} else if paneID, kind, status, ok := e.lastRouterView(now); ok {
-			// Preserve the last observed Router status across transient herdr poll errors.
+	if rv.Status != "working" && rv.Status != "dreaming" {
+		if e.hasConfiguredRouterAPIKey(ctx, st) && !apiAuthPaused {
 			rv.Alive = true
-			rv.PaneID = paneID
-			rv.Kind = kind
-			rv.Status = status
-			if routerRun != nil {
-				rv.Model, rv.Effort = routerRun[0], routerRun[1]
-				rv.Pending = *routerRun != [2]string{st.RouterModel, st.RouterEffort} ||
-					agent.NormalizeKind(rv.Kind) != agent.NormalizeKind(st.RouterKind)
-			}
-		}
-	}
-	if rv.Status == "working" {
-		if !repliedAt.IsZero() && (askedAt.IsZero() || !repliedAt.Before(askedAt)) {
-			rv.Replied = true
-		} else if !askedAt.IsZero() {
-			for i := len(entries) - 1; i >= 0 && !entries[i].At.Before(askedAt); i-- {
-				if r := entries[i].Role; r == "corgi" || r == "user" {
-					rv.Replied = r == "corgi"
-					break
-				}
-			}
+			rv.Status = "idle"
+		} else {
+			rv.Alive = false
+			rv.Status = "asleep"
 		}
 	}
 
@@ -303,92 +223,4 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 		WeComFocus:       e.ActiveWeComFocus(ctx, thread),
 		Follow:           follow,
 	}
-}
-
-const (
-	defaultRouterIdleGrace = 3 * time.Second
-	routerErrorHoldWindow  = 10 * time.Second
-)
-
-func (e *Engine) routerGraceLocked() time.Duration {
-	if e.routerIdleGrace > 0 {
-		return e.routerIdleGrace
-	}
-	return defaultRouterIdleGrace
-}
-
-// stabilizeRouterStatus smooths brief working -> idle/unknown flickers between tool calls
-// or screen redraw frames so the UI indicator and turn-completion checks never thrash.
-func (e *Engine) stabilizeRouterStatus(paneID, kind, rawStatus string, now time.Time) string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if paneID != "" && e.routerLastPane != "" && paneID != e.routerLastPane {
-		e.routerWorkingAt = time.Time{}
-		e.routerIdleSince = time.Time{}
-	}
-
-	eff := rawStatus
-	switch rawStatus {
-	case "working":
-		e.routerWorkingAt = now
-		e.routerIdleSince = time.Time{}
-	case "blocked":
-		e.routerWorkingAt = time.Time{}
-		e.routerIdleSince = time.Time{}
-	case "idle", "done", "unknown", "":
-		if !e.routerWorkingAt.IsZero() {
-			if e.routerIdleSince.IsZero() {
-				e.routerIdleSince = now
-			}
-			if now.Sub(e.routerIdleSince) < e.routerGraceLocked() {
-				eff = "working"
-			} else {
-				e.routerWorkingAt = time.Time{}
-				e.routerIdleSince = time.Time{}
-				e.routerRepliedAt = time.Time{}
-			}
-		}
-	default:
-		e.routerWorkingAt = time.Time{}
-		e.routerIdleSince = time.Time{}
-	}
-
-	if eff == "working" || eff == "blocked" {
-		e.routerTrueIdleSince = time.Time{}
-	} else if eff == "idle" || eff == "done" {
-		if e.routerTrueIdleSince.IsZero() {
-			e.routerTrueIdleSince = now
-		}
-	}
-
-	e.routerLastAlive = true
-	if paneID != "" {
-		e.routerLastPane = paneID
-	}
-	if kind != "" {
-		e.routerLastKind = kind
-	}
-	e.routerLastStatus = eff
-	e.routerLastSeenAt = now
-	return eff
-}
-
-func (e *Engine) clearRouterLive() {
-	e.mu.Lock()
-	e.routerLastAlive = false
-	e.routerLastStatus = ""
-	e.routerWorkingAt = time.Time{}
-	e.routerIdleSince = time.Time{}
-	e.routerTrueIdleSince = time.Time{}
-	e.mu.Unlock()
-}
-
-func (e *Engine) lastRouterView(now time.Time) (paneID, kind, status string, ok bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.routerLastAlive || e.routerLastSeenAt.IsZero() || now.Sub(e.routerLastSeenAt) >= routerErrorHoldWindow {
-		return "", "", "", false
-	}
-	return e.routerLastPane, e.routerLastKind, e.routerLastStatus, true
 }

@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -23,13 +22,6 @@ func (e *Engine) Run(ctx context.Context) {
 	e.mu.Unlock()
 	e.reconcileAPIRouterInflight(ctx)
 	e.EmitPendingAutoUpdateNotice(ctx)
-	if !e.isAPIRouterMode() {
-		if changed, err := e.memory.WriteRouterDocsChanged(e.binPath, e.Settings()); err != nil {
-			e.logger.Warn("write router docs", "err", err)
-		} else if changed {
-			e.queueRouterDocReread(ctx)
-		}
-	}
 	tick := time.NewTicker(1500 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -89,36 +81,21 @@ func (e *Engine) tick(parent context.Context) {
 		}
 	}
 
-	apiMode := e.isAPIRouterMode()
 	var (
 		rawAgents []model.Agent
 		scanned   map[string]bool
 		fleetOK   bool
 	)
 	if e.fleet != nil {
-		scanCtx := ctx
-		var scanCancel context.CancelFunc
-		if apiMode {
-			// Cap fleet scan in API mode so a stalled local herdr never exhausts the tick
-			// deadline needed by API Dream finalization and API Router SQLite delivery.
-			scanCtx, scanCancel = context.WithTimeout(ctx, 8*time.Second)
-		}
+		// Cap fleet scan so a stalled local herdr never exhausts the tick deadline
+		// needed by API Dream finalization and API Router SQLite delivery.
+		scanCtx, scanCancel := context.WithTimeout(ctx, 8*time.Second)
 		var fErr error
 		rawAgents, scanned, fErr = e.fleet.AgentsWithScanned(scanCtx)
-		if scanCancel != nil {
-			scanCancel()
-		}
-		if fErr == nil {
-			fleetOK = true
-		} else if !apiMode {
-			return // herdr temporarily unreachable; preserve queued triggers
-		} else if len(scanned) > 0 {
-			// In API mode, local herdr may be offline while remote Nodes are healthy;
-			// continue syncing and delivering to remote machines that completed a scan.
+		scanCancel()
+		if fErr == nil || len(scanned) > 0 {
 			fleetOK = true
 		}
-	} else if !apiMode {
-		return
 	}
 	live := map[string]liveInfo{}
 	if fleetOK {
@@ -143,15 +120,7 @@ func (e *Engine) tick(parent context.Context) {
 			if a.Session != nil {
 				li.session = extractSessionID(a.Session.Kind, a.Session.Value)
 			}
-			if name == model.RouterName && !apiMode {
-				li.status = e.stabilizeRouterStatus(a.PaneID, li.kind, li.status, now)
-			}
 			live[name] = li
-		}
-		if !apiMode {
-			if _, alive := live[model.RouterName]; !alive {
-				e.clearRouterLive()
-			}
 		}
 
 		// Auto-adopt any live non-system agent session into Corgi's managed workers table
@@ -160,11 +129,6 @@ func (e *Engine) tick(parent context.Context) {
 
 		// 2. Sync worker states, detect bare-shell failures, create Actions on blocked dialogs or quota errors.
 		e.syncWorkers(ctx, live, scanned, now)
-	}
-
-	// 3. Guard PTY Router against trust blocks, transient API errors, and stalled turns.
-	if !apiMode {
-		e.handleRouterLifecycle(ctx, live, now)
 	}
 
 	queued, _ := e.store.ListQueuedTriggers(ctx)
@@ -176,27 +140,21 @@ func (e *Engine) tick(parent context.Context) {
 		}
 	}
 
-	// 4. Drive or trigger nightly memory consolidation (Dream) and PTY context handover.
-	localScanned := fleetOK && (scanned == nil || scanned[""])
-	if apiMode || localScanned {
-		e.checkDreamWithLocal(ctx, live, hasRouterQueued, localScanned)
-	}
-	if !apiMode {
-		e.checkHandover(ctx, live, hasRouterQueued)
-	}
+	// 3. Drive or trigger nightly memory consolidation (Dream).
+	e.checkDream(ctx, hasRouterQueued)
 
-	if e.Settings().Paused || e.isBlockingDream() || e.handingOver() || e.isHubUpdating() {
+	if e.Settings().Paused || e.isHubUpdating() {
 		return
 	}
 
-	// 5. Drain idle main-chat queue, route/deliver triggers, and drain idle single-agent queues.
-	e.drainRouterPrompts(ctx, live)
+	// 4. Drain idle main-chat queue, route/deliver triggers, and drain idle single-agent queues.
+	e.drainRouterPrompts(ctx)
 	e.deliverQueuedWithFleet(ctx, live, scanned, fleetOK)
 	if fleetOK {
 		e.drainPanePrompts(ctx, rawAgents)
 	}
 
-	// 6. Watchdog for stalled/thrashing workers, zero-token gated idle patrol / morning digest,
+	// 5. Watchdog for stalled/thrashing workers, zero-token gated idle patrol / morning digest,
 	//    and lossless background hibernation GC for idle Corgi-dispatched workers.
 	if fleetOK {
 		e.checkStalls(ctx, live, now)
@@ -205,8 +163,8 @@ func (e *Engine) tick(parent context.Context) {
 		e.checkWorkerGC(ctx, rawAgents, live, scanned, now)
 	}
 
-	// 7. Optional overnight idle auto-update after tonight's scheduled Dream succeeds/skips.
-	e.checkAutoUpdate(ctx, live, hasRouterQueued, now)
+	// 6. Optional overnight idle auto-update after tonight's scheduled Dream succeeds/skips.
+	e.checkAutoUpdate(ctx, hasRouterQueued, now)
 }
 
 func deriveFallbackWorkerName(rawKind, paneID string) string {
@@ -559,18 +517,8 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 	if err := e.store.InsertAction(ctx, act); err != nil {
 		return
 	}
-	summary := e.lastWorkerSummary(ctx, w)
-	choices := formatChoicesText(ap)
 	subject := e.formatWorkItemSubject(ctx, w.WorkItemID, w.Name, w.Name)
 	e.addEvent(ctx, w.Thread, subject+" 等你确认："+ap.Title, w.Name, "blocked")
-	// In API Router mode the interactive approval card is pushed directly to chat and the API
-	// Router is prohibited from answering terminal dialogs; avoid waking the LLM just to stay silent.
-	if !e.isAPIRouterMode() {
-		blockedMsg := fmt.Sprintf("worker %s is BLOCKED on a terminal dialog (also shown as a card in chat).\nScreen:\n%s%s\nIf the answer follows from the task or is routine, answer it yourself: `%s answer %s <choice>`. Leave high-risk choices to the human.",
-			w.Name, summary, choices, e.binPath, w.Name)
-		_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name, blockedMsg,
-			"", model.RouterName, w.Name, TriggerMeta{WorkItemID: w.WorkItemID})
-	}
 
 	e.mu.Lock()
 	sink := e.sink
@@ -722,9 +670,8 @@ func (e *Engine) deliverQueuedWithFleet(ctx context.Context, live map[string]liv
 		}
 	}
 
-	apiMode := e.isAPIRouterMode()
 	for target, list := range batches {
-		if target == model.RouterName && apiMode {
+		if target == model.RouterName {
 			e.deliverAPIRouter(ctx, list)
 			continue
 		}
@@ -733,45 +680,24 @@ func (e *Engine) deliverQueuedWithFleet(ctx context.Context, live map[string]liv
 		}
 		li, alive := live[target]
 		if !alive {
-			if target == model.RouterName {
-				e.ensureRouter(ctx)
-			} else {
-				e.rerouteDeadWorkerTriggers(ctx, target, list, scanned)
-			}
+			e.rerouteDeadWorkerTriggers(ctx, target, list, scanned)
 			continue
 		}
 		if li.status == "blocked" || (!li.ready && li.status == "unknown") || e.isHealingBypassWorker(target, li.pane) {
 			continue
 		}
-		if target != model.RouterName {
-			if wk, wErr := e.store.GetWorker(ctx, target); wErr == nil && isWorkerFaulted(wk) && (wk.FaultPaneID == "" || wk.FaultPaneID == li.pane) {
-				e.rerouteFaultedWorkerTriggers(ctx, wk, list)
-				continue
-			}
+		if wk, wErr := e.store.GetWorker(ctx, target); wErr == nil && isWorkerFaulted(wk) && (wk.FaultPaneID == "" || wk.FaultPaneID == li.pane) {
+			e.rerouteFaultedWorkerTriggers(ctx, wk, list)
+			continue
 		}
-		// Human chat/wecom messages interrupt Router mid-turn; system events wait for idle.
 		if li.status == "working" {
-			if target == model.RouterName {
-				list = filterHumanTriggers(list)
-			} else {
-				list = filterWorkerSteeringTriggers(list)
-			}
+			list = filterWorkerSteeringTriggers(list)
 			if len(list) == 0 {
 				continue
 			}
 		}
 		e.deliverBatch(ctx, target, li.pane, list)
 	}
-}
-
-func filterHumanTriggers(list []*model.Trigger) []*model.Trigger {
-	var out []*model.Trigger
-	for _, t := range list {
-		if t.Steer || t.Source == "wecom" {
-			out = append(out, t)
-		}
-	}
-	return out
 }
 
 func filterWorkerSteeringTriggers(list []*model.Trigger) []*model.Trigger {
@@ -802,38 +728,25 @@ func (e *Engine) rerouteDeadWorkerTriggers(ctx context.Context, target string, l
 }
 
 func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list []*model.Trigger) {
-	if target != model.RouterName {
-		if !e.beginWorkerOp(target) {
-			return
-		}
-		defer e.endWorkerOp(target)
+	if !e.beginWorkerOp(target) {
+		return
 	}
+	defer e.endWorkerOp(target)
 	sort.Slice(list, func(i, j int) bool { return list[i].Seq < list[j].Seq })
 	if len(list) > 20 {
 		list = list[:20]
 	}
 
-	e.mu.Lock()
-	fresh := target == model.RouterName && e.routerFresh
-	chars := e.settings.ReplyChars
-	e.mu.Unlock()
-
 	var b strings.Builder
 	var targetWorker *model.Worker
 	var workerConstraint string
-	if target != model.RouterName {
-		if wk, wErr := e.store.GetWorker(ctx, target); wErr == nil && wk != nil {
-			targetWorker = wk
-			if strings.TrimSpace(wk.Constraint) != "" {
-				workerConstraint = strings.TrimSpace(wk.Constraint)
-				b.WriteString(FormatConstraintHeader(workerConstraint))
-				b.WriteString("\n\n")
-			}
+	if wk, wErr := e.store.GetWorker(ctx, target); wErr == nil && wk != nil {
+		targetWorker = wk
+		if strings.TrimSpace(wk.Constraint) != "" {
+			workerConstraint = strings.TrimSpace(wk.Constraint)
+			b.WriteString(FormatConstraintHeader(workerConstraint))
+			b.WriteString("\n\n")
 		}
-	}
-	if fresh {
-		b.WriteString(e.memory.SessionStartPreamble())
-		b.WriteString("\n")
 	}
 	if len(list) == 1 {
 		b.WriteString("[corgi] 1 new event\n")
@@ -851,51 +764,9 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 		fmt.Fprintf(&b, " · %s\n", t.At.Format("15:04"))
 		body := strings.TrimSpace(t.Text)
 		if r := []rune(body); len(r) > 700 { // Inline & Spill
-			showBin := e.binPath
-			if target != model.RouterName || showBin == "" {
-				showBin = "corgi"
-			}
-			body = string(r[:700]) + fmt.Sprintf(" … [spilled; run `%s show %s`]", showBin, t.ID)
+			body = string(r[:700]) + fmt.Sprintf(" … [spilled; run `corgi show %s`]", t.ID)
 		}
 		b.WriteString("  " + strings.ReplaceAll(body, "\n", "\n  ") + "\n")
-	}
-	if target == model.RouterName {
-		injectWork := fresh
-		if !injectWork {
-			for _, t := range list {
-				if t.Source == "chat" || t.Source == "wecom" {
-					injectWork = true
-					break
-				}
-			}
-		}
-		if injectWork {
-			if openWork, wErr := e.store.ListWorkItems(ctx, false); wErr == nil && len(openWork) > 0 {
-				b.WriteString(formatOpenWorkItemsSummary(openWork, e.binPath))
-			}
-		}
-		if bgNotes := e.drainDirectBgNotes(); len(bgNotes) > 0 {
-			b.WriteString("\n[background: completed direct worker chats (already delivered straight to user; remember for context, do NOT re-push)]\n")
-			for _, n := range bgNotes {
-				b.WriteString("- " + n + "\n")
-			}
-		}
-		fmt.Fprintf(&b, "\nReply with `%s reply` (usually ≤%d Chinese chars / English words; for 2+ items use `- ` Markdown bullets via stdin heredoc `<<'EOF'`, never pack into one semicolon-separated line).", e.binPath, chars)
-	}
-
-	if target == model.RouterName {
-		e.mu.Lock()
-		if e.hubUpdating || e.dream != nil || e.handover != nil || e.routerDispatching {
-			e.mu.Unlock()
-			return
-		}
-		e.routerDispatching = true
-		e.mu.Unlock()
-		defer func() {
-			e.mu.Lock()
-			e.routerDispatching = false
-			e.mu.Unlock()
-		}()
 	}
 
 	promptTarget := target
@@ -904,7 +775,7 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 	}
 	var preScreen string
 	var preSnap workerTurnSnapshot
-	if target != model.RouterName && targetWorker != nil {
+	if targetWorker != nil {
 		if rr, rErr := e.fleet.Read(ctx, promptTarget, "recent", "text", 30); rErr == nil {
 			preScreen = rr.Text
 		}
@@ -920,27 +791,13 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 		return
 	}
 
-	e.mu.Lock()
-	if fresh {
-		e.routerFresh = false
-	}
-	if target == model.RouterName {
-		if e.routerAskedAt.IsZero() {
-			e.routerAskedAt = time.Now()
-		}
-		e.routerRepliedAt = time.Time{}
-		e.routerTrueIdleSince = time.Time{}
-	}
-	e.mu.Unlock()
 	if workerConstraint != "" && paneID != "" {
 		e.markConstraintDelivered(paneID)
 	}
-	if target != model.RouterName {
-		e.recordWorkerDelivered(target, paneID, list)
-		e.resetWorkerIdleByName(ctx, target)
-		if targetWorker != nil {
-			e.armWorkerStartupCheck(targetWorker, paneID, list, promptBody, preScreen, preSnap, time.Now())
-		}
+	e.recordWorkerDelivered(target, paneID, list)
+	e.resetWorkerIdleByName(ctx, target)
+	if targetWorker != nil {
+		e.armWorkerStartupCheck(targetWorker, paneID, list, promptBody, preScreen, preSnap, time.Now())
 	}
 
 	for _, t := range list {
@@ -949,153 +806,18 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 	e.notifyChanged()
 }
 
-// ensureRouter launches the resident Router session on the hub machine if absent.
-func (e *Engine) ensureRouter(ctx context.Context) {
-	if e.fleet == nil {
-		return
-	}
-	e.mu.Lock()
-	if e.routerLaunching || e.hubUpdating {
-		e.mu.Unlock()
-		return
-	}
-	e.routerLaunching = true
-	st := e.settings
-	e.mu.Unlock()
-
-	go func() {
-		defer func() {
-			e.mu.Lock()
-			e.routerLaunching = false
-			e.mu.Unlock()
-			e.notifyChanged()
-		}()
-		bg, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer cancel()
-
-		kind := agent.NormalizeKind(st.RouterKind)
-		if kind == "" {
-			kind = "claude"
-		}
-		if e.agents.CheckInstalled(e.home, kind) != nil {
-			installed := e.agents.DetectInstalled(e.home, true)
-			if len(installed) == 0 {
-				e.logger.Error("no agent CLI installed on hub for router", "configured", kind)
-				return
-			}
-			e.logger.Warn("configured router agent not installed on hub, falling back", "configured", kind, "fallback", installed[0])
-			kind = installed[0]
-		}
-		ad, err := e.agents.Get(kind)
-		if err != nil {
-			e.logger.Error("router adapter invalid", "kind", kind, "err", err)
-			return
-		}
-		if err := e.memory.WriteRouterDocs(e.binPath, st); err != nil {
-			e.logger.Warn("write router docs", "err", err)
-		}
-		e.memory.MarkRouterDocsRead()
-		e.mu.Lock()
-		rereadID := e.rereadTrigID
-		e.rereadTrigID = ""
-		e.mu.Unlock()
-		if rereadID != "" {
-			if tr, err := e.store.GetTrigger(bg, rereadID); err == nil && tr.Status == "queued" {
-				tr.Status = "ignored"
-				_ = e.store.UpdateTrigger(bg, tr)
-			}
-		}
-		if !st.AskPermissions {
-			_ = ad.PreTrustWorkspace(e.home, e.memory.RouterDir())
-		}
-		args := ad.LaunchArgs(st.RouterModel, st.RouterEffort, !st.AskPermissions)
-		e.closeWorkspacesByLabel(bg, model.RouterLabel)
-		wsID, paneID, err := e.fleet.CreateWorkspace(bg, "", e.memory.RouterDir(), model.RouterLabel)
-		if err != nil {
-			e.logger.Error("create router workspace failed", "err", err)
-			return
-		}
-		if err := e.fleet.StartAgent(bg, paneID, kind, model.RouterName, args); err != nil {
-			var he *herdr.Error
-			if !(errors.As(err, &he) && he.Code == "agent_not_ready") {
-				e.logger.Error("start router agent failed, closing workspace", "kind", kind, "err", err)
-				_ = e.fleet.CloseWorkspace(bg, wsID)
-				return
-			}
-		}
-		e.fleet.RememberName(paneID, model.RouterName)
-		e.fleet.RememberRun(paneID, st.RouterModel, st.RouterEffort)
-
-		runPair := [2]string{st.RouterModel, st.RouterEffort}
-		if b, err := json.Marshal(runPair); err == nil {
-			_ = e.store.SetKV(bg, "router_run", string(b))
-		}
-
-		e.mu.Lock()
-		e.routerFresh = true
-		e.routerLaunchAt = time.Now()
-		e.routerRun = &runPair
-		e.routerStallAlerted = false
-		e.routerRetryPending = false
-		e.mu.Unlock()
-	}()
-}
-
-// RestartRouter closes the Hub-local PTY Router workspace (or cancels & resets the API Router).
+// RestartRouter cancels any in-flight native API Router turn and resets backoff/auth state.
 func (e *Engine) RestartRouter(ctx context.Context) error {
-	if e.isAPIRouterMode() {
-		e.cancelAndSettleAPIRouterTurn(ctx, "", true)
-		e.mu.Lock()
-		e.apiBackoffUntil = time.Time{}
-		e.apiFailCount = 0
-		e.apiLastFailTriggerID = ""
-		e.apiSameTriggerFails = 0
-		e.apiAuthPaused = false
-		e.apiLastErr = ""
-		e.mu.Unlock()
-		e.wake()
-		e.notifyChanged()
-		return nil
-	}
-	if e.fleet == nil {
-		return fmt.Errorf("fleet not configured")
-	}
-	ws, err := e.fleet.Workspaces(ctx)
-	if err != nil {
-		e.logger.Warn("restart router: list workspaces failed", "err", err)
-		return fmt.Errorf("list workspaces: %w", err)
-	}
-	var closeErr error
-	for _, w := range ws {
-		if w.Label == model.RouterLabel && isHubLocalPane(w.ID) {
-			if cErr := e.fleet.CloseWorkspace(ctx, w.ID); cErr != nil {
-				e.logger.Warn("restart router: close workspace failed", "workspace_id", w.ID, "err", cErr)
-				if closeErr == nil {
-					closeErr = fmt.Errorf("close router workspace %s: %w", w.ID, cErr)
-				}
-			}
-		}
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	_ = e.store.SetKV(ctx, "router_run", "")
+	e.cancelAndSettleAPIRouterTurn(ctx, "", true)
 	e.mu.Lock()
-	e.routerFresh = true
-	e.routerAskedAt = time.Time{}
-	e.routerRepliedAt = time.Time{}
-	e.routerRetries = 0
-	e.routerRetryPending = false
-	e.routerNudged = false
-	e.routerStallAlerted = false
-	e.routerRun = nil
-	e.routerLastAlive = false
-	e.routerLastPane = ""
-	e.routerLastStatus = ""
-	e.routerLastSeenAt = time.Time{}
-	e.routerWorkingAt = time.Time{}
-	e.routerIdleSince = time.Time{}
+	e.apiBackoffUntil = time.Time{}
+	e.apiFailCount = 0
+	e.apiLastFailTriggerID = ""
+	e.apiSameTriggerFails = 0
+	e.apiAuthPaused = false
+	e.apiLastErr = ""
 	e.mu.Unlock()
+	e.wake()
 	e.notifyChanged()
 	return nil
 }

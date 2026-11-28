@@ -33,7 +33,6 @@ interface SettingsResp {
   wecom_online: boolean;
   wecom_error?: string;
   wecom_pending?: PendingWeComUser[];
-  hub_agents?: string[];
   machines?: Machine[];
   hook_key: string;
 }
@@ -62,7 +61,6 @@ export function AutomationView({
   const [wecomOnline, setWecomOnline] = useState(false);
   const [wecomError, setWecomError] = useState("");
   const [wecomPending, setWecomPending] = useState<PendingWeComUser[]>([]);
-  const [hubAgents, setHubAgents] = useState<string[]>([]);
   const [hookKey, setHookKey] = useState("");
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [triggers, setTriggers] = useState<TriggerView[]>([]);
@@ -86,7 +84,6 @@ export function AutomationView({
     setWecomOnline(r.wecom_online);
     setWecomError(r.wecom_error ?? "");
     setWecomPending(r.wecom_pending ?? []);
-    setHubAgents(r.hub_agents ?? []);
     if (r.machines) setMachines(r.machines);
     setPolicies(r.policies ?? []);
     setHookKey(r.hook_key ?? "");
@@ -180,7 +177,6 @@ export function AutomationView({
             <SettingsTab
               settings={settings}
               routerAPISecret={routerAPISecret}
-              hubAgents={hubAgents}
               machines={machines}
               onSavePatch={patchSettings}
               onUpdateAPISecret={setRouterAPISecret}

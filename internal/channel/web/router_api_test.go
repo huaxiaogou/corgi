@@ -34,7 +34,7 @@ func TestRouterAPIKeyOwnerAuthMaskingAndDBReadBlock(t *testing.T) {
 	}{
 		{"/api/super/router/api-key", `{"provider":"tokenhub","api_key":"sk-leak-1234"}`},
 		{"/api/super/router/test-api", `{"provider":"tokenhub","model":"hy4"}`},
-		{"/api/super/settings", `{"settings":{"router_mode":"api","router_api_provider":"tokenhub","router_api_model":"hy4"}}`},
+		{"/api/super/settings", `{"settings":{"router_api_provider":"tokenhub","router_api_model":"hy4"}}`},
 	} {
 		req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 		req.Header.Set("Authorization", "Bearer "+machineTok)

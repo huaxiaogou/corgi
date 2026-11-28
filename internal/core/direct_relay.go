@@ -194,17 +194,6 @@ func (e *Engine) HasQueuedRouterTriggers(ctx context.Context) bool {
 	return false
 }
 
-// RouterContinuousIdle returns how long Router has remained continuously idle/done
-// since its last working state or prompt delivery (0 while working or unknown).
-func (e *Engine) RouterContinuousIdle() time.Duration {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.routerLastAlive || e.routerTrueIdleSince.IsZero() || e.routerLastStatus == "working" {
-		return 0
-	}
-	return time.Since(e.routerTrueIdleSince)
-}
-
 // ListSelectableWorkers returns live and resumable Workers prioritized by open Work Items
 // (小本本事项 first with their human-readable Chinese titles), then other live Workers, then
 // recent ended sessions, deduplicated by name and capped to limit.
@@ -462,48 +451,6 @@ func deriveWorkerDisplayTitle(name, explicitTitle, task string, wi *model.WorkIt
 
 func summarizeWorkerTaskTitle(task string) string {
 	return cleanWorkItemDraftTitle(task)
-}
-
-// RouterTranscriptInfo locates the Hub Router's live JSONL transcript path and adapter.
-// In native API Router mode there is no local PTY CLI transcript, so it returns ("", nil)
-// to prevent WeCom streams from leaking stale historical PTY transcripts.
-func (e *Engine) RouterTranscriptInfo(ctx context.Context) (string, agent.Adapter) {
-	if e.isAPIRouterMode() || e.agents == nil || e.memory == nil {
-		return "", nil
-	}
-	kind := agent.NormalizeKind(e.Settings().RouterKind)
-	sess := ""
-	e.mu.Lock()
-	launchAt := e.routerLaunchAt
-	if e.routerLastKind != "" {
-		kind = agent.NormalizeKind(e.routerLastKind)
-	}
-	e.mu.Unlock()
-
-	if e.fleet != nil {
-		if ags, err := e.fleet.Agents(ctx); err == nil {
-			for _, a := range ags {
-				if a.Name != nil && *a.Name == model.RouterName {
-					if a.Agent != nil && *a.Agent != "" {
-						kind = agent.NormalizeKind(*a.Agent)
-					}
-					if a.Session != nil {
-						sess = extractSessionID(a.Session.Kind, a.Session.Value)
-					}
-					break
-				}
-			}
-		}
-	}
-	if kind == "" {
-		kind = "claude"
-	}
-	ad, err := e.agents.Get(kind)
-	if err != nil {
-		return "", nil
-	}
-	p := ad.LocateTranscript(e.home, e.memory.RouterDir(), sess, launchAt)
-	return p, ad
 }
 
 // WorkerTranscriptSource returns either a local Hub transcript path + adapter or the remote

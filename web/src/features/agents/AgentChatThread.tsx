@@ -1,5 +1,5 @@
 import { Terminal } from "lucide-react";
-import { AgentGlyph, CorgiMark, StatusDot } from "../../components/CorgiMark";
+import { AgentGlyph, StatusDot } from "../../components/CorgiMark";
 import { MarkdownText } from "../../components/MarkdownText";
 import { formatAgentSpeakerLabel } from "../../lib/agentIdentity";
 import type { Approval, ChatMessage } from "../../types/api";
@@ -26,7 +26,6 @@ interface Props {
   agentName?: string;
   agentKind?: string;
   agentMachine?: string;
-  isCorgiBrain?: boolean;
   onLoadEarlier: () => void;
   onPickAskOption: (opt: string) => void;
   onAnswerApproval: (choice: Approval["choices"][number], index: number) => void;
@@ -49,7 +48,6 @@ export function AgentChatThread({
   agentName,
   agentKind,
   agentMachine,
-  isCorgiBrain = false,
   onLoadEarlier,
   onPickAskOption,
   onAnswerApproval,
@@ -62,7 +60,6 @@ export function AgentChatThread({
     kind: agentKind,
     machine: agentMachine,
     isAgent,
-    isCorgiBrain,
   });
   if (messages.length === 0 && pendingPrompts.length === 0 && !approval && liveStatus !== "working") {
     return (
@@ -160,11 +157,7 @@ export function AgentChatThread({
         return (
           <div key={idx} className="flex items-start gap-3">
             <div className="w-7 h-7 rounded-lg border border-hairline surface-rail flex items-center justify-center shrink-0 mt-0.5 text-secondary">
-              {isCorgiBrain ? (
-                <CorgiMark className="w-4 h-4" />
-              ) : (
-                <AgentGlyph kind={agentKind || "agy"} isAgent={isAgent} className="w-4 h-4" />
-              )}
+              <AgentGlyph kind={agentKind || "agy"} isAgent={isAgent} className="w-4 h-4" />
             </div>
             <div className="flex-1 min-w-0 space-y-1">
               <div className="text-[11px] font-mono-code text-muted truncate">{speakerLabel}</div>

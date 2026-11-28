@@ -1,14 +1,10 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent } from "react";
 import { ArrowDown, ArrowLeft, ArrowUp, GitBranch, Keyboard, Paperclip, Square, Trash2, X } from "lucide-react";
-import { AgentGlyph, CorgiMark } from "../../components/CorgiMark";
+import { AgentGlyph } from "../../components/CorgiMark";
 import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { TerminalScreen } from "../../components/TerminalScreen";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
-import {
-  formatAgentComposerContext,
-  formatPaneHandle,
-  isCorgiRouterPane,
-} from "../../lib/agentIdentity";
+import { formatAgentComposerContext, formatPaneHandle } from "../../lib/agentIdentity";
 import { api, uploadFile } from "../../lib/api";
 import { createIMETracker, isPostCompositionSafariEnter } from "../../lib/composerInput";
 import { capturePasteSnapshot, resolvePastedFiles } from "../../lib/pasteImage";
@@ -17,7 +13,6 @@ import { AgentChatThread, type PendingPrompt } from "./AgentChatThread";
 
 interface Props {
   pane: AgentView;
-  routerPaneId?: string;
   focusSeq?: number;
   queuedPrompts?: QueuedPrompt[];
   queuePaused?: boolean;
@@ -87,7 +82,6 @@ function reconcilePendingPrompts(
 
 export function AgentPaneView({
   pane,
-  routerPaneId,
   focusSeq = 0,
   queuedPrompts = [],
   queuePaused = false,
@@ -96,8 +90,7 @@ export function AgentPaneView({
   onOpenFile,
   onToast,
 }: Props) {
-  const isCorgiBrain = isCorgiRouterPane(pane, routerPaneId);
-  const [mode, setMode] = useState<"chat" | "screen" | "log">(isCorgiBrain || !pane.is_agent ? "screen" : "chat");
+  const [mode, setMode] = useState<"chat" | "screen" | "log">(!pane.is_agent ? "screen" : "chat");
   const [olderMsgs, setOlderMsgs] = useState<ChatMessage[]>([]);
   const [liveMsgs, setLiveMsgs] = useState<ChatMessage[]>([]);
   const [liveBase, setLiveBase] = useState(0);
@@ -127,7 +120,7 @@ export function AgentPaneView({
   const imeRef = useRef(createIMETracker());
 
   useEffect(() => {
-    setMode(isCorgiBrain || !pane.is_agent ? "screen" : "chat");
+    setMode(!pane.is_agent ? "screen" : "chat");
     setShowKeys(false);
     setPendingPrompts([]);
     setOptimisticQueued([]);
@@ -135,7 +128,7 @@ export function AgentPaneView({
     prevServerQueueRef.current = queuedPrompts;
     localHandledIdsRef.current.clear();
     void api("/api/seen", { pane: pane.pane_id });
-  }, [pane.pane_id, pane.is_agent, isCorgiBrain]);
+  }, [pane.pane_id, pane.is_agent]);
 
   const serverQueueSig = queuedPrompts.map((q) => q.id).join(",");
 
@@ -459,7 +452,6 @@ export function AgentPaneView({
   const modeTabs = pane.is_agent ? (["chat", "screen", "log"] as const) : (["screen", "log"] as const);
   const handleInfo = formatPaneHandle(pane);
   const composerCtx = formatAgentComposerContext(pane, {
-    routerPaneId,
     mode,
     busy: liveStatus === "working" || effectiveQueue.length > 0,
   });
@@ -476,18 +468,12 @@ export function AgentPaneView({
       <header className="min-h-14 py-2 px-4 md:px-5 flex items-center justify-between border-b border-hairline shrink-0 gap-2">
         <div className="flex items-start gap-2.5 min-w-0">
           <div className="w-7 h-7 rounded-lg border border-hairline surface-rail flex items-center justify-center shrink-0 mt-0.5 text-secondary">
-            {isCorgiBrain ? (
-              <CorgiMark className="w-4 h-4" />
-            ) : (
-              <AgentGlyph kind={pane.kind} isAgent={pane.is_agent} className="w-4 h-4" />
-            )}
+            <AgentGlyph kind={pane.kind} isAgent={pane.is_agent} className="w-4 h-4" />
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="font-semibold text-[15px] truncate">
-                {isCorgiBrain ? "Corgi 底层终端" : handleInfo.title}
-              </span>
-              {!isCorgiBrain && handleInfo.showHandle && (
+              <span className="font-semibold text-[15px] truncate">{handleInfo.title}</span>
+              {handleInfo.showHandle && (
                 <span className="text-[11.5px] font-mono-code text-muted shrink-0">{handleInfo.handle}</span>
               )}
               <span className="direct-pill text-[10.5px] font-medium px-1.5 py-0.5 rounded-full shrink-0">
@@ -571,7 +557,6 @@ export function AgentPaneView({
                 agentName={pane.name}
                 agentKind={pane.kind}
                 agentMachine={pane.machine}
-                isCorgiBrain={isCorgiBrain}
                 onLoadEarlier={() => void loadEarlier()}
                 onPickAskOption={(opt) => void submitPromptText(opt)}
                 onAnswerApproval={(c, i) => void answerApproval(c, i)}

@@ -14,7 +14,7 @@ import (
 	"github.com/kiperjing/corgi/internal/store"
 )
 
-func TestSingleSourceLedgerPreambleAndUpFrontBudget(t *testing.T) {
+func TestMemoryUpFrontBudgetExcludesLegacyTasks(t *testing.T) {
 	dir := t.TempDir()
 	mm := NewMemoryManager(dir)
 	if err := mm.Ensure(); err != nil {
@@ -22,17 +22,13 @@ func TestSingleSourceLedgerPreambleAndUpFrontBudget(t *testing.T) {
 	}
 	// Seed a stale legacy file under memory/tasks/private/.
 	stale := filepath.Join(mm.MemDir(), "tasks", "private", "closed-legacy-task.md")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(stale, []byte(strings.Repeat("stale legacy notes\n", 1000)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	preamble := mm.SessionStartPreamble()
-	if strings.Contains(preamble, "closed-legacy-task.md") || strings.Contains(preamble, "open task notes") {
-		t.Fatalf("SessionStartPreamble must not enumerate legacy tasks/private files as open tasks: %s", preamble)
-	}
-	if !strings.Contains(preamble, "sole authoritative open-task ledger") {
-		t.Fatalf("SessionStartPreamble missing sole ledger note: %s", preamble)
-	}
 	if sz := mm.UpFrontSize(); sz > 2048 {
 		t.Fatalf("UpFrontSize counted legacy tasks/private file: got %d bytes", sz)
 	}

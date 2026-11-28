@@ -983,10 +983,7 @@ func (e *Engine) SendToWorkerWithWorkTitle(ctx context.Context, workerName, thre
 		wk = adopted
 	}
 	if isWorkerFaulted(wk) {
-		if e.isAPIRouterMode() {
-			return nil, "", fmt.Errorf("worker %q is paused due to fatal error (%s); call manage_work(action=\"stop_worker\", target=%q) and dispatch to a healthy worker/model", wk.Name, oneLineClip(wk.FaultError, 120), wk.Name)
-		}
-		return nil, "", fmt.Errorf("worker %q is paused due to fatal error (%s); run `%s stop %s` and dispatch to a healthy worker/model", wk.Name, oneLineClip(wk.FaultError, 120), orStr(e.binPath, "corgi"), wk.Name)
+		return nil, "", fmt.Errorf("worker %q is paused due to fatal error (%s); call manage_work(action=\"stop_worker\", target=%q) and dispatch to a healthy worker/model", wk.Name, oneLineClip(wk.FaultError, 120), wk.Name)
 	}
 	if thread == "" {
 		thread = wk.Thread
@@ -1159,10 +1156,7 @@ func (e *Engine) Report(ctx context.Context, workerName, paneID, text string) (*
 }
 
 func (e *Engine) formatReportArtifactNote(artID, workerName string) string {
-	if e.isAPIRouterMode() {
-		return fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass re_id=<this trigger_id> and worker=%q on reply_user(purpose=\"result\") (when not using files) to attach this exact snapshot]", artID, workerName)
-	}
-	return fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass --re <this event #tID> --worker %s on `corgi reply` (when not using --file) to attach this exact snapshot]", artID, workerName)
+	return fmt.Sprintf("\n[full_report_artifact: %s — full untruncated report snapshotted on Hub; pass re_id=<this trigger_id> and worker=%q on reply_user (when not using files) to attach this exact snapshot]", artID, workerName)
 }
 
 // Subscribe subscribes or unsubscribes a worker to a thread's incoming events.

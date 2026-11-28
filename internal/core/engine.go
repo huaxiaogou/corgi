@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -93,14 +92,6 @@ type screenMark struct {
 	told  bool
 }
 
-type handoverState struct {
-	at      time.Time
-	kind    string
-	session string
-	pct     int
-	worked  bool
-}
-
 // Engine is the Super-Agent coordinator orchestrating Router, Workers, Actions, Memory, and Timers.
 type Engine struct {
 	store    *store.Store
@@ -119,37 +110,10 @@ type Engine struct {
 	policies                []model.Policy
 	flagPublicURLs          []string
 	artifactHMACSecret      []byte
-	routerLaunching         bool
 	routerDispatching       bool
 	hubUpdating             bool
 	autoUpdater             AutoUpdater
 	lastAutoUpdateCheck     time.Time
-	routerFresh             bool
-	routerLaunchAt          time.Time
-	routerAskedAt           time.Time
-	routerRepliedAt         time.Time
-	routerPrevStatus        string
-	routerRetries           int
-	routerRetryPending      bool
-	routerRetryDelays       []time.Duration
-	routerMinSilentAge      time.Duration
-	routerLastErr           string
-	routerLastErrAt         time.Time
-	routerErrDedupWindow    time.Duration
-	routerNudged            bool
-	routerStallAlerted      bool
-	routerUsage             model.ContextUsage
-	routerRun               *[2]string
-	routerIdleGrace         time.Duration
-	routerLastAlive         bool
-	routerLastPane          string
-	routerLastKind          string
-	routerLastStatus        string
-	routerLastSeenAt        time.Time
-	routerWorkingAt         time.Time
-	routerIdleSince         time.Time
-	routerTrueIdleSince     time.Time
-	handover                *handoverState
 	dream                   *dreamRun
 	lastScreen              map[string]screenMark
 	lastAnswer              map[string]time.Time
@@ -167,10 +131,8 @@ type Engine struct {
 	bypassExitPoll          time.Duration
 	bypassExitTimeout       time.Duration
 	bypassStartRetryTimeout time.Duration
-	rereadTrigID            string
 
-	// In-process native API Router runtime state (protected by mu except apiSwitchMu).
-	apiSwitchMu            sync.Mutex
+	// In-process native API Router runtime state (protected by mu).
 	apiTurn                *apiRouterTurn
 	apiTurnGen             uint64
 	apiConfigEpoch         uint64
@@ -230,13 +192,6 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 	if logger == nil {
 		logger = slog.Default()
 	}
-	var savedRouterRun *[2]string
-	if rawRun, ok, err := st.GetKV(ctx, "router_run"); err == nil && ok && strings.TrimSpace(rawRun) != "" {
-		var rr [2]string
-		if json.Unmarshal([]byte(rawRun), &rr) == nil {
-			savedRouterRun = &rr
-		}
-	}
 	eng := &Engine{
 		store:               st,
 		fleet:               fl,
@@ -249,7 +204,6 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		binPath:             binPath,
 		settings:            settings,
 		policies:            policies,
-		routerRun:           savedRouterRun,
 		lastScreen:          map[string]screenMark{},
 		lastAnswer:          map[string]time.Time{},
 		lastTrust:           map[string]time.Time{},
@@ -339,10 +293,7 @@ func (e *Engine) Policies() []model.Policy {
 // SaveConfig persists updated Settings and/or Policies and refreshes Router docs.
 func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []model.Policy) error {
 	var (
-		routerChanged    bool
 		apiConfigChanged bool
-		prevMode         string
-		nextMode         string
 		nextSettings     model.Settings
 		nextPolicies     []model.Policy
 	)
@@ -350,9 +301,6 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 	if st != nil {
 		prev := e.settings
 		ns := *st
-		if agent.NormalizeKind(ns.RouterKind) == "" {
-			ns.RouterKind = e.settings.RouterKind
-		}
 		if agent.NormalizeKind(ns.WorkerKind) == "" {
 			ns.WorkerKind = e.settings.WorkerKind
 		}
@@ -396,11 +344,6 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 		if ns.NotifyLevel != "normal" {
 			ns.NotifyLevel = "quiet"
 		}
-		if ns.RotatePct > 95 || (ns.RotatePct > 0 && ns.RotatePct < 20) {
-			ns.RotatePct = 0
-		} else if ns.RotatePct < 0 {
-			ns.RotatePct = -1
-		}
 		if ns.DreamAt != "" && !strings.EqualFold(ns.DreamAt, "off") {
 			var dh, dm int
 			if _, err := fmt.Sscanf(ns.DreamAt, "%d:%d", &dh, &dm); err != nil || dh < 0 || dh > 23 || dm < 0 || dm > 59 {
@@ -423,17 +366,10 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 			e.mu.Unlock()
 			return err
 		}
-		prevMode = prev.EffectiveRouterMode()
-		nextMode = ns.EffectiveRouterMode()
-		apiConfigChanged = prevMode != nextMode ||
-			prev.RouterAPIProvider != ns.RouterAPIProvider ||
+		apiConfigChanged = prev.RouterAPIProvider != ns.RouterAPIProvider ||
 			prev.RouterAPIBaseURL != ns.RouterAPIBaseURL ||
 			prev.RouterAPIModel != ns.RouterAPIModel ||
 			prev.RouterAPIEffort != ns.RouterAPIEffort
-		routerChanged = nextMode == "pty" && (prev.RouterKind != ns.RouterKind ||
-			prev.RouterModel != ns.RouterModel ||
-			prev.RouterEffort != ns.RouterEffort ||
-			prev.AskPermissions != ns.AskPermissions)
 		nextSettings = ns
 	}
 	if pols != nil {
@@ -449,14 +385,6 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 	}
 	sink := e.sink
 	e.mu.Unlock()
-
-	if st != nil && prevMode != nextMode {
-		e.apiSwitchMu.Lock()
-		defer e.apiSwitchMu.Unlock()
-		if err := e.prepareRouterModeSwitch(ctx, prevMode, nextMode); err != nil {
-			return err
-		}
-	}
 
 	if st != nil {
 		if err := e.store.SaveSettings(ctx, nextSettings); err != nil {
@@ -490,23 +418,8 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 	if pols != nil {
 		e.policies = nextPolicies
 	}
-	curSettings := e.settings
 	e.mu.Unlock()
 
-	if st != nil {
-		if curSettings.EffectiveRouterMode() == "pty" {
-			if docChanged, err := e.memory.WriteRouterDocsChanged(e.binPath, curSettings); err == nil && docChanged && !routerChanged {
-				e.queueRouterDocReread(ctx)
-			}
-		}
-	}
-	if routerChanged && e.fleet != nil {
-		go func() {
-			rctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			_ = e.RestartRouter(rctx)
-		}()
-	}
 	if apiConfigChanged {
 		e.wake()
 	}
@@ -645,9 +558,6 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 	if strings.TrimSpace(req.ActionID) == "" {
 		e.autoResolvePendingOnUserReply(ctx, thread, req.ReEntryID, req.QuoteText, channel, text)
 	}
-	if recent, _, err := e.store.ListEntries(ctx, "", 30); err == nil {
-		_ = e.memory.WriteMessages(recent)
-	}
 	e.touchThread(ctx, thread, channel, "")
 	e.mu.Lock()
 	sink := e.sink
@@ -728,14 +638,9 @@ func (e *Engine) entryInReplyChain(ctx context.Context, fromID, targetID string)
 
 func (e *Engine) buildDispatchHint(req SayRequest) string {
 	st := e.Settings()
-	apiMode := st.EffectiveRouterMode() == "api"
 	var hints []string
-	addHint := func(flag, key, val string) {
-		if apiMode {
-			hints = append(hints, key+"="+val)
-		} else {
-			hints = append(hints, flag+" "+val)
-		}
+	addHint := func(key, val string) {
+		hints = append(hints, key+"="+val)
 	}
 	effMachine := st.WorkerMachine
 	if m := strings.TrimSpace(req.Machine); m != "" {
@@ -749,40 +654,37 @@ func (e *Engine) buildDispatchHint(req SayRequest) string {
 			if name == "" {
 				name = "hub"
 			}
-			addHint("--machine", "machine", name)
+			addHint("machine", name)
 		}
 	}
 	effKind := agent.NormalizeKind(st.WorkerKind)
 	if k := agent.NormalizeKind(req.Kind); k != "" {
 		effKind = k
 		if k != agent.NormalizeKind(st.WorkerKind) {
-			addHint("--kind", "kind", k)
+			addHint("kind", k)
 		}
 	}
 	baseModel, baseEffort, _ := ResolveWorkerModel(st, effMachine, effKind, "", "")
 	if m := strings.TrimSpace(req.Model); m != "" && agent.ModelNameRe.MatchString(m) && m != baseModel {
-		addHint("--model", "model", m)
+		addHint("model", m)
 	}
 	if ef := strings.TrimSpace(req.Effort); ef != "" && agent.ModelNameRe.MatchString(ef) && ef != baseEffort {
-		addHint("--effort", "effort", ef)
+		addHint("effort", ef)
 	}
 	if pid := strings.TrimSpace(req.ProjectID); pid != "" {
 		if proj := ResolveProject(st.Projects, pid); proj != nil {
-			addHint("--project", "project", proj.ID)
+			addHint("project", proj.ID)
 			if p := ProjectPathForMachine(proj, effMachine); p != "" {
-				addHint("--cwd", "cwd", p)
+				addHint("cwd", p)
 			}
 		} else {
-			addHint("--project", "project", pid)
+			addHint("project", pid)
 		}
 	}
 	if len(hints) == 0 {
 		return ""
 	}
-	if apiMode {
-		return "[用户本次指定运行参数（对应 dispatch_work 参数）: " + strings.Join(hints, " ") + "]"
-	}
-	return "[The human picked where this runs: spawn with " + strings.Join(hints, " ") + "]"
+	return "[用户本次指定运行参数（对应 dispatch_work 参数）: " + strings.Join(hints, " ") + "]"
 }
 
 // ReplyRequest describes a Corgi outbound reply with optional quick-choice buttons,
@@ -1103,18 +1005,9 @@ func (e *Engine) ReplyDetailed(ctx context.Context, req ReplyRequest) (*ReplyRes
 		relatedWorker.LastReportAttachedID = autoAttachedReportID
 		_ = e.store.UpsertWorker(ctx, relatedWorker)
 	}
-	if recent, _, err := e.store.ListEntries(ctx, "", 30); err == nil {
-		_ = e.memory.WriteMessages(recent)
-	}
 
 	e.mu.Lock()
 	limit := e.settings.ReplyChars
-	e.routerAskedAt = time.Time{}
-	e.routerRepliedAt = now
-	e.routerRetries = 0
-	e.routerRetryPending = false
-	e.routerNudged = false
-	e.routerStallAlerted = false
 	sink := e.sink
 	e.mu.Unlock()
 
@@ -1253,35 +1146,6 @@ func (e *Engine) policyFor(source string) model.Policy {
 		return *wildcard
 	}
 	return model.Policy{Source: source, Action: "candidate"}
-}
-
-func (e *Engine) queueRouterDocReread(ctx context.Context) {
-	e.mu.Lock()
-	prevID := e.rereadTrigID
-	e.mu.Unlock()
-	if prevID != "" {
-		if prev, err := e.store.GetTrigger(ctx, prevID); err == nil && prev.Status == "queued" {
-			return
-		}
-	}
-	trig, err := e.Ingest(ctx, "system", model.MainThread, "corgi",
-		"CORGI.md changed (new Corgi build or updated settings). Re-read CORGI.md now and follow it from here on. Nothing to tell the human.",
-		"", model.RouterName, "")
-	if err == nil && trig != nil {
-		e.mu.Lock()
-		e.rereadTrigID = trig.ID
-		e.mu.Unlock()
-	}
-}
-
-func (e *Engine) rotatePctLocked() int {
-	if e.settings.RotatePct < 0 {
-		return 0
-	}
-	if e.settings.RotatePct == 0 {
-		return model.DefaultRotatePct
-	}
-	return e.settings.RotatePct
 }
 
 func (e *Engine) addEvent(ctx context.Context, thread, text, ref, tone string) {

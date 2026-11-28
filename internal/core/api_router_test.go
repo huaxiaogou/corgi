@@ -81,7 +81,6 @@ func newTestAPIEngine(t *testing.T, baseURL string) (*Engine, *store.Store, *rec
 	eng.SetSink(sink)
 
 	cfg := eng.Settings()
-	cfg.RouterMode = "api"
 	cfg.RouterAPIProvider = RouterAPIProviderTokenHub
 	cfg.RouterAPIBaseURL = baseURL
 	cfg.RouterAPIModel = "hy4"
@@ -852,12 +851,7 @@ func TestAPIModeNoPTYTranscriptLeakAndCleanHistoryAndProgress(t *testing.T) {
 	eng, _, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
 	ctx := context.Background()
 
-	// 1. In API mode, RouterTranscriptInfo MUST return ("", nil) so WeCom never streams stale PTY transcripts.
-	if p, ad := eng.RouterTranscriptInfo(ctx); p != "" || ad != nil {
-		t.Fatalf("expected empty RouterTranscriptInfo in API mode, got path=%q ad=%v", p, ad)
-	}
-
-	// 2. Seed prior assistant reply + routine noise events and verify sliding history preserves
+	// 1. Seed prior assistant reply + routine noise events and verify sliding history preserves
 	// reply content without internal "[eXXXX]" prefixes, filters noise, and emits ZERO bare-text
 	// assistant turns (preventing models like kimi-k3 from few-shot imitating bare text).
 	if _, _, _, err := eng.Reply(ctx, model.MainThread, "之前的正常回复内容", "", nil, false); err != nil {

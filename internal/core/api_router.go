@@ -167,12 +167,6 @@ func (e *Engine) SetAllowPrivateLLMForTest(allow bool) {
 	e.mu.Unlock()
 }
 
-func (e *Engine) isAPIRouterMode() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.settings.EffectiveRouterMode() == "api"
-}
-
 // NormalizeTokenHubEffort ensures known Tencent TokenHub models only receive their
 // provider-supported reasoning_effort values (e.g. hy4: high|no_think; glm-5.3/kimi-k3: low|high|max).
 func NormalizeTokenHubEffort(modelName, rawEffort string) string {
@@ -198,7 +192,6 @@ func normalizeRouterAPISettings(ns *model.Settings, allowPrivateForTest bool) er
 	if ns == nil {
 		return nil
 	}
-	ns.RouterMode = ns.EffectiveRouterMode()
 	ns.RouterAPIProvider = NormalizeRouterAPIProvider(ns.RouterAPIProvider)
 	ns.RouterAPIModel = strings.TrimSpace(ns.RouterAPIModel)
 	ns.RouterAPIEffort = strings.TrimSpace(ns.RouterAPIEffort)
@@ -211,18 +204,14 @@ func normalizeRouterAPISettings(ns *model.Settings, allowPrivateForTest bool) er
 		}
 		ns.RouterAPIEffort = NormalizeTokenHubEffort(ns.RouterAPIModel, ns.RouterAPIEffort)
 	}
-	if ns.RouterMode == "api" || strings.TrimSpace(ns.RouterAPIBaseURL) != "" {
+	if strings.TrimSpace(ns.RouterAPIBaseURL) != "" || ns.RouterAPIProvider == RouterAPIProviderOpenAI {
 		baseURL, _, err := NormalizeRouterAPIBaseURL(ns.RouterAPIProvider, ns.RouterAPIBaseURL, allowPrivateForTest)
 		if err != nil {
-			if ns.RouterMode == "api" {
-				return err
-			}
-			// Keep invalid custom URL out when still in PTY mode only if non-empty.
 			return err
 		}
 		ns.RouterAPIBaseURL = baseURL
 	}
-	if ns.RouterMode == "api" && ns.RouterAPIModel == "" {
+	if ns.RouterAPIModel == "" {
 		return fmt.Errorf("请填写原生 API 大脑的模型名称（如 %s）", TokenHubDefaultModel)
 	}
 	return nil
@@ -432,55 +421,6 @@ func (e *Engine) resolveActiveRouterAPIConfig(ctx context.Context) (LLMClientCon
 	}, modelName, eff, cacheKey, nil
 }
 
-// prepareRouterModeSwitch serializes transitions between "pty" and "api", settling active work
-// and closing ONLY the Hub-local PTY Router workspace when switching into API mode.
-func (e *Engine) prepareRouterModeSwitch(ctx context.Context, prevMode, nextMode string) error {
-	e.mu.Lock()
-	if e.dream != nil {
-		e.mu.Unlock()
-		return fmt.Errorf("Corgi 正在做梦整理记忆，请等待完成后再切换大脑模式")
-	}
-	if e.handover != nil {
-		e.mu.Unlock()
-		return fmt.Errorf("当前 PTY 会话正在交接记忆，请几秒后再切换大脑模式")
-	}
-	e.mu.Unlock()
-
-	if prevMode == "api" && nextMode == "pty" {
-		e.cancelAndSettleAPIRouterTurn(ctx, "", false)
-		return nil
-	}
-	if prevMode == "pty" && nextMode == "api" {
-		// Wait briefly if a PTY Router launch is mid-flight so we don't orphan a fresh workspace.
-		deadline := time.Now().Add(6 * time.Second)
-		for time.Now().Before(deadline) {
-			e.mu.Lock()
-			launching := e.routerLaunching
-			e.mu.Unlock()
-			if !launching {
-				break
-			}
-			if !sleepContext(ctx, 150*time.Millisecond) {
-				return ctx.Err()
-			}
-		}
-		if e.fleet != nil {
-			ws, err := e.fleet.Workspaces(ctx)
-			if err == nil {
-				for _, w := range ws {
-					if w.Label == model.RouterLabel && isHubLocalPane(w.ID) {
-						if cErr := e.fleet.CloseWorkspace(ctx, w.ID); cErr != nil {
-							return fmt.Errorf("关闭旧 PTY 大脑工作区 %s 失败: %w", w.ID, cErr)
-						}
-					}
-				}
-			}
-		}
-		e.clearRouterLive()
-	}
-	return nil
-}
-
 // cancelAndSettleAPIRouterTurn cancels the active API turn (scoped to thread when non-empty),
 // waits briefly for it to exit, and when ackTrigger is true (explicit user Stop) marks it
 // stopped and acknowledges its trigger so Stop never replays it.
@@ -573,7 +513,7 @@ func (e *Engine) deliverAPIRouter(ctx context.Context, list []*model.Trigger) {
 	}
 	now := time.Now()
 	e.mu.Lock()
-	if e.apiTurn != nil || e.hubUpdating || (e.dream != nil && e.dream.mode != "api") || e.routerDispatching || e.settings.Paused {
+	if e.apiTurn != nil || e.hubUpdating || e.routerDispatching || e.settings.Paused {
 		e.mu.Unlock()
 		return
 	}

@@ -117,40 +117,15 @@ func TestWorkItemsLedgerLifecycleInjectionAndDreamInput(t *testing.T) {
 		t.Fatalf("explicit --work disambiguation failed: wi=%q err=%v", resolvedWI, err)
 	}
 
-	// 4. Create enough open items (13 total) and verify deliverBatch injects compact 12-of-13 summary on normal human turn.
+	// 4. Create additional open items and verify buildDreamInput includes Authoritative Open Work Items section.
 	for i := 0; i < 11; i++ {
 		if _, err := eng.SetWorkItem(ctx, "new", model.MainThread, fmt.Sprintf("并发事项-%02d", i+1), "推进中", "", ""); err != nil {
 			t.Fatal(err)
 		}
 	}
-	trig, err := eng.Ingest(ctx, "chat", model.MainThread, "you", "当前整体还有什么事情？", "", model.RouterName, "e1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	eng.deliverBatch(ctx, model.RouterName, "w0:p1", []*model.Trigger{trig})
-	mu.Lock()
-	var delivered string
-	for _, p := range prompts {
-		if strings.Contains(p, "当前整体还有什么事情") {
-			delivered = p
-			break
-		}
-	}
-	mu.Unlock()
-	if !strings.Contains(delivered, "[open work items: showing 12 of 13 — run `corgi list` for complete list]") {
-		t.Fatalf("expected 12-of-13 open work items summary injected on normal human turn, got:\n%s", delivered)
-	}
-
-	// 5. writeDreamInput includes Authoritative Open Work Items section.
-	if err := eng.writeDreamInput(ctx); err != nil {
-		t.Fatalf("writeDreamInput: %v", err)
-	}
-	dreamInput, err := os.ReadFile(filepath.Join(eng.Memory().RouterDir(), "dream", "input.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(dreamInput), "## Authoritative Open Work Items (Hub SQLite)") || !strings.Contains(string(dreamInput), "收纳箱交互原型交付") {
-		t.Fatalf("dream/input.md missing authoritative open work items:\n%s", string(dreamInput))
+	dreamInput := eng.buildDreamInput(ctx)
+	if !strings.Contains(dreamInput, "## Authoritative Open Work Items (Hub SQLite)") || !strings.Contains(dreamInput, "收纳箱交互原型交付") {
+		t.Fatalf("buildDreamInput missing authoritative open work items:\n%s", dreamInput)
 	}
 
 	// 6. CloseWorkItem requires reason and hides closed item from open list.

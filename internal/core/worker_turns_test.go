@@ -43,6 +43,7 @@ func TestWorkerTurnWatermarkSuppressesStaleAndHonestStatusTagging(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng.workerTurnSettleDelay = -1
 	ctx := context.Background()
 	wk := &model.Worker{Name: "agy-85", PaneID: "w7:p1@mac", Session: "sess-1", Thread: model.MainThread}
 	if err := st.UpsertWorker(ctx, wk); err != nil {
@@ -359,6 +360,7 @@ func TestExplicitReportSuppressesSameTurnClosingDuplicateWhileAllowingNewTurnAnd
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng.workerTurnSettleDelay = -1
 	wk := &model.Worker{Name: "agent-flow-plan", Kind: "agy", PaneID: "wG:p1", Session: "s-flow", Thread: model.MainThread}
 	t0 := time.Now()
 
