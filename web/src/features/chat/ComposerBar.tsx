@@ -219,7 +219,7 @@ export function ComposerBar({
     try {
       await onSend({
         text: payload,
-        machine: machine === "local" || machine === "hub" ? "" : machine,
+        machine: machine === "local" ? "hub" : machine,
         kind,
         model,
         effort,

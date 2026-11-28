@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -206,13 +205,26 @@ func isDisallowedLLMIP(addr netip.Addr) bool {
 		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() || !ip.IsGlobalUnicast()
 }
 
-func isConfiguredProxyHost(host string) bool {
-	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
-		if pu, err := url.Parse(strings.TrimSpace(os.Getenv(k))); err == nil && pu != nil && pu.Hostname() != "" && strings.EqualFold(host, pu.Hostname()) {
-			return true
+type llmProxyAddrCtxKey struct{}
+
+func normalizeProxyDialAddr(pu *url.URL) string {
+	if pu == nil || pu.Hostname() == "" {
+		return ""
+	}
+	port := orStr(pu.Port(), map[string]string{"https": "443", "socks5": "1080", "socks5h": "1080"}[strings.ToLower(pu.Scheme)])
+	return net.JoinHostPort(strings.ToLower(pu.Hostname()), orStr(port, "80"))
+}
+
+func attachEffectiveProxyWith(req *http.Request, proxyFn func(*http.Request) (*url.URL, error)) *http.Request {
+	if pu, err := proxyFn(req); err == nil && pu != nil {
+		if proxyAddr := normalizeProxyDialAddr(pu); proxyAddr != "" {
+			return req.WithContext(context.WithValue(req.Context(), llmProxyAddrCtxKey{}, proxyAddr))
 		}
 	}
-	return false
+	return req
+}
+func attachEffectiveProxyToReq(req *http.Request) *http.Request {
+	return attachEffectiveProxyWith(req, http.ProxyFromEnvironment)
 }
 
 func newDirectLLMTransport() *http.Transport {
@@ -221,12 +233,12 @@ func newDirectLLMTransport() *http.Transport {
 		ForceAttemptHTTP2: true, MaxIdleConns: 16, IdleConnTimeout: 60 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second, ExpectContinueTimeout: 1 * time.Second, Proxy: http.ProxyFromEnvironment,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if proxyAddr, _ := ctx.Value(llmProxyAddrCtxKey{}).(string); proxyAddr != "" && strings.EqualFold(addr, proxyAddr) {
+				return dialer.DialContext(ctx, network, addr)
+			}
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, err
-			}
-			if isConfiguredProxyHost(host) {
-				return dialer.DialContext(ctx, network, addr)
 			}
 			ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 			if err != nil {

@@ -524,11 +524,39 @@ func writeTinyPNG(t *testing.T, p string) {
 }
 
 func TestAPIRouterReviewRegressions(t *testing.T) {
-	// 1. Provider error echoing credential must redact the secret.
+	// 1. Provider error echoing credential must redact the secret (both HTTP error and SSE HTTP 200 error).
 	secret := "sk-super-secret-echo-9999"
 	redacted := extractSanitizedProviderError([]byte(`{"error":{"message":"invalid key sk-super-secret-echo-9999 rejected"}}`), secret)
 	if strings.Contains(redacted, secret) || !strings.Contains(redacted, "[REDACTED]") {
 		t.Fatalf("expected secret redacted, got %q", redacted)
+	}
+	sseErrSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"invalid key " + secret + " in stream\"}}\n\n"))
+	}))
+	defer sseErrSrv.Close()
+	_, sseErr := newTestLLMClient(sseErrSrv).ChatCompletion(context.Background(), LLMClientConfig{
+		Provider: RouterAPIProviderTokenHub, BaseURL: TokenHubDefaultBaseURL, APIKey: secret,
+	}, LLMChatRequest{Model: "hy4", Stream: true, Messages: []LLMMessage{{Role: "user", Content: "hi"}}})
+	if sseErr == nil || strings.Contains(sseErr.Error(), secret) || !strings.Contains(sseErr.Error(), "[REDACTED]") {
+		t.Fatalf("expected SSE stream error redacted, got %v", sseErr)
+	}
+
+	// 1b. Direct SSRF check must NOT exempt a destination unless the request's effective proxy resolves to it.
+	directTr := newDirectLLMTransport()
+	directReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://api.example.com/v1/chat/completions", nil)
+	directReq = attachEffectiveProxyWith(directReq, func(*http.Request) (*url.URL, error) { return nil, nil })
+	if _, dErr := directTr.DialContext(directReq.Context(), "tcp", "127.0.0.1:18080"); dErr == nil || !strings.Contains(dErr.Error(), "disallowed IP") {
+		t.Fatalf("expected direct HTTPS dial to unused proxy IP blocked by SSRF, got %v", dErr)
+	}
+	proxyURL, _ := url.Parse("http://127.0.0.1:18080")
+	proxiedReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://api.example.com/v1/chat/completions", nil)
+	proxiedReq = attachEffectiveProxyWith(proxiedReq, func(*http.Request) (*url.URL, error) { return proxyURL, nil })
+	if got, _ := proxiedReq.Context().Value(llmProxyAddrCtxKey{}).(string); got != "127.0.0.1:18080" {
+		t.Fatalf("expected effective HTTPS_PROXY addr attached to request context, got %q", got)
+	}
+	if _, otherErr := directTr.DialContext(proxiedReq.Context(), "tcp", "127.0.0.1:19999"); otherErr == nil || !strings.Contains(otherErr.Error(), "disallowed IP") {
+		t.Fatalf("expected non-proxy loopback IP still blocked by SSRF even when proxy is set, got %v", otherErr)
 	}
 
 	// 2. Testing or saving blank custom provider URL must NOT reuse previous saved URL.
@@ -1284,7 +1312,7 @@ func TestAPIRouterSilenceBoundaryZeroBareTextLeakAndNoAction(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		got := eng.formatAPIToolProgress(ctx, LLMToolCall{
+		got := eng.formatAPIToolProgress(ctx, model.MainThread, LLMToolCall{
 			Function: LLMToolFunctionCall{Name: "read_detail", Arguments: `{"kind":"worker","target":"agy-3637"}`},
 		})
 		if !strings.Contains(got, "「会话直聊身份提醒」") || strings.Contains(got, "agy-3637") {

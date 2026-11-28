@@ -313,3 +313,15 @@ func (e *Engine) toolDreamFinish(d *dreamRun, rawArgs string) (string, bool) {
 	}
 	return toolJSON(map[string]any{"ok": true, "journal": "dreams/" + fileName, "summary": summary}), true
 }
+
+func oneLineClip(s string, maxRunes int) string {
+	return clipRunes(strings.Join(strings.Fields(s), " "), maxRunes, "...")
+}
+
+func clipRunes(s string, maxRunes int, suffix string) string {
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes]) + suffix
+}

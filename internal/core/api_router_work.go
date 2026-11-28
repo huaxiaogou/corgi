@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kiperjing/corgi/internal/model"
+	"github.com/kiperjing/corgi/internal/runtime/agent"
 )
 
 func (e *Engine) requireThreadWorkItem(ctx context.Context, id, thread string) (*model.WorkItem, string) {
@@ -121,12 +122,12 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 	if trig != nil && trig.Dispatch != nil {
 		ov = *trig.Dispatch
 	}
-	reqMachine := orStr(strings.TrimSpace(args.Machine), ov.Machine)
-	reqKind := orStr(strings.TrimSpace(args.Kind), ov.Kind)
-	reqModel, reqEffort := "", ""
-	if strings.TrimSpace(args.Kind) == "" || ov.Kind == "" || strings.EqualFold(strings.TrimSpace(args.Kind), ov.Kind) {
-		reqModel, reqEffort = ov.Model, ov.Effort
+	reqMachine := orStr(ov.Machine, strings.TrimSpace(args.Machine))
+	reqKind := orStr(ov.Kind, strings.TrimSpace(args.Kind))
+	if ov.Kind == "" && (ov.Model != "" || ov.Effort != "") {
+		reqKind = orStr(agent.NormalizeKind(st.WorkerKind), reqKind)
 	}
+	reqModel, reqEffort := ov.Model, ov.Effort
 	effMachine := st.WorkerMachine
 	if reqMachine != "" {
 		effMachine = reqMachine
@@ -137,12 +138,23 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 	if strings.EqualFold(effMachine, "hub") || strings.EqualFold(effMachine, "local") {
 		effMachine = ""
 	}
-	var resolvedCwd, resolvedProjID string
-	if projRef := orStr(strings.TrimSpace(args.Project), ov.ProjectID); projRef != "" {
-		proj := ResolveProject(st.Projects, projRef)
+	origReq := ""
+	if meta != nil {
+		origReq = meta.verbatimRequest
+	}
+	var (
+		resolvedCwd, resolvedProjID string
+		proj                        *model.ProjectWorkspace
+	)
+	if projRef := orStr(ov.ProjectID, strings.TrimSpace(args.Project)); projRef != "" {
+		proj = ResolveProject(st.Projects, projRef)
 		if proj == nil {
 			return toolErr("未找到已配置的项目：" + projRef)
 		}
+	} else {
+		proj = ResolveProject(st.Projects, goal, origReq)
+	}
+	if proj != nil {
 		resolvedProjID = proj.ID
 		resolvedCwd = ProjectPathForMachine(proj, effMachine)
 		if resolvedCwd == "" {
@@ -160,10 +172,6 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 	reservedName := fmt.Sprintf("%s-%d", orStr(reqKind, orStr(st.WorkerKind, "claude")), seq)
 	if err := e.recordAPIRouterInflight(context.Background(), trig, "dispatch_work", reservedName); err != nil {
 		return toolErr("记录防重标记失败，已中止派发：" + err.Error())
-	}
-	origReq := ""
-	if meta != nil {
-		origReq = meta.verbatimRequest
 	}
 	wk, err := e.Spawn(ctx, SpawnRequest{
 		Name: reservedName, Kind: reqKind, Machine: reqMachine, Model: reqModel, Effort: reqEffort, Cwd: resolvedCwd,
@@ -236,10 +244,16 @@ func (e *Engine) toolSteerWorker(ctx context.Context, turn *apiRouterTurn, trig 
 	if wk.Ended {
 		return toolErr("Worker #" + name + " 已结束，请改用 dispatch_work(resume=" + name + ") 续聊")
 	}
+	workID := strings.TrimSpace(args.WorkID)
+	if workID != "" {
+		if _, errMsg := e.requireThreadWorkItem(ctx, workID, turn.thread); errMsg != "" {
+			return toolErr(errMsg)
+		}
+	}
 	if err := e.recordAPIRouterInflight(context.Background(), trig, "steer_worker", name); err != nil {
 		return toolErr("记录防重标记失败，已中止发送：" + err.Error())
 	}
-	if _, _, err := e.SendToWorkerWithWork(ctx, name, turn.thread, msg, strings.TrimSpace(args.WorkID)); err != nil {
+	if _, _, err := e.SendToWorkerWithWork(ctx, name, turn.thread, msg, workID); err != nil {
 		return toolErr("发送指令给 #" + name + " 失败：" + err.Error())
 	}
 	turn.markMutated("已向 #" + name + " 发送跟进指令")

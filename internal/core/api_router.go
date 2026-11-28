@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,16 +15,15 @@ import (
 )
 
 const (
-	apiRouterInflightKVKey      = "api_router_inflight"
-	apiRouterTurnDeadline       = 420 * time.Second
-	apiRouterStepDeadline       = 210 * time.Second
-	maxAPIRouterSteps           = 8
-	maxAPIRouterToolCalls       = 12
-	maxAPIRouterBareTextRetries = 2
-	maxAPIToolOutputRunes       = 4000
-	maxSameAPITriggerFails      = 3
-
-	turnFlagMutated uint32 = 1 << iota
+	apiRouterInflightKVKey             = "api_router_inflight"
+	apiRouterTurnDeadline              = 420 * time.Second
+	apiRouterStepDeadline              = 210 * time.Second
+	maxAPIRouterSteps                  = 8
+	maxAPIRouterToolCalls              = 12
+	maxAPIRouterBareTextRetries        = 2
+	maxAPIToolOutputRunes              = 4000
+	maxSameAPITriggerFails             = 3
+	turnFlagMutated             uint32 = 1 << iota
 	turnFlagReplied
 	turnFlagDispatched
 	turnFlagNoAction
@@ -34,20 +32,19 @@ const (
 )
 
 type routerState struct {
-	turn                        *apiRouterTurn
-	turnGen, configEpoch        uint64
-	backoffUntil                time.Time
-	failCount, sameTriggerFails int
-	lastFailTriggerID, lastErr  string
-	authPaused                  bool
+	turn                                     *apiRouterTurn
+	turnGen, configEpoch                     uint64
+	backoffUntil                             time.Time
+	failCount, sameTriggerFails              int
+	lastFailTriggerID, lastErr, pendingAckID string
+	authPaused                               bool
 }
 
 func (s *routerState) resetFailuresLocked(bumpEpoch bool) {
 	if bumpEpoch {
 		s.configEpoch++
 	}
-	s.backoffUntil = time.Time{}
-	s.failCount, s.lastFailTriggerID, s.sameTriggerFails, s.authPaused, s.lastErr = 0, "", 0, false, ""
+	s.backoffUntil, s.failCount, s.lastFailTriggerID, s.sameTriggerFails, s.authPaused, s.lastErr = time.Time{}, 0, "", 0, false, ""
 }
 
 type apiRouterTurn struct {
@@ -73,7 +70,7 @@ func (t *apiRouterTurn) markMutated(op string) {
 func (t *apiRouterTurn) opsText() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return strings.Join(t.summaryOps, "；")
+	return orStr(strings.Join(t.summaryOps, "；"), "已执行变更")
 }
 
 type apiRouterInflight struct {
@@ -94,7 +91,7 @@ func (e *Engine) cancelAndSettleAPIRouterTurn(ctx context.Context, thread string
 	if ackTrigger {
 		turn.flags.Or(turnFlagStopped)
 	}
-	cancel, done, trigID, turnThread := turn.cancel, turn.done, turn.triggerID, turn.thread
+	cancel, done, trigID, turnThread, sink := turn.cancel, turn.done, turn.triggerID, turn.thread, e.sink
 	e.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -104,28 +101,21 @@ func (e *Engine) cancelAndSettleAPIRouterTurn(ctx context.Context, thread string
 	case <-time.After(3 * time.Second):
 	case <-ctx.Done():
 	}
-	if !ackTrigger || trigID == "" || e.store == nil {
-		return
+	if ackTrigger && trigID != "" && e.store != nil {
+		e.ackAPITriggerOnce(context.Background(), turn, &model.Trigger{ID: trigID})
+		if turn.hasFlag(turnFlagAcked) {
+			e.clearAPIRouterInflightIfMatch(context.Background(), trigID)
+		}
+		sink.OnAPIRouterTurnEnd(context.Background(), turnThread, trigID, "cancelled")
 	}
-	if e.store.AckTriggerTarget(context.Background(), trigID, model.RouterName) == nil {
-		turn.flags.Or(turnFlagAcked)
-		e.clearAPIRouterInflightIfMatch(context.Background(), trigID)
-	}
-	e.mu.Lock()
-	sink := e.sink
-	e.mu.Unlock()
-	sink.OnAPIRouterTurnEnd(context.Background(), turnThread, trigID, "cancelled")
 }
 
 func (e *Engine) recordAPIRouterInflight(ctx context.Context, trig *model.Trigger, op, reservedID string) error {
 	if e.store == nil || trig == nil {
 		return nil
 	}
-	b, err := json.Marshal(apiRouterInflight{TriggerID: trig.ID, Thread: orStr(trig.Thread, model.MainThread), Op: op, ReservedID: reservedID, StartedAt: time.Now()})
-	if err == nil {
-		err = e.store.SetKV(ctx, apiRouterInflightKVKey, string(b))
-	}
-	if err != nil {
+	b, _ := json.Marshal(apiRouterInflight{TriggerID: trig.ID, Thread: orStr(trig.Thread, model.MainThread), Op: op, ReservedID: reservedID, StartedAt: time.Now()})
+	if err := e.store.SetKV(ctx, apiRouterInflightKVKey, string(b)); err != nil {
 		return fmt.Errorf("persist api router inflight: %w", err)
 	}
 	return nil
@@ -140,47 +130,73 @@ func (e *Engine) clearAPIRouterInflightIfMatch(ctx context.Context, triggerID st
 	}
 }
 
-// reconcileAPIRouterInflight prevents blind replay across Hub restarts (Strategy 2B).
-// AckTriggerTarget MUST succeed before DeleteKV; on ACK error the marker is retained.
-func (e *Engine) reconcileAPIRouterInflight(ctx context.Context) {
+// reconcileAPIRouterInflight enforces Strategy 2B: AckTriggerTarget must succeed before DeleteKV or next turn.
+func (e *Engine) reconcileAPIRouterInflight(ctx context.Context) bool {
 	if e.store == nil {
-		return
+		return true
 	}
 	raw, ok, err := e.store.GetKV(ctx, apiRouterInflightKVKey)
-	if err != nil || !ok || strings.TrimSpace(raw) == "" {
-		return
+	if err != nil {
+		e.logger.Warn("reconcile api router inflight read failed", "err", err)
+		return false
 	}
 	var m apiRouterInflight
-	if json.Unmarshal([]byte(raw), &m) != nil || strings.TrimSpace(m.TriggerID) == "" {
+	hasKV := ok && strings.TrimSpace(raw) != ""
+	if hasKV && (json.Unmarshal([]byte(raw), &m) != nil || strings.TrimSpace(m.TriggerID) == "") {
 		_ = e.store.DeleteKV(ctx, apiRouterInflightKVKey)
-		return
+		hasKV = false
 	}
-	if err := e.store.AckTriggerTarget(ctx, m.TriggerID, model.RouterName); err != nil {
-		e.logger.Warn("reconcile api router inflight ack failed; retaining marker", "trigger", m.TriggerID, "op", m.Op, "err", err)
-		return
+	e.mu.Lock()
+	pendingID := e.router.pendingAckID
+	e.mu.Unlock()
+	targetID := condStr(hasKV, m.TriggerID, pendingID)
+	if targetID == "" {
+		return true
 	}
-	if err := e.store.DeleteKV(ctx, apiRouterInflightKVKey); err != nil {
-		e.logger.Warn("reconcile api router inflight delete marker failed", "trigger", m.TriggerID, "err", err)
+	if err := e.store.AckTriggerTarget(ctx, targetID, model.RouterName); err != nil {
+		e.logger.Warn("reconcile api router ack failed; retaining guard", "trigger", targetID, "op", m.Op, "err", err)
+		return false
 	}
-	note := fmt.Sprintf("上次大脑回合（%s）在 Hub 重启时中断，为防重复执行已跳过自动重放", m.Op)
-	if wk, wErr := e.store.GetWorker(ctx, m.ReservedID); m.ReservedID != "" && wErr == nil && wk != nil {
-		note = fmt.Sprintf("上次大脑回合在派发 #%s 后因 Hub 重启中断，该 Worker 已保留（状态：%s），未重复派发", wk.Name, wk.Status)
-	} else if en, eErr := e.store.GetEntry(ctx, m.ReservedID); m.ReservedID != "" && eErr == nil && en != nil {
-		note = fmt.Sprintf("上次大脑回复（%s）已入库后因 Hub 重启中断，未重复发送", en.ID)
+	e.mu.Lock()
+	if e.router.pendingAckID == targetID {
+		e.router.pendingAckID = ""
+		e.router.resetFailuresLocked(false)
 	}
-	e.addEvent(ctx, orStr(m.Thread, model.MainThread), note, m.TriggerID, "info")
-	e.notifyChanged()
+	e.mu.Unlock()
+	if hasKV {
+		_ = e.store.DeleteKV(ctx, apiRouterInflightKVKey)
+		if pendingID != targetID {
+			note := fmt.Sprintf("上次大脑回合（%s）在 Hub 重启时中断，为防重复执行已跳过自动重放", m.Op)
+			if wk, wErr := e.store.GetWorker(ctx, m.ReservedID); m.ReservedID != "" && wErr == nil && wk != nil {
+				note = fmt.Sprintf("上次大脑回合在派发 #%s 后因 Hub 重启中断，该 Worker 已保留（状态：%s），未重复派发", wk.Name, wk.Status)
+			} else if en, eErr := e.store.GetEntry(ctx, m.ReservedID); m.ReservedID != "" && eErr == nil && en != nil {
+				note = fmt.Sprintf("上次大脑回复（%s）已入库后因 Hub 重启中断，未重复发送", en.ID)
+			}
+			e.addEvent(ctx, orStr(m.Thread, model.MainThread), note, targetID, "info")
+			e.notifyChanged()
+		}
+	}
+	return true
 }
 
-func (e *Engine) deliverAPIRouter(_ context.Context, list []*model.Trigger) {
+func (e *Engine) deliverAPIRouter(ctx context.Context, list []*model.Trigger) {
+	if len(list) == 0 {
+		return
+	}
+	e.mu.Lock()
+	busy := e.router.turn != nil || e.hubUpdating || e.routerDispatching || e.settings.Paused
+	e.mu.Unlock()
+	if busy || !e.reconcileAPIRouterInflight(ctx) {
+		return
+	}
 	now := time.Now()
 	e.mu.Lock()
-	if len(list) == 0 || e.router.turn != nil || e.hubUpdating || e.routerDispatching || e.settings.Paused ||
-		e.router.authPaused || (!e.router.backoffUntil.IsZero() && now.Before(e.router.backoffUntil)) {
+	if e.router.turn != nil || e.hubUpdating || e.routerDispatching || e.settings.Paused ||
+		e.router.authPaused || e.router.pendingAckID != "" || (!e.router.backoffUntil.IsZero() && now.Before(e.router.backoffUntil)) {
 		e.mu.Unlock()
 		return
 	}
-	sort.Slice(list, func(i, j int) bool { return list[i].Seq < list[j].Seq })
+	slices.SortFunc(list, func(a, b *model.Trigger) int { return int(a.Seq - b.Seq) })
 	trig := *list[0]
 	trig.Targets, trig.Media = append([]string(nil), list[0].Targets...), append([]model.MediaRef(nil), list[0].Media...)
 	rootCtx := e.runCtx
@@ -201,12 +217,15 @@ func (e *Engine) ackAPITriggerOnce(ctx context.Context, turn *apiRouterTurn, tri
 		return
 	}
 	if err := e.store.AckTriggerTarget(ctx, trig.ID, model.RouterName); err != nil {
-		e.logger.Warn("ack api trigger failed", "trigger", trig.ID, "err", err)
+		e.mu.Lock()
+		e.router.pendingAckID = trig.ID
+		e.mu.Unlock()
+		e.logger.Warn("ack api trigger failed; blocking replay", "trigger", trig.ID, "err", err)
 		return
 	}
 	turn.flags.Or(turnFlagAcked)
-	// Reset failure/circuit-breaker counters ONLY after durable ACK succeeds.
 	e.mu.Lock()
+	e.router.pendingAckID = condStr(e.router.pendingAckID == trig.ID, "", e.router.pendingAckID)
 	if e.router.configEpoch == turn.configEpoch {
 		e.router.resetFailuresLocked(false)
 	}
@@ -234,17 +253,16 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		e.wake()
 	}()
 	if e.store != nil {
-		if fresh, err := e.store.GetTrigger(ctx, trig.ID); err != nil || fresh == nil || fresh.Status != "queued" || (len(fresh.Targets) > 0 && !slices.Contains(fresh.Targets, model.RouterName)) {
+		fresh, err := e.store.GetTrigger(ctx, trig.ID)
+		if err != nil || fresh == nil || fresh.Status != "queued" || (len(fresh.Targets) > 0 && !slices.Contains(fresh.Targets, model.RouterName)) {
 			sealReason = ""
 			return
-		} else {
-			trig = fresh
 		}
+		trig = fresh
 	}
 	cfg, modelName, effort, cacheKey, err := e.resolveActiveRouterAPIConfig(ctx)
 	if err != nil {
-		e.handleAPIRouterFailure(bg, turn, trig, 0, modelName, effort, err)
-		sealReason = "error"
+		sealReason = e.handleAPIRouterFailure(bg, turn, trig, 0, modelName, effort, err)
 		return
 	}
 	turnMeta, allowSilent := e.resolveTurnConsentMeta(ctx, trig), canAPIRouterSilence(trig)
@@ -258,44 +276,35 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		}
 		stepCtx, stepCancel := context.WithTimeout(ctx, apiRouterStepDeadline)
 		resp, callErr := e.llm.ChatCompletion(stepCtx, cfg, req)
-		if callErr != nil && forceTools && toolChoiceOK && errors.Is(callErr, ErrLLMBadRequest) {
+		if callErr != nil && req.ToolChoice != nil && errors.Is(callErr, ErrLLMBadRequest) {
 			toolChoiceOK, req.ToolChoice = false, nil
 			e.logger.Warn("api router provider rejected tool_choice=required, retrying without tool_choice", "trigger", trig.ID, "model", modelName, "err", callErr)
 			resp, callErr = e.llm.ChatCompletion(stepCtx, cfg, req)
 		}
 		stepCancel()
 		if callErr != nil {
-			switch {
-			case turn.hasFlag(turnFlagStopped):
+			if turn.hasFlag(turnFlagStopped) {
 				e.ackAPITriggerOnce(bg, turn, trig)
 				sealReason = "cancelled"
-			case ctx.Err() != nil && !turn.hasFlag(turnFlagMutated) && errors.Is(ctx.Err(), context.Canceled):
+			} else if ctx.Err() != nil && !turn.hasFlag(turnFlagMutated) && errors.Is(ctx.Err(), context.Canceled) {
 				sealReason = ""
-			default:
-				e.handleAPIRouterFailure(bg, turn, trig, step+1, modelName, effort, callErr)
-				sealReason = "error"
+			} else {
+				sealReason = e.handleAPIRouterFailure(bg, turn, trig, step+1, modelName, effort, callErr)
 			}
 			return
 		}
 		choice := resp.Choices[0].Message
 		e.logLLMStep("api router step", "trigger", trig.ID, step+1, modelName, effort, resp, choice.ToolCalls)
 		if len(choice.ToolCalls) == 0 {
-			if turn.hasFlag(turnFlagReplied) {
-				break
-			}
-			if bareRetries < maxAPIRouterBareTextRetries && step < maxAPIRouterSteps-1 {
+			if !turn.hasFlag(turnFlagReplied) && bareRetries < maxAPIRouterBareTextRetries && step < maxAPIRouterSteps-1 {
 				bareRetries, forceTools = bareRetries+1, true
 				if nudgeIdx < 0 || nudgeIdx != len(messages)-1 {
 					messages, nudgeIdx = append(messages, LLMMessage{Role: "user"}), len(messages)
 				}
-				messages[nudgeIdx].Content = condStr(allowSilent,
-					"[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。需通知用户请调用 reply_user，否则调用 no_action(reason)。",
-					"[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。本轮必须调用工具，回复请走 reply_user。")
+				messages[nudgeIdx].Content = condStr(allowSilent, "[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。需通知用户请调用 reply_user，否则调用 no_action(reason)。", "[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。本轮必须调用工具，回复请走 reply_user。")
 				continue
 			}
-			if !turn.hasFlag(turnFlagDispatched) && allowSilent {
-				turn.flags.Or(turnFlagNoAction)
-			} else if !turn.hasFlag(turnFlagDispatched) {
+			if !turn.hasFlag(turnFlagReplied) && !turn.hasFlag(turnFlagDispatched) && !allowSilent {
 				e.addEvent(bg, turn.thread, "大脑本轮未通过工具发出有效答复，已中止以避免误发，请重试", trig.ID, "error")
 				sealReason = "error"
 			}
@@ -307,15 +316,13 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		for _, tc := range choice.ToolCalls {
 			totalCalls++
 			var toolOut string
-			switch {
-			case totalCalls > maxAPIRouterToolCalls:
+			if totalCalls > maxAPIRouterToolCalls {
 				toolOut, stepHadErr = toolErr("本轮工具调用次数已达上限（12次），请立刻用 reply_user 汇总结论。"), true
-			case (tc.Function.Name == "reply_user" || tc.Function.Name == "no_action") && stepHadErr:
+			} else if (tc.Function.Name == "reply_user" || tc.Function.Name == "no_action") && stepHadErr {
 				toolOut = toolErr("同一步前置工具执行失败，请先查看报错并处理后再决定回复或结束。")
-			default:
+			} else {
 				e.pushToolProgress(ctx, bg, turn, tc, &progress)
-				toolOut, earlyExit = e.execAPIRouterTool(ctx, turn, trig, turnMeta, tc)
-				if strings.Contains(toolOut, `"ok":false`) {
+				if toolOut, earlyExit = e.execAPIRouterTool(ctx, turn, trig, turnMeta, tc); strings.Contains(toolOut, `"ok":false`) {
 					stepHadErr = true
 					e.logger.Warn("api router tool rejected", "trigger", trig.ID, "step", step+1, "tool", tc.Function.Name, "result", oneLineClip(toolOut, 240))
 				}
@@ -329,9 +336,7 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 			break
 		}
 		if step == maxAPIRouterSteps-2 && !turn.hasFlag(turnFlagReplied) && ctx.Err() == nil {
-			messages, forceTools = append(messages, LLMMessage{Role: "user", Content: condStr(allowSilent,
-				"[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 汇报结论，或调用 no_action(reason) 静默结束。",
-				"[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 向用户给出明确答复，勿再继续拉取详情。")}), true
+			messages, forceTools = append(messages, LLMMessage{Role: "user", Content: condStr(allowSilent, "[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 汇报结论，或调用 no_action(reason) 静默结束。", "[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 向用户给出明确答复，勿再继续拉取详情。")}), true
 		}
 		exhausted = step == maxAPIRouterSteps-1
 	}
@@ -341,33 +346,26 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		sealReason = ""
 	case turn.hasFlag(turnFlagDispatched):
 		sealReason = "dispatched"
-	case turn.hasFlag(turnFlagNoAction):
-		sealReason = "silent"
-	case sealReason != "error" && !allowSilent && (!exhausted || !turn.hasFlag(turnFlagStopped)):
-		e.addEvent(bg, turn.thread, condStr(!exhausted, "大脑本轮未能完成有效回复，已结束本轮，请重试",
-			condStr(turn.hasFlag(turnFlagMutated),
-				fmt.Sprintf("已完成部分操作（%s），但达到最大步数（%d 步）仍未发出最终回复，请确认后续安排", orStr(turn.opsText(), "已执行变更"), maxAPIRouterSteps),
-				fmt.Sprintf("本轮已达最大工具步数（%d 步）仍未发出最终回复，已结束本轮，请重试或补充说明", maxAPIRouterSteps))), trig.ID, "error")
+	case sealReason != "error" && !allowSilent && !turn.hasFlag(turnFlagNoAction) && (!exhausted || !turn.hasFlag(turnFlagStopped)):
+		e.addEvent(bg, turn.thread, condStr(!exhausted, "大脑本轮未能完成有效回复，已结束本轮，请重试", condStr(turn.hasFlag(turnFlagMutated), fmt.Sprintf("已完成部分操作（%s），但达到最大步数（%d 步）仍未发出最终回复，请确认后续安排", turn.opsText(), maxAPIRouterSteps), fmt.Sprintf("本轮已达最大工具步数（%d 步）仍未发出最终回复，已结束本轮，请重试或补充说明", maxAPIRouterSteps))), trig.ID, "error")
 		sealReason = "error"
 	}
 }
 
-func (e *Engine) handleAPIRouterFailure(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, step int, modelName, effort string, err error) {
+func (e *Engine) handleAPIRouterFailure(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, step int, modelName, effort string, err error) string {
 	msg := err.Error()
 	e.logger.Warn("api router turn failed", "trigger", trig.ID, "thread", turn.thread, "step", step, "model", modelName, "effort", effort, "mutated", turn.hasFlag(turnFlagMutated), "err", msg)
 	if turn.hasFlag(turnFlagMutated) || errors.Is(err, ErrLLMBadRequest) {
 		e.ackAPITriggerOnce(ctx, turn, trig)
 		if !turn.hasFlag(turnFlagReplied) {
-			e.addEvent(ctx, turn.thread, condStr(turn.hasFlag(turnFlagMutated),
-				fmt.Sprintf("已完成部分操作（%s），后续模型调用中断：%s", orStr(turn.opsText(), "已执行变更"), oneLineClip(msg, 120)),
-				"本条消息模型请求被拒绝（已跳过以免阻塞后续对话）："+oneLineClip(msg, 140)), trig.ID, "error")
+			e.addEvent(ctx, turn.thread, condStr(turn.hasFlag(turnFlagMutated), fmt.Sprintf("已完成部分操作（%s），后续模型调用中断：%s", turn.opsText(), oneLineClip(msg, 120)), "本条消息模型请求被拒绝（已跳过以免阻塞后续对话）："+oneLineClip(msg, 140)), trig.ID, "error")
 		}
-		return
+		return "error"
 	}
 	e.mu.Lock()
 	if e.router.configEpoch != turn.configEpoch {
 		e.mu.Unlock()
-		return
+		return "error"
 	}
 	if errors.Is(err, ErrLLMAuth) {
 		prev := e.router.lastErr
@@ -376,25 +374,25 @@ func (e *Engine) handleAPIRouterFailure(ctx context.Context, turn *apiRouterTurn
 		if prev != msg {
 			e.addEvent(ctx, turn.thread, "原生 API 大脑鉴权失败（已暂停重试，请检查设置中的 Key）："+oneLineClip(msg, 140), trig.ID, "error")
 		}
-		return
+		return "error"
 	}
 	if e.router.lastFailTriggerID != trig.ID {
 		e.router.lastFailTriggerID, e.router.sameTriggerFails = trig.ID, 0
 	}
 	e.router.sameTriggerFails++
 	if e.router.sameTriggerFails >= maxSameAPITriggerFails {
-		e.router.resetFailuresLocked(false)
 		e.router.lastErr = msg
 		e.mu.Unlock()
 		e.ackAPITriggerOnce(ctx, turn, trig)
 		e.addEvent(ctx, turn.thread, fmt.Sprintf("本条消息连续 %d 次调用模型失败（已跳过以免阻塞后续对话，可重新发送）：%s", maxSameAPITriggerFails, oneLineClip(msg, 120)), trig.ID, "error")
-		return
+		return "error"
 	}
-	e.router.failCount++
-	fails, backoff := e.router.failCount, min(5*time.Second<<min(e.router.failCount-1, 5), 2*time.Minute)
-	e.router.backoffUntil, e.router.lastErr = time.Now().Add(backoff), msg
+	fails := e.router.failCount + 1
+	backoff := min(5*time.Second<<min(fails-1, 5), 2*time.Minute)
+	e.router.failCount, e.router.backoffUntil, e.router.lastErr = fails, time.Now().Add(backoff), msg
 	e.mu.Unlock()
 	if fails == 1 || fails == 3 {
 		e.addEvent(ctx, turn.thread, fmt.Sprintf("原生 API 大脑暂不可用（%s 后自动重试）：%s", backoff.Round(time.Second), oneLineClip(msg, 120)), trig.ID, "error")
 	}
+	return "error"
 }

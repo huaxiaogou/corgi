@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/herdr"
+	_ "modernc.org/sqlite"
 )
 
 func TestAPIRouterStrategy1ANonHumanGuards(t *testing.T) {
@@ -563,4 +565,336 @@ func TestStructuredTriggerDispatchOverrideReplacesHint(t *testing.T) {
 	if gotCwd != projDir {
 		t.Fatalf("expected Spawn cwd=%q from Trigger.Dispatch.ProjectID, got %q (cmd=%q args=%v)", projDir, gotCwd, startedCmd, startedArgs)
 	}
+}
+
+func execSQLiteTestStmt(t *testing.T, dbPath, stmt string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open test sqlite: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(stmt); err != nil {
+		t.Fatalf("exec %q: %v", stmt, err)
+	}
+}
+
+func TestCodexReviewRegressions(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. BLOCKER: Real AckTriggerTarget failure (GetKV succeeds, UPDATE triggers fails) blocks replay across
+	//    startup reconcile, live mutated turn, and 3x circuit breaker; recovery ACKs cleanly with side effects == 1.
+	t.Run("ack failure blocks replay until sqlite recovers", func(t *testing.T) {
+		var (
+			mu       sync.Mutex
+			llmCalls int
+		)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			llmCalls++
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "c-ack", "model": "hy4",
+				"choices": []map[string]any{{
+					"index": 0, "finish_reason": "tool_calls",
+					"message": map[string]any{
+						"role": "assistant",
+						"tool_calls": []map[string]any{{
+							"id": "call_rep", "type": "function",
+							"function": map[string]any{"name": "reply_user", "arguments": `{"text":"只发一次"}`},
+						}},
+					},
+				}},
+			})
+		}))
+		defer srv.Close()
+
+		eng, st, sink, _ := newTestAPIEngine(t, srv)
+		_, t1, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "启动恢复测试"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := eng.recordAPIRouterInflight(ctx, t1, "dispatch_work", "claude-1"); err != nil {
+			t.Fatal(err)
+		}
+		execSQLiteTestStmt(t, st.DBPath(), `CREATE TRIGGER fail_trig_ack BEFORE UPDATE ON triggers BEGIN SELECT RAISE(ABORT, 'ack denied'); END;`)
+
+		// Startup reconcile reads KV successfully, hits REAL AckTriggerTarget failure -> retains KV & blocks deliverAPIRouter.
+		if ok := eng.reconcileAPIRouterInflight(ctx); ok {
+			t.Fatal("expected reconcileAPIRouterInflight=false when AckTriggerTarget fails")
+		}
+		if raw, ok, err := st.GetKV(ctx, apiRouterInflightKVKey); err != nil || !ok || !strings.Contains(raw, t1.ID) {
+			t.Fatalf("expected KV marker retained on real ACK failure, ok=%v raw=%q err=%v", ok, raw, err)
+		}
+		eng.deliverAPIRouter(ctx, []*model.Trigger{t1})
+		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+		if llmCalls != 0 {
+			t.Fatalf("expected 0 LLM calls while startup inflight ACK is failing, got %d", llmCalls)
+		}
+		mu.Unlock()
+
+		// Drop trigger -> next deliverAPIRouter retries ACK, clears KV, and NEVER replays t1!
+		execSQLiteTestStmt(t, st.DBPath(), `DROP TRIGGER fail_trig_ack;`)
+		eng.deliverAPIRouter(ctx, []*model.Trigger{t1})
+		waitUntil(t, 3*time.Second, func() bool { return !eng.isRouterWorking(ctx) }, "reconcile settled")
+		if got, _ := st.GetTrigger(ctx, t1.ID); got == nil || got.Status != "delivered" {
+			t.Fatalf("expected t1 delivered after SQLite recovered, got %+v", got)
+		}
+		if raw, ok, _ := st.GetKV(ctx, apiRouterInflightKVKey); ok && raw != "" {
+			t.Fatalf("expected KV marker cleared after ACK recovery, got %q", raw)
+		}
+		mu.Lock()
+		if llmCalls != 0 {
+			t.Fatalf("expected 0 LLM calls for reconciled t1, got %d", llmCalls)
+		}
+		mu.Unlock()
+
+		// Live turn executes reply_user (side effect = 1) while ACK fails -> next tick MUST NOT replay reply_user!
+		_, t2, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "实时回合ACK失败"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		execSQLiteTestStmt(t, st.DBPath(), `CREATE TRIGGER fail_trig_ack BEFORE UPDATE ON triggers BEGIN SELECT RAISE(ABORT, 'ack denied'); END;`)
+		eng.deliverAPIRouter(ctx, []*model.Trigger{t2})
+		waitUntil(t, 5*time.Second, func() bool { return !eng.isRouterWorking(ctx) }, "live mutated turn settled")
+		// Tick again while ACK still fails -> MUST NOT invoke LLM a second time!
+		eng.tick(ctx)
+		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+		callsBeforeRecover := llmCalls
+		mu.Unlock()
+		sink.mu.Lock()
+		repBeforeRecover := len(sink.replies)
+		sink.mu.Unlock()
+		if callsBeforeRecover != 1 || repBeforeRecover != 1 {
+			t.Fatalf("expected strictly 1 LLM call & 1 reply while ACK failing, got calls=%d replies=%d", callsBeforeRecover, repBeforeRecover)
+		}
+		// Recover SQLite -> tick ACKs t2 cleanly, side effect count remains strictly 1!
+		execSQLiteTestStmt(t, st.DBPath(), `DROP TRIGGER fail_trig_ack;`)
+		eng.tick(ctx)
+		waitUntil(t, 3*time.Second, func() bool {
+			g, _ := st.GetTrigger(ctx, t2.ID)
+			return g != nil && g.Status == "delivered"
+		}, "t2 acked after recovery")
+		mu.Lock()
+		callsAfterRecover := llmCalls
+		mu.Unlock()
+		sink.mu.Lock()
+		repAfterRecover := len(sink.replies)
+		sink.mu.Unlock()
+		if callsAfterRecover != 1 || repAfterRecover != 1 {
+			t.Fatalf("expected side effects == 1 after ACK recovery, got calls=%d replies=%d", callsAfterRecover, repAfterRecover)
+		}
+	})
+
+	// 1b. BLOCKER: 3x circuit breaker with ACK failure MUST NOT reset counter and exceed 3 LLM calls.
+	t.Run("circuit breaker with ack failure never exceeds 3 attempts", func(t *testing.T) {
+		var (
+			mu       sync.Mutex
+			llmCalls int
+		)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			llmCalls++
+			mu.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"message":"503"}}`))
+		}))
+		defer srv.Close()
+
+		eng, st, _, _ := newTestAPIEngine(t, srv)
+		_, trig, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "毒消息ACK失败"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		execSQLiteTestStmt(t, st.DBPath(), `CREATE TRIGGER fail_trig_ack BEFORE UPDATE ON triggers BEGIN SELECT RAISE(ABORT, 'ack denied'); END;`)
+		for i := 0; i < 5; i++ {
+			eng.mu.Lock()
+			eng.router.backoffUntil = time.Time{}
+			eng.mu.Unlock()
+			eng.tick(ctx)
+			waitUntil(t, 5*time.Second, func() bool { return !eng.isRouterWorking(ctx) }, "cb attempt settled")
+		}
+		mu.Lock()
+		gotCalls := llmCalls
+		mu.Unlock()
+		if gotCalls != maxSameAPITriggerFails {
+			t.Fatalf("expected strictly %d LLM attempts despite ACK failure, got %d", maxSameAPITriggerFails, gotCalls)
+		}
+		execSQLiteTestStmt(t, st.DBPath(), `DROP TRIGGER fail_trig_ack;`)
+		eng.tick(ctx)
+		if got, _ := st.GetTrigger(ctx, trig.ID); got == nil || got.Status != "delivered" {
+			t.Fatalf("expected poison trigger ACKed on SQLite recovery, got %+v", got)
+		}
+	})
+
+	// 2. MAJOR/MINOR MemoryManager: non-nil empty JSON [], anchored root rejects symlink memory/dreams dir, exact 32KiB boundary.
+	t.Run("memory non-nil json, anchored root symlink block, exact 32KB limit", func(t *testing.T) {
+		dir := t.TempDir()
+		mem := NewMemoryManager(dir)
+		if err := mem.Ensure(); err != nil {
+			t.Fatal(err)
+		}
+		// Empty dreams serializes as [] (never null -> prevents MemoryTab crash before first dream).
+		b, err := json.Marshal(MemorySnapshot{Dir: mem.MemDir(), Files: mem.ListFiles(), Dreams: mem.ListDreams()})
+		if err != nil || !strings.Contains(string(b), `"dreams":[]`) {
+			t.Fatalf("expected dreams:[] JSON array, got %s err=%v", string(b), err)
+		}
+		// Exact 32 KiB final byte limit (with trailing \n normalization).
+		if err := mem.SaveFile("notes/exact-over.md", strings.Repeat("a", maxMemoryWriteBytes)); err == nil {
+			t.Fatal("expected 32768 chars + appended newline (32769 bytes) rejected")
+		}
+		if err := mem.SaveFile("notes/exact-ok.md", strings.Repeat("a", maxMemoryWriteBytes-1)); err != nil {
+			t.Fatalf("expected 32767 chars + appended newline (32768 bytes) accepted, got %v", err)
+		}
+		// Replacing memory/ or dreams/ itself with a symlink pointing outside corgiDir MUST be rejected.
+		outsideDir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(outsideDir, "secret.md"), []byte("outside"), 0o600)
+		symBase := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(symBase, "router"), 0o700)
+		_ = os.Symlink(outsideDir, filepath.Join(symBase, "router", "memory"))
+		_ = os.Symlink(outsideDir, filepath.Join(symBase, "router", "dreams"))
+		symMem := NewMemoryManager(symBase)
+		if err := symMem.Ensure(); err == nil {
+			t.Fatal("expected Ensure to reject symlinked memory/dreams directories")
+		}
+		if _, err := symMem.ReadFile("secret.md"); err == nil {
+			t.Fatal("expected ReadFile to reject symlinked memory directory")
+		}
+		if err := symMem.SaveFile("notes/a.md", "hi"); err == nil {
+			t.Fatal("expected SaveFile to reject symlinked memory directory")
+		}
+		if err := symMem.SaveDreamJournal("2026-11-28-0400.md", "hi"); err == nil {
+			t.Fatal("expected SaveDreamJournal to reject symlinked dreams directory")
+		}
+	})
+
+	// 3. MAJOR Cross-thread isolation: steer_worker rejects foreign work_id; progress never leaks foreign WorkItem title.
+	t.Run("cross-thread steer_worker work_id and progress isolation", func(t *testing.T) {
+		eng, st, _, _ := newTestAPIEngine(t, nil)
+		foreignWI, err := eng.SetWorkItem(ctx, "new", "wecom:group-secret", "机密外线程事项标题", "待办", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = st.UpsertWorker(ctx, &model.Worker{Name: "claude-main", Kind: "claude", Thread: model.MainThread, PaneID: "w1:p1", Status: "idle"})
+		_, trig, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "继续"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		meta := eng.resolveTurnConsentMeta(ctx, trig)
+		turn := &apiRouterTurn{thread: model.MainThread, triggerID: trig.ID}
+		if out := eng.toolSteerWorker(ctx, turn, trig, meta, `{"worker":"claude-main","message":"hi","work_id":"`+foreignWI.ID+`"}`); !strings.Contains(out, `"ok":false`) || !strings.Contains(out, "不属于当前会话线程") {
+			t.Fatalf("expected foreign work_id rejected in steer_worker, got %s", out)
+		}
+		prog := eng.formatAPIToolProgress(ctx, model.MainThread, LLMToolCall{
+			Function: LLMToolFunctionCall{Name: "read_detail", Arguments: `{"kind":"work_item","target":"` + foreignWI.ID + `"}`},
+		})
+		if strings.Contains(prog, "机密外线程事项标题") {
+			t.Fatalf("progress leaked foreign-thread WorkItem title: %q", prog)
+		}
+	})
+
+	// 4. MAJOR Composer override wins over LLM args, preserves hub/queued picks, and auto-matched project fails without home fallback.
+	t.Run("composer override priority, queued prompt, and auto-matched project cwd", func(t *testing.T) {
+		eng, _, _, dir := newTestAPIEngine(t, nil)
+		projDir := filepath.Join(dir, "corgi-repo")
+		_ = os.MkdirAll(projDir, 0o755)
+		cfg := eng.Settings()
+		cfg.WorkerMachine = "gpu-remote"
+		cfg.WorkerKind = "claude"
+		cfg.Projects = []model.ProjectWorkspace{
+			{ID: "corgi", Name: "Corgi", Paths: map[string]string{"hub": projDir}},
+			{ID: "remoteonly", Name: "RemoteOnly", Paths: map[string]string{"gpu-remote": "/srv/remoteonly"}},
+		}
+		if err := eng.SaveConfig(ctx, &cfg, nil); err != nil {
+			t.Fatal(err)
+		}
+		var createdCwd string
+		hc := newFakeHerdrClient(func(method string, params map[string]any) (any, *herdr.Error) {
+			if method == "workspace.create" {
+				createdCwd, _ = params["cwd"].(string)
+				return map[string]any{"workspace": map[string]any{"workspace_id": "w-c"}, "root_pane": map[string]any{"pane_id": "w-c:p1"}}, nil
+			}
+			return map[string]any{}, nil
+		})
+		eng.fleet = fleet.NewFleet(hc, "hub", dir, "test", []string{"claude", "codex"})
+
+		// Enqueue while router busy, then promote via SteerChatPrompt -> preserves explicit machine="hub" + kind/model/effort/project.
+		eng.mu.Lock()
+		eng.router.turn = &apiRouterTurn{thread: model.MainThread, triggerID: "t0", done: make(chan struct{})}
+		eng.mu.Unlock()
+		queued, item, _, _, err := eng.SubmitChatSay(ctx, SayRequest{
+			Thread: model.MainThread, Channel: "web", From: "you", Text: "检查代码",
+			Machine: "hub", Kind: "codex", Model: "gpt-5.4-mini", Effort: "high", ProjectID: "corgi",
+		}, "auto")
+		if err != nil || !queued || item == nil {
+			t.Fatalf("expected queued chat prompt: queued=%v item=%v err=%v", queued, item, err)
+		}
+		eng.mu.Lock()
+		eng.router.turn = nil
+		eng.mu.Unlock()
+		_, promotedTrig, err := eng.SteerChatPrompt(ctx, model.MainThread, item.ID)
+		if err != nil || promotedTrig.Dispatch == nil || promotedTrig.Dispatch.Machine != "hub" {
+			t.Fatalf("expected promoted trigger preserving machine=hub, got %+v err=%v", promotedTrig, err)
+		}
+		// LLM passes conflicting machine/kind/project -> human's Trigger.Dispatch MUST win!
+		meta := eng.resolveTurnConsentMeta(ctx, promotedTrig)
+		out := eng.toolDispatchWork(ctx, &apiRouterTurn{thread: model.MainThread, triggerID: promotedTrig.ID}, promotedTrig, meta,
+			`{"mode":"readonly","machine":"gpu-remote","kind":"claude","project":"remoteonly","goal":"只读核查"}`)
+		if !strings.Contains(out, `"ok":true`) || !strings.Contains(out, `"kind":"codex"`) || !strings.Contains(out, `"model":"gpt-5.4-mini"`) || createdCwd != projDir {
+			t.Fatalf("expected Composer override to beat conflicting LLM args, out=%s cwd=%q", out, createdCwd)
+		}
+
+		// Auto-matched project (omitted from args.Project, mentioned in goal) missing hub path MUST fail explicitly.
+		_, autoTrig, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "看看 RemoteOnly 仓库", Machine: "hub"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		outAuto := eng.toolDispatchWork(ctx, &apiRouterTurn{thread: model.MainThread, triggerID: autoTrig.ID}, autoTrig, eng.resolveTurnConsentMeta(ctx, autoTrig),
+			`{"mode":"readonly","goal":"排查 RemoteOnly 仓库结构"}`)
+		if !strings.Contains(outAuto, `"ok":false`) || !strings.Contains(outAuto, "未配置机器 hub 的路径") {
+			t.Fatalf("expected auto-matched project missing hub path to fail explicitly, got %s", outAuto)
+		}
+	})
+
+	// 5. MINOR: Real Action triggers generated by ResolveAction strictly check ResolvedChannel (no ResolvedBy fallback).
+	t.Run("real action trigger derives isHuman strictly from ResolvedChannel", func(t *testing.T) {
+		eng, st, _, _ := newTestAPIEngine(t, nil)
+		_, actRouter, _, _ := eng.Reply(ctx, model.MainThread, "自动确认？", "", []string{"是", "否"}, false)
+		if _, err := eng.ResolveAction(ctx, actRouter.ID, "router", "1"); err != nil {
+			t.Fatal(err)
+		}
+		_, actWeb, _, _ := eng.Reply(ctx, model.MainThread, "人工确认？", "", []string{"是", "否"}, false)
+		if _, err := eng.ResolveAction(ctx, actWeb.ID, "web", "1"); err != nil {
+			t.Fatal(err)
+		}
+		trs, _ := st.ListQueuedTriggers(ctx)
+		var routerTrig, webTrig *model.Trigger
+		for _, tr := range trs {
+			if tr.Ref != "" {
+				if en, err := st.GetEntry(ctx, tr.Ref); err == nil && en != nil {
+					if en.ActionID == actRouter.ID {
+						routerTrig = tr
+					} else if en.ActionID == actWeb.ID {
+						webTrig = tr
+					}
+				}
+			}
+		}
+		if routerTrig == nil || eng.resolveTurnConsentMeta(ctx, routerTrig).isHuman {
+			t.Fatalf("expected real router-resolved Action trigger to have isHuman=false, trig=%+v", routerTrig)
+		}
+		if webTrig == nil || !eng.resolveTurnConsentMeta(ctx, webTrig).isHuman {
+			t.Fatalf("expected real web-resolved Action trigger to have isHuman=true, trig=%+v", webTrig)
+		}
+		// Legacy Action with empty ResolvedChannel and ResolvedBy="web" must NOT be trusted as human.
+		legacyAct := &model.Action{ID: "a-legacy-ch", Kind: model.ActionKindRouterChoice, Thread: model.MainThread, Title: "旧卡", Status: model.ActionResolved, ResolvedBy: "web", ResolvedChannel: "", ChosenKey: "1", ChosenLabel: "是", CreatedAt: time.Now()}
+		_ = st.InsertAction(ctx, legacyAct)
+		_ = st.InsertEntry(ctx, &model.Entry{ID: "e-legacy-ch", Thread: model.MainThread, Role: "user", Channel: "web", ActionID: legacyAct.ID, Text: "是", At: time.Now()})
+		legacyTrig := &model.Trigger{ID: "t-legacy-ch", Thread: model.MainThread, Source: "chat", Policy: "respond", From: "owner", Ref: "e-legacy-ch", Text: "是"}
+		if eng.resolveTurnConsentMeta(ctx, legacyTrig).isHuman {
+			t.Fatal("expected Action with empty ResolvedChannel rejected as non-human")
+		}
+	})
 }

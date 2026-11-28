@@ -67,7 +67,7 @@ func (e *Engine) resolveTurnConsentMeta(ctx context.Context, trig *model.Trigger
 			// Strategy 1A: Action-triggered turns derive isHuman strictly from recorded web/wecom/cli channel.
 			if strings.TrimSpace(en.ActionID) != "" {
 				act, aErr := e.store.GetAction(ctx, en.ActionID)
-				if aErr != nil || act == nil || orStr(act.Thread, model.MainThread) != thread || act.Status != model.ActionResolved || !isHumanChannel(orStr(strings.TrimSpace(act.ResolvedChannel), act.ResolvedBy)) {
+				if aErr != nil || act == nil || orStr(act.Thread, model.MainThread) != thread || act.Status != model.ActionResolved || !isHumanChannel(act.ResolvedChannel) {
 					meta.isHuman = false
 				} else if !strings.EqualFold(strings.TrimSpace(act.ChosenKey), "reply") && orStr(strings.TrimSpace(act.ChosenLabel), strings.TrimSpace(act.ChosenKey)) != "" {
 					meta.approvedAction = act

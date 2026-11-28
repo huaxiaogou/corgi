@@ -137,6 +137,7 @@ func doChatCompletionAttempt(
 		httpReq.Header.Set("Accept", "application/json")
 	}
 
+	httpReq = attachEffectiveProxyToReq(httpReq)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		if stalled.Load() && ctx.Err() == nil {
@@ -178,7 +179,7 @@ func doChatCompletionAttempt(
 			}
 		}
 		onActivity()
-		streamed, sErr := parseLLMStreamResponse(resp.Body, start, onActivity)
+		streamed, sErr := parseLLMStreamResponse(resp.Body, apiKey, start, onActivity)
 		if sErr != nil {
 			if stalled.Load() && ctx.Err() == nil {
 				return nil, false, fmt.Errorf("上游流式输出卡顿（%s 无新分片）", idleTimeout.Round(time.Second))
@@ -214,7 +215,7 @@ func doChatCompletionAttempt(
 	return &parsed, false, nil
 }
 
-func parseLLMStreamResponse(body io.Reader, start time.Time, onActivity func()) (*LLMChatResponse, error) {
+func parseLLMStreamResponse(body io.Reader, apiKey string, start time.Time, onActivity func()) (*LLMChatResponse, error) {
 	reader := bufio.NewReaderSize(io.LimitReader(body, 16<<20), 64<<10)
 	type toolAcc struct {
 		id, typ    string
@@ -271,7 +272,7 @@ func parseLLMStreamResponse(body io.Reader, start time.Time, onActivity func()) 
 			var chunk streamChunk
 			if payload != "" && json.Unmarshal([]byte(payload), &chunk) == nil {
 				if chunk.Error != nil && strings.TrimSpace(chunk.Error.Message) != "" {
-					return nil, fmt.Errorf("上游流式返回错误：%s", oneLineClip(chunk.Error.Message, 160))
+					return nil, fmt.Errorf("上游流式返回错误：%s", extractSanitizedProviderError([]byte(payload), apiKey))
 				}
 				if !sawAnyChunk {
 					sawAnyChunk = true

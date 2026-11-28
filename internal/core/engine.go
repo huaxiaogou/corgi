@@ -624,29 +624,20 @@ func (e *Engine) entryInReplyChain(ctx context.Context, fromID, targetID string)
 func (e *Engine) buildDispatchOverride(req SayRequest) *model.DispatchOverride {
 	st := e.Settings()
 	var ov model.DispatchOverride
-	effMachine := st.WorkerMachine
 	if m := strings.TrimSpace(req.Machine); m != "" {
 		resolved := m
 		if e.fleet != nil {
 			resolved = e.fleet.ResolveMachine(m)
 		}
-		effMachine = resolved
-		if resolved != st.WorkerMachine {
-			ov.Machine = orStr(resolved, "hub")
-		}
+		ov.Machine = orStr(resolved, "hub")
 	}
-	effKind := agent.NormalizeKind(st.WorkerKind)
 	if k := agent.NormalizeKind(req.Kind); k != "" {
-		effKind = k
-		if k != agent.NormalizeKind(st.WorkerKind) {
-			ov.Kind = k
-		}
+		ov.Kind = k
 	}
-	baseModel, baseEffort, _ := ResolveWorkerModel(st, effMachine, effKind, "", "")
-	if m := strings.TrimSpace(req.Model); m != "" && agent.ModelNameRe.MatchString(m) && m != baseModel {
+	if m := strings.TrimSpace(req.Model); m != "" && agent.ModelNameRe.MatchString(m) {
 		ov.Model = m
 	}
-	if ef := strings.TrimSpace(req.Effort); ef != "" && agent.ModelNameRe.MatchString(ef) && ef != baseEffort {
+	if ef := strings.TrimSpace(req.Effort); ef != "" && agent.ModelNameRe.MatchString(ef) {
 		ov.Effort = ef
 	}
 	if pid := strings.TrimSpace(req.ProjectID); pid != "" {

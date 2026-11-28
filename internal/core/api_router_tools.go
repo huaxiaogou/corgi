@@ -204,15 +204,12 @@ func (e *Engine) toolReplyUser(ctx context.Context, turn *apiRouterTurn, trig *m
 	if reID != "" {
 		if prev, err := e.store.GetEntry(ctx, reID); err == nil && prev != nil && orStr(prev.Thread, model.MainThread) != turn.thread {
 			return toolErr("re_id 不属于当前会话线程，已拒绝跨线程引用"), false
-		}
-		if prevTr, err := e.store.GetTrigger(ctx, reID); err == nil && prevTr != nil && orStr(prevTr.Thread, model.MainThread) != turn.thread {
+		} else if prevTr, err := e.store.GetTrigger(ctx, reID); err == nil && prevTr != nil && orStr(prevTr.Thread, model.MainThread) != turn.thread {
 			return toolErr("re_id 对应的 trigger 不属于当前会话线程，已拒绝跨线程引用"), false
 		}
 	}
-	if workID != "" {
-		if _, errMsg := e.requireThreadWorkItem(ctx, workID, turn.thread); errMsg != "" {
-			return toolErr(errMsg), false
-		}
+	if _, errMsg := e.requireThreadWorkItem(ctx, workID, turn.thread); workID != "" && errMsg != "" {
+		return toolErr(errMsg), false
 	}
 	if err := e.recordAPIRouterInflight(context.Background(), trig, "reply_user", ""); err != nil {
 		return toolErr("记录防重标记失败，已中止发送：" + err.Error()), false
@@ -335,7 +332,7 @@ func (e *Engine) toolSaveMemory(_ context.Context, turn *apiRouterTurn, rawArgs 
 }
 
 func (e *Engine) pushToolProgress(ctx, bg context.Context, turn *apiRouterTurn, tc LLMToolCall, lines *[]string) {
-	line := strings.TrimSpace(e.formatAPIToolProgress(ctx, tc))
+	line := strings.TrimSpace(e.formatAPIToolProgress(ctx, turn.thread, tc))
 	if line == "" {
 		return
 	}
@@ -351,7 +348,7 @@ func (e *Engine) pushToolProgress(ctx, bg context.Context, turn *apiRouterTurn, 
 	sink.OnAPIRouterProgress(bg, turn.thread, turn.triggerID, strings.Join(*lines, "\n"))
 }
 
-func (e *Engine) formatAPIToolProgress(ctx context.Context, tc LLMToolCall) string {
+func (e *Engine) formatAPIToolProgress(ctx context.Context, thread string, tc LLMToolCall) string {
 	staticLabels := map[string]string{
 		"reply_user": "正在整理回复…", "no_action": "正在完成核对…",
 		"manage_timer": "正在更新定时提醒…", "save_memory": "正在更新记忆笔记…",
@@ -362,8 +359,15 @@ func (e *Engine) formatAPIToolProgress(ctx context.Context, tc LLMToolCall) stri
 	var raw map[string]any
 	_ = json.Unmarshal([]byte(tc.Function.Arguments), &raw)
 	s := func(k string) string { v, _ := raw[k].(string); return strings.TrimSpace(v) }
-	lbl := func(wi, wk string) string {
-		return condStr(e.workItemTitleFor(ctx, wi, wk) != "", "「"+oneLineClip(e.workItemTitleFor(ctx, wi, wk), 28)+"」", "")
+	lbl := func(wiID, wkName string) string {
+		if _, errMsg := e.requireThreadWorkItem(ctx, wiID, thread); wiID != "" && errMsg != "" {
+			wiID = ""
+		}
+		if _, errMsg := e.requireThreadWorker(ctx, wkName, thread); wkName != "" && errMsg != "" {
+			wkName = ""
+		}
+		t := e.workItemTitleFor(ctx, wiID, wkName)
+		return condStr(t != "", "「"+oneLineClip(t, 28)+"」", "")
 	}
 	switch tc.Function.Name {
 	case "read_detail":

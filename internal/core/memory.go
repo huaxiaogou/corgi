@@ -16,13 +16,11 @@ import (
 )
 
 const (
-	// UpFrontBudgetBytes caps the files loaded upfront on every turn (~10 KB).
 	UpFrontBudgetBytes  = 10 << 10
 	maxMemoryWriteBytes = 32 << 10
 	maxMemoryReadBytes  = 256 << 10
 )
 
-// MemoryFile represents one markdown file under memory/ or dreams/.
 type MemoryFile struct {
 	Name string    `json:"name"`
 	Text string    `json:"text"`
@@ -30,7 +28,6 @@ type MemoryFile struct {
 	Mod  time.Time `json:"mod"`
 }
 
-// MemorySnapshot is returned to the Web UI memory editor.
 type MemorySnapshot struct {
 	Dir         string       `json:"dir"`
 	Files       []MemoryFile `json:"files"`
@@ -42,35 +39,72 @@ type MemorySnapshot struct {
 	NextDream   *time.Time   `json:"next_dream,omitempty"`
 }
 
-// MemoryManager owns ~/.corgi/router/ (memory/, dreams/) behind Go 1.25 os.Root sandboxes.
-type MemoryManager struct{ routerDir string }
+// MemoryManager owns ~/.corgi/router/ (memory/, dreams/) anchored at corgiDir via Go 1.25 os.Root.
+type MemoryManager struct{ corgiDir, routerDir string }
 
 func NewMemoryManager(corgiDir string) *MemoryManager {
-	return &MemoryManager{routerDir: filepath.Join(corgiDir, "router")}
+	return &MemoryManager{corgiDir: corgiDir, routerDir: filepath.Join(corgiDir, "router")}
 }
-
 func (m *MemoryManager) RouterDir() string { return m.routerDir }
 func (m *MemoryManager) MemDir() string    { return filepath.Join(m.routerDir, "memory") }
 func (m *MemoryManager) DreamsDir() string { return filepath.Join(m.routerDir, "dreams") }
 
-// Ensure creates the layered memory directory skeleton without overwriting existing files.
-func (m *MemoryManager) Ensure() error {
-	for _, d := range []string{filepath.Join(m.MemDir(), "notes"), m.DreamsDir()} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return fmt.Errorf("mkdir %s: %w", d, err)
+func openSubRoot(parent *os.Root, name string, create bool) (*os.Root, error) {
+	if fi, err := parent.Lstat(name); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+			return nil, fmt.Errorf("拒绝打开符号链接或非目录路径：%s", name)
+		}
+	} else if errors.Is(err, os.ErrNotExist) && create {
+		if mkErr := parent.Mkdir(name, 0o700); mkErr != nil && !errors.Is(mkErr, os.ErrExist) {
+			return nil, fmt.Errorf("mkdir %s: %w", name, mkErr)
+		}
+	} else {
+		return nil, err
+	}
+	return parent.OpenRoot(name)
+}
+
+func (m *MemoryManager) openRoot(create bool, parts ...string) (*os.Root, error) {
+	if create {
+		if err := os.MkdirAll(m.corgiDir, 0o700); err != nil {
+			return nil, fmt.Errorf("mkdir corgi dir: %w", err)
 		}
 	}
-	root, err := os.OpenRoot(m.MemDir())
+	cur, err := os.OpenRoot(m.corgiDir)
 	if err != nil {
-		return fmt.Errorf("open memory root: %w", err)
+		return nil, fmt.Errorf("open corgi root: %w", err)
 	}
-	defer root.Close()
+	for _, p := range parts {
+		next, subErr := openSubRoot(cur, p, create)
+		_ = cur.Close()
+		if subErr != nil {
+			return nil, subErr
+		}
+		cur = next
+	}
+	return cur, nil
+}
+
+// Ensure creates the layered memory directory skeleton via anchored os.Root without following symlinks.
+func (m *MemoryManager) Ensure() error {
+	for _, p := range [][]string{{"router", "memory", "notes"}, {"router", "dreams"}} {
+		r, err := m.openRoot(true, p...)
+		if err != nil {
+			return err
+		}
+		_ = r.Close()
+	}
+	memRoot, err := m.openRoot(true, "router", "memory")
+	if err != nil {
+		return err
+	}
+	defer memRoot.Close()
 	for rel, content := range map[string]string{
 		"instructions.md": "# 主人的长期指令与偏好\n",
 		"notes/index.md":  "# 笔记索引\n\n每个主题文件一行说明。\n",
 	} {
-		if _, err := root.Lstat(rel); errors.Is(err, os.ErrNotExist) {
-			if err := writeRootAtomic(root, rel, []byte(content), 0o600); err != nil {
+		if _, err := memRoot.Lstat(rel); errors.Is(err, os.ErrNotExist) {
+			if err := writeRootAtomic(memRoot, rel, []byte(content), 0o600); err != nil {
 				return fmt.Errorf("seed %s: %w", rel, err)
 			}
 		}
@@ -78,9 +112,8 @@ func (m *MemoryManager) Ensure() error {
 	return nil
 }
 
-// UpFrontSize computes total bytes of up-front files (instructions.md and notes/index.md).
 func (m *MemoryManager) UpFrontSize() int64 {
-	root, err := os.OpenRoot(m.MemDir())
+	root, err := m.openRoot(false, "router", "memory")
 	if err != nil {
 		return 0
 	}
@@ -95,14 +128,16 @@ func (m *MemoryManager) UpFrontSize() int64 {
 }
 
 func isSingleLevelMD(name string) bool {
-	return name != "" && name != "." && name != ".md" &&
-		!strings.Contains(name, "/") && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".md")
+	return name != "" && name != "." && name != ".md" && !strings.Contains(name, "/") && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".md")
+}
+func hasBadMemPath(sl string) bool {
+	return sl == "" || strings.HasPrefix(sl, "/") || strings.Contains(sl, "..") || strings.ContainsRune(sl, '\x00')
 }
 
 // ValidateMemoryWritePath enforces the strict write whitelist: instructions.md or single-level notes/<slug>.md.
 func ValidateMemoryWritePath(raw string) (string, error) {
 	sl := filepath.ToSlash(strings.TrimSpace(raw))
-	if sl == "" || strings.HasPrefix(sl, "/") || strings.Contains(sl, "..") || strings.ContainsRune(sl, '\x00') {
+	if hasBadMemPath(sl) {
 		return "", fmt.Errorf("非法路径：仅允许写入 instructions.md 或单层 notes/<slug>.md")
 	}
 	rel := path.Clean(strings.TrimPrefix(sl, "memory/"))
@@ -117,7 +152,7 @@ func ValidateMemoryWritePath(raw string) (string, error) {
 
 func validateMemoryReadPath(raw string) (dirArea, rel string, err error) {
 	sl := filepath.ToSlash(strings.TrimSpace(raw))
-	if sl == "" || strings.HasPrefix(sl, "/") || strings.Contains(sl, "..") || strings.ContainsRune(sl, '\x00') {
+	if hasBadMemPath(sl) {
 		return "", "", fmt.Errorf("非法路径：仅允许读取 memory/ 或 dreams/ 下的相对 .md 文件")
 	}
 	if rest, ok := strings.CutPrefix(sl, "dreams/"); ok {
@@ -139,17 +174,13 @@ func validateMemoryReadPath(raw string) (dirArea, rel string, err error) {
 	return "memory", clean, nil
 }
 
-// ReadFile reads one .md file inside memory/ or dreams/ via os.Root (≤256KB, no symlinks).
+// ReadFile reads one .md file inside memory/ or dreams/ via anchored os.Root (≤256KB, no symlinks).
 func (m *MemoryManager) ReadFile(rawPath string) ([]byte, error) {
 	area, rel, err := validateMemoryReadPath(rawPath)
 	if err != nil {
 		return nil, err
 	}
-	dir := m.MemDir()
-	if area == "dreams" {
-		dir = m.DreamsDir()
-	}
-	root, err := os.OpenRoot(dir)
+	root, err := m.openRoot(false, "router", area)
 	if err != nil {
 		return nil, fmt.Errorf("记忆目录不可用：%w", err)
 	}
@@ -173,32 +204,32 @@ func (m *MemoryManager) ReadNote(target string) ([]byte, error) {
 	return m.ReadFile(rel)
 }
 
-// SaveFile atomically writes instructions.md or single-level notes/<slug>.md inside memory/ (≤32KB).
+// SaveFile atomically writes instructions.md or single-level notes/<slug>.md inside memory/ (≤32KB final bytes).
 func (m *MemoryManager) SaveFile(relPath, content string) error {
 	rel, err := ValidateMemoryWritePath(relPath)
 	if err != nil {
 		return err
 	}
-	if len(content) > maxMemoryWriteBytes {
+	normalized := strings.TrimRight(content, "\n") + "\n"
+	if len(normalized) > maxMemoryWriteBytes {
 		return fmt.Errorf("单份记忆文件不能超过 %dKB", maxMemoryWriteBytes>>10)
 	}
-	if err := os.MkdirAll(filepath.Join(m.MemDir(), "notes"), 0o700); err != nil {
-		return fmt.Errorf("mkdir memory: %w", err)
-	}
-	root, err := os.OpenRoot(m.MemDir())
+	root, err := m.openRoot(true, "router", "memory")
 	if err != nil {
-		return fmt.Errorf("open memory root: %w", err)
+		return err
 	}
 	defer root.Close()
 	if strings.HasPrefix(rel, "notes/") {
-		if fi, lerr := root.Lstat("notes"); lerr == nil && (fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir()) {
-			return fmt.Errorf("notes 目录符号链接越界，已拒绝写入")
+		nr, nErr := openSubRoot(root, "notes", true)
+		if nErr != nil {
+			return fmt.Errorf("notes 目录不可用：%w", nErr)
 		}
+		_ = nr.Close()
 	}
-	return writeRootAtomic(root, rel, []byte(strings.TrimRight(content, "\n")+"\n"), 0o600)
+	return writeRootAtomic(root, rel, []byte(normalized), 0o600)
 }
 
-// SaveDreamJournal atomically writes dreams/<name> inside dreams/ via os.Root (≤32KB).
+// SaveDreamJournal atomically writes dreams/<name> inside dreams/ via anchored os.Root (≤32KB).
 func (m *MemoryManager) SaveDreamJournal(name, content string) error {
 	clean := path.Clean(filepath.ToSlash(strings.TrimSpace(name)))
 	if !isSingleLevelMD(clean) {
@@ -207,20 +238,16 @@ func (m *MemoryManager) SaveDreamJournal(name, content string) error {
 	if len(content) > maxMemoryWriteBytes {
 		return fmt.Errorf("做梦日志不能超过 %dKB", maxMemoryWriteBytes>>10)
 	}
-	if err := os.MkdirAll(m.DreamsDir(), 0o700); err != nil {
-		return fmt.Errorf("mkdir dreams: %w", err)
-	}
-	root, err := os.OpenRoot(m.DreamsDir())
+	root, err := m.openRoot(true, "router", "dreams")
 	if err != nil {
-		return fmt.Errorf("open dreams root: %w", err)
+		return err
 	}
 	defer root.Close()
 	return writeRootAtomic(root, clean, []byte(content), 0o600)
 }
 
-// StatDreamJournal stats one regular journal file inside dreams/ via os.Root.
 func (m *MemoryManager) StatDreamJournal(name string) (os.FileInfo, error) {
-	root, err := os.OpenRoot(m.DreamsDir())
+	root, err := m.openRoot(false, "router", "dreams")
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +259,8 @@ func (m *MemoryManager) StatDreamJournal(name string) (os.FileInfo, error) {
 	return fi, nil
 }
 
-func walkMemoryMD(root *os.Root, fn func(rel string)) {
+func listMemoryMDNames(root *os.Root) []string {
+	out := []string{}
 	_ = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || p == "." {
 			return nil
@@ -244,56 +272,58 @@ func walkMemoryMD(root *os.Root, fn func(rel string)) {
 			return nil
 		}
 		if !d.IsDir() && strings.HasSuffix(p, ".md") && !strings.HasPrefix(path.Base(p), ".") && p != "messages.md" {
-			fn(p)
+			out = append(out, p)
 		}
 		return nil
 	})
+	sort.Strings(out)
+	return out
 }
 
-// ListFiles walks memory/ via os.Root and returns regular .md files sorted by path (skipping messages.md).
-func (m *MemoryManager) ListFiles() []MemoryFile {
-	root, err := os.OpenRoot(m.MemDir())
-	if err != nil {
-		return nil
-	}
-	defer root.Close()
-	var out []MemoryFile
-	walkMemoryMD(root, func(p string) {
+func readMemoryFilesInRoot(root *os.Root, names []string) []MemoryFile {
+	out := make([]MemoryFile, 0, len(names))
+	for _, p := range names {
 		if b, rErr := readRootRegularFile(root, p, maxMemoryReadBytes); rErr == nil {
 			if fi, sErr := root.Lstat(p); sErr == nil {
 				out = append(out, MemoryFile{Name: p, Text: string(b), Size: fi.Size(), Mod: fi.ModTime()})
 			}
 		}
-	})
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	}
 	return out
 }
 
-// ListFileNames returns sorted relative .md paths under memory/ (skipping symlinks and messages.md).
-func (m *MemoryManager) ListFileNames() []string {
-	root, err := os.OpenRoot(m.MemDir())
+func (m *MemoryManager) ListFiles() []MemoryFile {
+	root, err := m.openRoot(false, "router", "memory")
 	if err != nil {
-		return nil
+		return []MemoryFile{}
 	}
 	defer root.Close()
-	var out []string
-	walkMemoryMD(root, func(p string) { out = append(out, p) })
-	sort.Strings(out)
-	return out
+	return readMemoryFilesInRoot(root, listMemoryMDNames(root))
 }
 
-// ListRecentDreamNames returns up to limit newest dream journal filenames under dreams/.
+func (m *MemoryManager) ListFileNames() []string {
+	root, err := m.openRoot(false, "router", "memory")
+	if err != nil {
+		return []string{}
+	}
+	defer root.Close()
+	return listMemoryMDNames(root)
+}
+
 func (m *MemoryManager) ListRecentDreamNames(limit int) []string {
-	root, err := os.OpenRoot(m.DreamsDir())
-	if err != nil || limit <= 0 {
-		return nil
+	root, err := m.openRoot(false, "router", "dreams")
+	if limit <= 0 || err != nil {
+		if root != nil {
+			_ = root.Close()
+		}
+		return []string{}
 	}
 	defer root.Close()
 	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
-		return nil
+		return []string{}
 	}
-	var names []string
+	names := make([]string, 0, len(entries))
 	for _, en := range entries {
 		if !en.IsDir() && en.Type()&os.ModeSymlink == 0 && isSingleLevelMD(en.Name()) {
 			names = append(names, en.Name())
@@ -303,35 +333,23 @@ func (m *MemoryManager) ListRecentDreamNames(limit int) []string {
 	return names[:min(len(names), limit)]
 }
 
-// ListDreams returns up to 30 most recent dream journals (newest first) via os.Root.
 func (m *MemoryManager) ListDreams() []MemoryFile {
 	names := m.ListRecentDreamNames(30)
-	root, err := os.OpenRoot(m.DreamsDir())
-	if err != nil || len(names) == 0 {
-		return nil
+	root, err := m.openRoot(false, "router", "dreams")
+	if len(names) == 0 || err != nil {
+		if root != nil {
+			_ = root.Close()
+		}
+		return []MemoryFile{}
 	}
 	defer root.Close()
-	out := make([]MemoryFile, 0, len(names))
-	for _, name := range names {
-		if b, rErr := readRootRegularFile(root, name, maxMemoryReadBytes); rErr == nil {
-			if fi, sErr := root.Lstat(name); sErr == nil {
-				out = append(out, MemoryFile{Name: name, Text: string(b), Size: fi.Size(), Mod: fi.ModTime()})
-			}
-		}
-	}
-	return out
+	return readMemoryFilesInRoot(root, names)
 }
 
 func readRootRegularFile(root *os.Root, rel string, maxBytes int64) ([]byte, error) {
 	fi, err := root.Lstat(rel)
-	if err != nil {
-		return nil, fmt.Errorf("文件不存在或无法读取：%s", rel)
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("目标文件是符号链接，已拒绝读取")
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("目标不是普通文件：%s", rel)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("目标文件不存在或为符号链接，已拒绝读取：%s", rel)
 	}
 	if maxBytes > 0 && fi.Size() > maxBytes {
 		return nil, fmt.Errorf("文件超过 %dKB 上限", maxBytes>>10)
@@ -353,42 +371,27 @@ func readRootRegularFile(root *os.Root, rel string, maxBytes int64) ([]byte, err
 
 func writeRootAtomic(root *os.Root, rel string, data []byte, perm os.FileMode) error {
 	if fi, err := root.Lstat(rel); err == nil && (fi.Mode()&os.ModeSymlink != 0 || fi.IsDir()) {
-		return fmt.Errorf("目标文件是符号链接或目录，已拒绝覆盖")
+		return fmt.Errorf("目标路径为符号链接或目录，已拒绝覆写")
 	}
-	var rnd [8]byte
-	_, _ = rand.Read(rnd[:])
-	tmp := ".corgi-tmp-" + hex.EncodeToString(rnd[:])
-	if dir := path.Dir(rel); dir != "." && dir != "" {
-		tmp = path.Join(dir, tmp)
-	}
+	var rb [8]byte
+	_, _ = rand.Read(rb[:])
+	tmp := path.Join(path.Dir(rel), ".corgi-tmp-"+hex.EncodeToString(rb[:]))
 	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
+		return fmt.Errorf("create temp memory file: %w", err)
 	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = root.Remove(tmp)
-		return fmt.Errorf("write temp file: %w", err)
+	if _, err = f.Write(data); err == nil {
+		err = f.Sync()
 	}
-	if err := f.Close(); err != nil {
-		_ = root.Remove(tmp)
-		return fmt.Errorf("close temp file: %w", err)
+	if cErr := f.Close(); err == nil {
+		err = cErr
 	}
-	if err := root.Rename(tmp, rel); err != nil {
+	if err == nil {
+		err = root.Rename(tmp, rel)
+	}
+	if err != nil {
 		_ = root.Remove(tmp)
-		return fmt.Errorf("rename temp file: %w", err)
+		return fmt.Errorf("write memory file: %w", err)
 	}
 	return nil
-}
-
-func oneLineClip(s string, maxRunes int) string {
-	return clipRunes(strings.Join(strings.Fields(s), " "), maxRunes, "…")
-}
-
-func clipRunes(s string, maxRunes int, suffix string) string {
-	r := []rune(s)
-	if len(r) <= maxRunes {
-		return s
-	}
-	return string(r[:maxRunes]) + suffix
 }
