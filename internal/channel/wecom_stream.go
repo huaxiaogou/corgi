@@ -377,6 +377,32 @@ func (b *Bus) OnAPIRouterProgress(ctx context.Context, thread, triggerID, think 
 	_ = st.session.SendProgress(pctx, think, "", false)
 }
 
+// OnAPIRouterLive fans out transient step progress and streaming reply_user.text drafts
+// to Web SSE subscribers and updates the matching WeCom passive stream bubble (1s throttled).
+func (b *Bus) OnAPIRouterLive(ctx context.Context, live model.RouterLiveView) {
+	b.broadcastRouterLive(live)
+	if !live.Active || strings.TrimSpace(live.Thread) == "" || strings.TrimSpace(live.TriggerID) == "" {
+		return
+	}
+	draft := strings.TrimSpace(live.DraftText)
+	if draft == "" {
+		return
+	}
+	st := b.findRouterStreamByTrigger(live.Thread, live.TriggerID)
+	if st == nil || st.session.Finished() {
+		return
+	}
+	think := strings.TrimSpace(strings.Join(live.Progress, "\n"))
+	if think != "" {
+		st.setAPIProgress(think)
+	} else {
+		think = st.getAPIProgress()
+	}
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	_ = st.session.SendProgress(pctx, think, draft, false)
+}
+
 func (b *Bus) findRouterStreamByTrigger(thread, triggerID string) *activeWeComStream {
 	b.mu.Lock()
 	defer b.mu.Unlock()

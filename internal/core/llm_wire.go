@@ -54,16 +54,23 @@ type (
 	LLMStreamOptions struct {
 		IncludeUsage bool `json:"include_usage,omitempty"`
 	}
+	LLMStreamDelta struct {
+		ReasoningDelta string
+		ToolIndex      int
+		ToolName       string
+		ToolArgsDelta  string
+	}
 	LLMChatRequest struct {
-		Model           string            `json:"model"`
-		Messages        []LLMMessage      `json:"messages"`
-		Tools           []LLMToolDef      `json:"tools,omitempty"`
-		ToolChoice      any               `json:"tool_choice,omitempty"`
-		MaxTokens       int               `json:"max_tokens,omitempty"`
-		ReasoningEffort string            `json:"reasoning_effort,omitempty"`
-		PromptCacheKey  string            `json:"prompt_cache_key,omitempty"`
-		Stream          bool              `json:"stream,omitempty"`
-		StreamOptions   *LLMStreamOptions `json:"stream_options,omitempty"`
+		Model           string               `json:"model"`
+		Messages        []LLMMessage         `json:"messages"`
+		Tools           []LLMToolDef         `json:"tools,omitempty"`
+		ToolChoice      any                  `json:"tool_choice,omitempty"`
+		MaxTokens       int                  `json:"max_tokens,omitempty"`
+		ReasoningEffort string               `json:"reasoning_effort,omitempty"`
+		PromptCacheKey  string               `json:"prompt_cache_key,omitempty"`
+		Stream          bool                 `json:"stream,omitempty"`
+		StreamOptions   *LLMStreamOptions    `json:"stream_options,omitempty"`
+		OnStreamDelta   func(LLMStreamDelta) `json:"-"`
 	}
 	LLMUsage struct {
 		PromptTokens        int `json:"prompt_tokens"`
@@ -108,7 +115,7 @@ type (
 // Returns disableStream=true only when a gateway rejects stream/stream_options with HTTP 400.
 func doChatCompletionAttempt(
 	ctx context.Context, client *http.Client, endpoint, apiKey string,
-	payload []byte, useStream bool, idleTimeout time.Duration,
+	payload []byte, useStream bool, idleTimeout time.Duration, onDelta func(LLMStreamDelta),
 ) (*LLMChatResponse, bool, error) {
 	start := time.Now()
 	reqCtx := ctx
@@ -182,7 +189,7 @@ func doChatCompletionAttempt(
 			}
 		}
 		onActivity()
-		streamed, sErr := parseLLMStreamResponse(resp.Body, apiKey, start, onActivity)
+		streamed, sErr := parseLLMStreamResponse(resp.Body, apiKey, start, onActivity, onDelta)
 		if sErr != nil {
 			if stalled.Load() && ctx.Err() == nil {
 				return nil, false, fmt.Errorf("上游流式输出卡顿（%s 无新分片）", idleTimeout.Round(time.Second))
@@ -223,7 +230,7 @@ func doChatCompletionAttempt(
 	return &parsed, false, nil
 }
 
-func parseLLMStreamResponse(body io.Reader, apiKey string, start time.Time, onActivity func()) (*LLMChatResponse, error) {
+func parseLLMStreamResponse(body io.Reader, apiKey string, start time.Time, onActivity func(), onDelta func(LLMStreamDelta)) (*LLMChatResponse, error) {
 	reader := bufio.NewReaderSize(io.LimitReader(body, 16<<20), 64<<10)
 	type toolAcc struct {
 		id, typ    string
@@ -297,7 +304,11 @@ func parseLLMStreamResponse(body io.Reader, apiKey string, start time.Time, onAc
 					}
 					finishReason = orStr(ch.FinishReason, finishReason)
 					contentBuf.WriteString(ch.Delta.Content)
-					reasoningBuf.WriteString(orStr(ch.Delta.ReasoningContent, ch.Delta.Reasoning))
+					rDelta := orStr(ch.Delta.ReasoningContent, ch.Delta.Reasoning)
+					reasoningBuf.WriteString(rDelta)
+					if onDelta != nil && rDelta != "" {
+						onDelta(LLMStreamDelta{ReasoningDelta: rDelta, ToolIndex: -1})
+					}
 					for _, dtc := range ch.Delta.ToolCalls {
 						idx := lastIdx
 						if dtc.Index != nil {
@@ -315,6 +326,13 @@ func parseLLMStreamResponse(body io.Reader, apiKey string, start time.Time, onAc
 						acc.typ = orStr(dtc.Type, acc.typ)
 						acc.name.WriteString(dtc.Function.Name)
 						acc.args.WriteString(dtc.Function.Arguments)
+						if onDelta != nil && (dtc.Function.Name != "" || dtc.Function.Arguments != "") {
+							onDelta(LLMStreamDelta{
+								ToolIndex:     idx,
+								ToolName:      acc.name.String(),
+								ToolArgsDelta: dtc.Function.Arguments,
+							})
+						}
 					}
 				}
 			}

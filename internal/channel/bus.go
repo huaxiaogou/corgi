@@ -30,6 +30,7 @@ type Bus struct {
 	flushMu            sync.Mutex
 	chatSendMu         map[string]*sync.Mutex
 	subs               map[chan struct{}]struct{}
+	liveSubs           map[chan model.RouterLiveView]struct{}
 	outbox             map[string][]outboxItem
 	routerStreams      map[string][]*activeWeComStream
 	seenWeComMsgs      map[string]time.Time
@@ -52,6 +53,7 @@ func NewBus(eng *core.Engine, wc *wecom.Client, logger *slog.Logger) *Bus {
 		flushDelay:         20 * time.Second,
 		chatSendMu:         map[string]*sync.Mutex{},
 		subs:               map[chan struct{}]struct{}{},
+		liveSubs:           map[chan model.RouterLiveView]struct{}{},
 		outbox:             map[string][]outboxItem{},
 		routerStreams:      map[string][]*activeWeComStream{},
 		seenWeComMsgs:      map[string]time.Time{},
@@ -113,6 +115,41 @@ func (b *Bus) Subscribe() (<-chan struct{}, func()) {
 		delete(b.subs, ch)
 		b.mu.Unlock()
 	}
+}
+
+// SubscribeRouterLive registers a low-latency SSE listener for transient API Router progress and drafts.
+func (b *Bus) SubscribeRouterLive() (<-chan model.RouterLiveView, func()) {
+	ch := make(chan model.RouterLiveView, 4)
+	b.mu.Lock()
+	if b.liveSubs == nil {
+		b.liveSubs = map[chan model.RouterLiveView]struct{}{}
+	}
+	b.liveSubs[ch] = struct{}{}
+	b.mu.Unlock()
+	return ch, func() {
+		b.mu.Lock()
+		delete(b.liveSubs, ch)
+		b.mu.Unlock()
+	}
+}
+
+func (b *Bus) broadcastRouterLive(live model.RouterLiveView) {
+	b.mu.Lock()
+	for ch := range b.liveSubs {
+		select {
+		case ch <- live:
+		default:
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- live:
+			default:
+			}
+		}
+	}
+	b.mu.Unlock()
 }
 
 func (b *Bus) OnStateChanged() {

@@ -202,10 +202,12 @@ func (e *Engine) pushToolProgress(ctx, bg context.Context, turn *apiRouterTurn, 
 			*lines = (*lines)[len(*lines)-6:]
 		}
 	}
+	live := turn.setLiveProgress(*lines)
 	e.mu.Lock()
 	sink := e.sink
 	e.mu.Unlock()
 	sink.OnAPIRouterProgress(bg, turn.thread, turn.triggerID, strings.Join(*lines, "\n"))
+	sink.OnAPIRouterLive(bg, live)
 }
 
 func (e *Engine) formatAPIToolProgress(ctx context.Context, thread string, tc LLMToolCall) string {

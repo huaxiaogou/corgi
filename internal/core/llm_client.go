@@ -116,11 +116,11 @@ func (c *LLMClient) ChatCompletion(ctx context.Context, cfg LLMClientConfig, req
 	if err != nil {
 		return nil, fmt.Errorf("encode llm request: %w", err)
 	}
-	out, disableStream, callErr := doChatCompletionAttempt(ctx, client, endpoint, apiKey, payload, reqBody.Stream, idleTimeout)
+	out, disableStream, callErr := doChatCompletionAttempt(ctx, client, endpoint, apiKey, payload, reqBody.Stream, idleTimeout, reqBody.OnStreamDelta)
 	if callErr != nil && disableStream && reqBody.Stream && ctx.Err() == nil {
 		reqBody.Stream, reqBody.StreamOptions = false, nil
 		if fb, mErr := json.Marshal(reqBody); mErr == nil {
-			out, _, callErr = doChatCompletionAttempt(ctx, client, endpoint, apiKey, fb, false, idleTimeout)
+			out, _, callErr = doChatCompletionAttempt(ctx, client, endpoint, apiKey, fb, false, idleTimeout, nil)
 		}
 	}
 	if callErr != nil {

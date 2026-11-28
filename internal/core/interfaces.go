@@ -50,6 +50,7 @@ type ChannelSink interface {
 	OnActionCreated(ctx context.Context, action *model.Action)
 	OnActionResolved(ctx context.Context, action *model.Action)
 	OnAPIRouterProgress(ctx context.Context, thread, triggerID, think string)
+	OnAPIRouterLive(ctx context.Context, live model.RouterLiveView)
 	OnAPIRouterTurnEnd(ctx context.Context, thread, triggerID, reason string)
 	WeComOnline() bool
 }
@@ -65,5 +66,6 @@ func (NopSink) OnReply(context.Context, *model.Entry, *model.Action, []Attachmen
 func (NopSink) OnActionCreated(context.Context, *model.Action)              {}
 func (NopSink) OnActionResolved(context.Context, *model.Action)             {}
 func (NopSink) OnAPIRouterProgress(context.Context, string, string, string) {}
+func (NopSink) OnAPIRouterLive(context.Context, model.RouterLiveView)       {}
 func (NopSink) OnAPIRouterTurnEnd(context.Context, string, string, string)  {}
 func (NopSink) WeComOnline() bool                                           { return false }

@@ -573,6 +573,8 @@ func (s *Server) handleStreamEvents(w http.ResponseWriter, r *http.Request) {
 	thread := r.URL.Query().Get("thread")
 	ch, unsub := s.Bus.Subscribe()
 	defer unsub()
+	liveCh, unsubLive := s.Bus.SubscribeRouterLive()
+	defer unsubLive()
 
 	var lastSuper, lastState string
 	tick := time.NewTicker(1200 * time.Millisecond)
@@ -593,14 +595,27 @@ func (s *Server) handleStreamEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		select {
-		case <-r.Context().Done():
-			return
-		case <-beat.C:
-			sse.comment()
-		case <-ch:
-		case <-tick.C:
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-beat.C:
+				sse.comment()
+			case live := <-liveCh:
+				if thread == "" || live.Thread == "" || live.Thread == thread {
+					if b, err := json.Marshal(live); err == nil {
+						if sse.send("router_live", b) != nil {
+							return
+						}
+					}
+				}
+			case <-ch:
+				goto refresh
+			case <-tick.C:
+				goto refresh
+			}
 		}
+	refresh:
 	}
 }
 

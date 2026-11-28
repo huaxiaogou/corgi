@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CorgiButtMark, StatusDot } from "../../components/CorgiMark";
+import { CorgiButtMark } from "../../components/CorgiMark";
 import { ImageLightbox } from "../../components/ImageLightbox";
 import type { InlineReplyMode } from "../../components/InlineReplyBox";
 import { PromptQueueTray } from "../../components/PromptQueueTray";
@@ -43,6 +43,7 @@ import { ChatHeader } from "./ChatHeader";
 import { ChatPendingInbox } from "./ChatPendingInbox";
 import { ChatHistoryPreviewModal, ChatTopBanners } from "./ChatTopBanners";
 import { ComposerBar } from "./ComposerBar";
+import { RouterLiveBubble } from "./RouterLiveBubble";
 import { WorkNotebook } from "./WorkNotebook";
 
 const NOTEBOOK_MODE_KEY = "corgi.notebook.mode";
@@ -267,7 +268,14 @@ export function CorgiChatView({
     captureVisibleAnchor,
   } = useAutoScroll({
     resetKey: `${thread}:${focusSeq}`,
-    contentKey: [liveEntries.length, lastEntry?.id ?? "", lastEntry?.text.length ?? 0, pendingActions.map((a) => a.id).join(",")].join("|"),
+    contentKey: [
+      liveEntries.length,
+      lastEntry?.id ?? "",
+      lastEntry?.text.length ?? 0,
+      pendingActions.map((a) => a.id).join(","),
+      router?.live?.progress?.length ?? 0,
+      router?.live?.draft_text?.length ?? 0,
+    ].join("|"),
     prependKey: olderEntries.length,
     hasContent: liveEntries.length > 0 || pendingActions.length > 0,
     onViewportScroll: checkFirstUnreadInView,
@@ -754,18 +762,7 @@ export function CorgiChatView({
                   />
                 </div>
 
-                {hasThreadContent && (
-                  <div
-                    aria-live="polite"
-                    aria-hidden={!routerWorking}
-                    className={`mt-3 h-6 flex items-center gap-2.5 text-xs text-muted transition-opacity duration-150 ${
-                      routerWorking ? "opacity-100" : "opacity-0 pointer-events-none select-none"
-                    }`}
-                  >
-                    {routerWorking && <StatusDot status="working" />}
-                    <span>{routerWorking ? "Corgi 在想…" : "\u00A0"}</span>
-                  </div>
-                )}
+                <RouterLiveBubble router={router} thread={thread} visible={hasThreadContent} />
               </div>
             </div>
             <ChatUnreadJumpPill

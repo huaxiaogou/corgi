@@ -35,9 +35,10 @@ type llmToolLoopConfig struct {
 	ToolBudgetErrMsg      string
 	StepErrClosingMsg     string
 
-	OnStepStart func(step int)
-	OnToolStart func(step int, tc LLMToolCall)
-	ExecTool    func(step int, tc LLMToolCall) (out string, earlyExit bool)
+	OnStepStart  func(step int)
+	OnStepStream func(step int, delta LLMStreamDelta)
+	OnToolStart  func(step int, tc LLMToolCall)
+	ExecTool     func(step int, tc LLMToolCall) (out string, earlyExit bool)
 }
 
 type llmToolLoopResult struct {
@@ -147,6 +148,10 @@ func (e *Engine) runLLMToolLoop(ctx context.Context, cfg llmToolLoopConfig) llmT
 		}
 		if forceTools && toolChoiceOK {
 			req.ToolChoice = "required"
+		}
+		if cfg.OnStepStream != nil {
+			curStep := step
+			req.OnStreamDelta = func(d LLMStreamDelta) { cfg.OnStepStream(curStep, d) }
 		}
 
 		resp, callErr := e.callLLMStepWithRetry(ctx, cfg, step, req, &toolChoiceOK)

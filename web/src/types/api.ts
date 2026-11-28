@@ -218,6 +218,15 @@ export interface RouterContextPruneResult {
   summary: RouterContextView;
 }
 
+export interface RouterLiveView {
+  active: boolean;
+  thread?: string;
+  trigger_id?: string;
+  progress?: string[];
+  draft_text?: string;
+  thinking_since?: string;
+}
+
 export interface RouterView {
   alive: boolean;
   status: string;
@@ -226,6 +235,7 @@ export interface RouterView {
   effort?: string;
   dreaming?: boolean;
   replied?: boolean;
+  live?: RouterLiveView;
   context?: RouterContextView;
 }
 

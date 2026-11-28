@@ -329,6 +329,17 @@ type RouterContextPruneResult struct {
 	Summary        RouterContextView `json:"summary"`
 }
 
+// RouterLiveView carries transient step progress and reply_user.text streaming drafts
+// over a dedicated low-latency SSE event without triggering full SQLite or Fleet scans.
+type RouterLiveView struct {
+	Active        bool       `json:"active"`
+	Thread        string     `json:"thread,omitempty"`
+	TriggerID     string     `json:"trigger_id,omitempty"`
+	Progress      []string   `json:"progress,omitempty"`
+	DraftText     string     `json:"draft_text,omitempty"`
+	ThinkingSince *time.Time `json:"thinking_since,omitempty"`
+}
+
 // RouterView summarizes the live state of Corgi's native in-process API Router.
 type RouterView struct {
 	Alive    bool               `json:"alive"`
@@ -338,6 +349,7 @@ type RouterView struct {
 	Effort   string             `json:"effort,omitempty"`
 	Dreaming bool               `json:"dreaming,omitempty"`
 	Replied  bool               `json:"replied,omitempty"`
+	Live     *RouterLiveView    `json:"live,omitempty"`
 	Context  *RouterContextView `json:"context,omitempty"`
 }
 

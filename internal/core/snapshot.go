@@ -174,6 +174,10 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 		rv.Alive = true
 		rv.Status = "working"
 		rv.Replied = apiTurn.hasFlag(turnFlagReplied)
+		if thread == "" || apiTurn.thread == thread {
+			live := apiTurn.liveSnapshot()
+			rv.Live = &live
+		}
 	} else if e.dream != nil {
 		rv.Alive = true
 		rv.Status = "dreaming"

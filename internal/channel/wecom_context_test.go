@@ -75,3 +75,58 @@ func TestWeComContextCommands(t *testing.T) {
 		t.Fatalf("expected cleared epoch 2 with 0 active turns, got %+v (err=%v)", info, err)
 	}
 }
+
+func TestWeComOnAPIRouterLiveStreamsDraftBody(t *testing.T) {
+	bus := &Bus{
+		routerStreams: map[string][]*activeWeComStream{},
+		liveSubs:      map[chan model.RouterLiveView]struct{}{},
+	}
+	var (
+		mu     sync.Mutex
+		frames []string
+	)
+	bus.sendStreamFn = func(_ context.Context, _, _, content string, finish bool) error {
+		mu.Lock()
+		frames = append(frames, content)
+		mu.Unlock()
+		return nil
+	}
+	st := bus.startRouterStream(context.Background(), model.MainThread, "owner", "req-live-1")
+	if st == nil {
+		t.Fatalf("expected active stream")
+	}
+	st.session.SetMinInterval(0)
+	st.setRefIDs("e1", "t1")
+
+	liveCh, unsub := bus.SubscribeRouterLive()
+	defer unsub()
+
+	bus.OnAPIRouterLive(context.Background(), model.RouterLiveView{
+		Active:    true,
+		Thread:    model.MainThread,
+		TriggerID: "t1",
+		Progress:  []string{"• 正在查阅事项详情…"},
+		DraftText: "正在流式输出回复正文",
+	})
+
+	select {
+	case got := <-liveCh:
+		if got.DraftText != "正在流式输出回复正文" {
+			t.Fatalf("unexpected SSE live payload: %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for SubscribeRouterLive event")
+	}
+
+	mu.Lock()
+	gotFrames := append([]string(nil), frames...)
+	mu.Unlock()
+	if len(gotFrames) < 2 {
+		t.Fatalf("expected initial frame + draft stream frame, got %v", gotFrames)
+	}
+	last := gotFrames[len(gotFrames)-1]
+	if !strings.Contains(last, "正在查阅事项详情") || !strings.Contains(last, "正在流式输出回复正文") {
+		t.Fatalf("expected WeCom stream frame to contain <think> progress and streaming body, got %q", last)
+	}
+	st.abort()
+}

@@ -5,7 +5,7 @@ import {
   readSnapshotCache,
   writeSnapshotCache,
 } from "../lib/snapshotCache";
-import type { PaneState, SuperView } from "../types/api";
+import type { PaneState, RouterLiveView, SuperView } from "../types/api";
 
 const SNAPSHOT_DEBOUNCE_MS = 350;
 const SESSION_RECHECK_COOLDOWN_MS = 3000;
@@ -184,6 +184,23 @@ export function useCorgiStream(thread: string): StreamData {
         setSuperReady(true);
         setConnected(true);
         scheduleSnapshotWrite();
+      } catch {
+        // ignore malformed frame
+      }
+    });
+    es.addEventListener("router_live", (ev) => {
+      try {
+        const live = JSON.parse((ev as MessageEvent).data) as RouterLiveView;
+        setSuperView((prev) => {
+          if (!prev) return prev;
+          const nextRouter = {
+            ...prev.router,
+            live: live.active ? live : undefined,
+          };
+          const updated = { ...prev, router: nextRouter };
+          latestSuperRef.current = updated;
+          return updated;
+        });
       } catch {
         // ignore malformed frame
       }

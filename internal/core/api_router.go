@@ -51,6 +51,7 @@ func (s *routerState) resetFailuresLocked(bumpEpoch bool) {
 type apiRouterTurn struct {
 	configEpoch       uint64
 	thread, triggerID string
+	startedAt         time.Time
 	cancel            context.CancelFunc
 	done              chan struct{}
 	flags             atomic.Uint32
@@ -59,6 +60,9 @@ type apiRouterTurn struct {
 	replyText         string
 	toolTraces        []string
 	workItemIDs       []string
+	liveProgress      []string
+	liveDraft         string
+	lastLivePush      time.Time
 }
 
 func (t *apiRouterTurn) hasFlag(bit uint32) bool { return t.flags.Load()&bit != 0 }
@@ -120,6 +124,73 @@ func (t *apiRouterTurn) recordedWorkItemIDs() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return append([]string(nil), t.workItemIDs...)
+}
+func (t *apiRouterTurn) liveSnapshot() model.RouterLiveView {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	started := t.startedAt
+	return model.RouterLiveView{
+		Active:        true,
+		Thread:        t.thread,
+		TriggerID:     t.triggerID,
+		Progress:      append([]string(nil), t.liveProgress...),
+		DraftText:     t.liveDraft,
+		ThinkingSince: &started,
+	}
+}
+func (t *apiRouterTurn) setLiveProgress(lines []string) model.RouterLiveView {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.liveProgress = append([]string(nil), lines...)
+	t.lastLivePush = time.Now()
+	started := t.startedAt
+	return model.RouterLiveView{
+		Active:        true,
+		Thread:        t.thread,
+		TriggerID:     t.triggerID,
+		Progress:      append([]string(nil), t.liveProgress...),
+		DraftText:     t.liveDraft,
+		ThinkingSince: &started,
+	}
+}
+func (t *apiRouterTurn) setLiveDraft(draft string, minGap time.Duration) (model.RouterLiveView, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if draft == t.liveDraft {
+		return model.RouterLiveView{}, false
+	}
+	t.liveDraft = draft
+	now := time.Now()
+	if minGap > 0 && !t.lastLivePush.IsZero() && now.Sub(t.lastLivePush) < minGap {
+		return model.RouterLiveView{}, false
+	}
+	t.lastLivePush = now
+	started := t.startedAt
+	return model.RouterLiveView{
+		Active:        true,
+		Thread:        t.thread,
+		TriggerID:     t.triggerID,
+		Progress:      append([]string(nil), t.liveProgress...),
+		DraftText:     t.liveDraft,
+		ThinkingSince: &started,
+	}, true
+}
+func (t *apiRouterTurn) clearLiveDraft() (model.RouterLiveView, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.liveDraft == "" {
+		return model.RouterLiveView{}, false
+	}
+	t.liveDraft = ""
+	t.lastLivePush = time.Now()
+	started := t.startedAt
+	return model.RouterLiveView{
+		Active:        true,
+		Thread:        t.thread,
+		TriggerID:     t.triggerID,
+		Progress:      append([]string(nil), t.liveProgress...),
+		ThinkingSince: &started,
+	}, true
 }
 
 type apiRouterInflight struct {
@@ -251,7 +322,7 @@ func (e *Engine) deliverAPIRouter(ctx context.Context, list []*model.Trigger) {
 		rootCtx = context.Background()
 	}
 	turnCtx, cancel := context.WithTimeout(rootCtx, apiRouterTurnDeadline)
-	turn := &apiRouterTurn{configEpoch: e.router.configEpoch, thread: orStr(strings.TrimSpace(trig.Thread), model.MainThread), triggerID: trig.ID, cancel: cancel, done: make(chan struct{})}
+	turn := &apiRouterTurn{configEpoch: e.router.configEpoch, thread: orStr(strings.TrimSpace(trig.Thread), model.MainThread), triggerID: trig.ID, startedAt: time.Now(), cancel: cancel, done: make(chan struct{})}
 	e.router.turn = turn
 	e.mu.Unlock()
 	e.notifyChanged()
@@ -292,6 +363,7 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		sink := e.sink
 		e.mu.Unlock()
 		close(turn.done)
+		sink.OnAPIRouterLive(bg, model.RouterLiveView{Active: false, Thread: turn.thread, TriggerID: turn.triggerID})
 		if !turn.hasFlag(turnFlagReplied) && sealReason != "" {
 			sink.OnAPIRouterTurnEnd(bg, turn.thread, turn.triggerID, sealReason)
 		}
@@ -316,7 +388,18 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 	epoch, messages, peekedBgNotes := e.buildThreadContextMessages(ctx, turn.thread, trig, turnMeta)
 	tools := apiRouterToolDefs()
 	var progress []string
+	emitLive := func(live model.RouterLiveView) {
+		e.mu.Lock()
+		sink := e.sink
+		e.mu.Unlock()
+		sink.OnAPIRouterLive(bg, live)
+	}
 	runLoop := func(curEpoch int, curMsgs []LLMMessage) llmToolLoopResult {
+		var (
+			replyParser     *replyUserTextStreamExtractor
+			sawNonReplyTool bool
+			streamStep      = -1
+		)
 		return e.runLLMToolLoop(ctx, llmToolLoopConfig{
 			ClientCfg:          cfg,
 			Model:              modelName,
@@ -361,9 +444,44 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 				fmt.Sprintf("本轮工具调用次数已达上限（%d次），请立刻用 reply_user 汇总结论，或调用 no_action 静默结束。", maxAPIRouterToolCalls),
 				fmt.Sprintf("本轮工具调用次数已达上限（%d次），请立刻用 reply_user 汇总结论。", maxAPIRouterToolCalls)),
 			StepErrClosingMsg: "同一步前置工具执行失败，请先查看报错并处理后再决定回复或结束。",
+			OnStepStart: func(step int) {
+				streamStep, replyParser, sawNonReplyTool = step, nil, false
+				if live, ok := turn.clearLiveDraft(); ok {
+					emitLive(live)
+				}
+			},
+			OnStepStream: func(step int, d LLMStreamDelta) {
+				if step != streamStep {
+					return
+				}
+				if d.ToolIndex < 0 {
+					return
+				}
+				if d.ToolIndex > 0 || (d.ToolName != "" && !strings.HasPrefix("reply_user", d.ToolName) && d.ToolName != "reply_user") {
+					sawNonReplyTool = true
+					return
+				}
+				if sawNonReplyTool || d.ToolName != "reply_user" || d.ToolArgsDelta == "" {
+					return
+				}
+				if replyParser == nil {
+					replyParser = &replyUserTextStreamExtractor{}
+				}
+				if txt, changed := replyParser.Feed(d.ToolArgsDelta); changed && txt != "" {
+					if live, ok := turn.setLiveDraft(txt, 100*time.Millisecond); ok {
+						emitLive(live)
+					}
+				}
+			},
 			ExecTool: func(_ int, tc LLMToolCall) (string, bool) {
 				e.pushToolProgress(ctx, bg, turn, tc, &progress)
-				return e.execAPIRouterTool(ctx, turn, trig, turnMeta, tc)
+				out, exit := e.execAPIRouterTool(ctx, turn, trig, turnMeta, tc)
+				if tc.Function.Name == "reply_user" && !exit {
+					if live, ok := turn.clearLiveDraft(); ok {
+						emitLive(live)
+					}
+				}
+				return out, exit
 			},
 		})
 	}
