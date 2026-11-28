@@ -9,9 +9,7 @@ import (
 const (
 	MainThread          = "chat:main"
 	RouterName          = "corgi"
-	RouterLabel         = "corgi · router"
 	DreamName           = "corgi-dream"
-	DreamLabel          = "corgi · dream"
 	DefaultReplyChars   = 200
 	PendingActionMaxAge = 7 * 24 * time.Hour
 )

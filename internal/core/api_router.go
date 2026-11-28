@@ -259,79 +259,64 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 	}
 	turnMeta, allowSilent := e.resolveTurnConsentMeta(ctx, trig), canAPIRouterSilence(trig)
 	messages, tools := e.buildAPIRouterMessages(ctx, trig, turnMeta), apiRouterToolDefs()
-	totalCalls, bareRetries, nudgeIdx, forceTools, toolChoiceOK, exhausted := 0, 0, -1, false, true, false
 	var progress []string
-	for step := 0; step < maxAPIRouterSteps; step++ {
-		req := LLMChatRequest{Model: modelName, Messages: messages, Tools: tools, ReasoningEffort: effort, PromptCacheKey: cacheKey, Stream: true, StreamOptions: &LLMStreamOptions{IncludeUsage: true}}
-		if forceTools && toolChoiceOK {
-			req.ToolChoice = "required"
-		}
-		stepCtx, stepCancel := context.WithTimeout(ctx, apiRouterStepDeadline)
-		resp, callErr := e.llm.ChatCompletion(stepCtx, cfg, req)
-		if callErr != nil && req.ToolChoice != nil && errors.Is(callErr, ErrLLMBadRequest) {
-			toolChoiceOK, req.ToolChoice = false, nil
-			e.logger.Warn("api router provider rejected tool_choice=required, retrying without tool_choice", "trigger", trig.ID, "model", modelName, "err", callErr)
-			resp, callErr = e.llm.ChatCompletion(stepCtx, cfg, req)
-		}
-		stepCancel()
-		if callErr != nil {
-			if turn.hasFlag(turnFlagStopped) {
-				e.ackAPITriggerOnce(bg, turn, trig)
-				sealReason = "cancelled"
-			} else if ctx.Err() != nil && !turn.hasFlag(turnFlagMutated) && errors.Is(ctx.Err(), context.Canceled) {
-				sealReason = ""
-			} else {
-				sealReason = e.handleAPIRouterFailure(bg, turn, trig, step+1, modelName, effort, callErr)
+	res := e.runLLMToolLoop(ctx, llmToolLoopConfig{
+		ClientCfg:          cfg,
+		Model:              modelName,
+		Effort:             effort,
+		CacheKey:           cacheKey,
+		Tools:              tools,
+		Messages:           messages,
+		MaxSteps:           maxAPIRouterSteps,
+		MaxToolCalls:       maxAPIRouterToolCalls,
+		MaxToolOutputRunes: maxAPIToolOutputRunes,
+		StepDeadline:       apiRouterStepDeadline,
+		LogLabel:           "api router step",
+		LogIDKey:           "trigger",
+		LogIDVal:           trig.ID,
+		MaxBareTextRetries: maxAPIRouterBareTextRetries,
+		BareTextForceTools: true,
+		BareTextNudge: func(int) string {
+			if turn.hasFlag(turnFlagReplied) {
+				return ""
 			}
-			return
-		}
-		choice := resp.Choices[0].Message
-		e.logLLMStep("api router step", "trigger", trig.ID, step+1, modelName, effort, resp, choice.ToolCalls)
-		if len(choice.ToolCalls) == 0 {
-			if !turn.hasFlag(turnFlagReplied) && bareRetries < maxAPIRouterBareTextRetries && step < maxAPIRouterSteps-1 {
-				bareRetries, forceTools = bareRetries+1, true
-				if nudgeIdx < 0 || nudgeIdx != len(messages)-1 {
-					messages, nudgeIdx = append(messages, LLMMessage{Role: "user"}), len(messages)
-				}
-				messages[nudgeIdx].Content = condStr(allowSilent, "[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。需通知用户请调用 reply_user，否则调用 no_action(reason)。", "[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。本轮必须调用工具，回复请走 reply_user。")
-				continue
+			return condStr(allowSilent,
+				"[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。需通知用户请调用 reply_user，否则调用 no_action(reason)。",
+				"[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。本轮必须调用工具，回复请走 reply_user。")
+		},
+		FinalStepNudge: func() (string, bool) {
+			if turn.hasFlag(turnFlagReplied) {
+				return "", false
 			}
-			if !turn.hasFlag(turnFlagReplied) && !turn.hasFlag(turnFlagDispatched) && !allowSilent {
-				e.addEvent(bg, turn.thread, "大脑本轮未通过工具发出有效答复，已中止以避免误发，请重试", trig.ID, "error")
-				sealReason = "error"
-			}
-			break
+			return condStr(allowSilent,
+				"[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 汇报结论，或调用 no_action(reason) 静默结束。",
+				"[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 向用户给出明确答复，勿再继续拉取详情。"), true
+		},
+		IsClosingTool:         func(name string) bool { return name == "reply_user" || name == "no_action" },
+		BlockClosingOnStepErr: true,
+		ToolBudgetErrMsg: condStr(allowSilent,
+			"本轮工具调用次数已达上限（12次），请立刻用 reply_user 汇总结论，或调用 no_action 静默结束。",
+			"本轮工具调用次数已达上限（12次），请立刻用 reply_user 汇总结论。"),
+		StepErrClosingMsg: "同一步前置工具执行失败，请先查看报错并处理后再决定回复或结束。",
+		ExecTool: func(_ int, tc LLMToolCall) (string, bool) {
+			e.pushToolProgress(ctx, bg, turn, tc, &progress)
+			return e.execAPIRouterTool(ctx, turn, trig, turnMeta, tc)
+		},
+	})
+	if res.Err != nil {
+		if turn.hasFlag(turnFlagStopped) {
+			e.ackAPITriggerOnce(bg, turn, trig)
+			sealReason = "cancelled"
+		} else if ctx.Err() != nil && !turn.hasFlag(turnFlagMutated) && errors.Is(ctx.Err(), context.Canceled) {
+			sealReason = ""
+		} else {
+			sealReason = e.handleAPIRouterFailure(bg, turn, trig, res.FailedStep, modelName, effort, res.Err)
 		}
-		forceTools, nudgeIdx = false, -1
-		messages = append(messages, LLMMessage{Role: "assistant", Content: choice.Content, ReasoningContent: choice.ReasoningContent, ToolCalls: choice.ToolCalls})
-		earlyExit, stepHadErr := false, false
-		for _, tc := range choice.ToolCalls {
-			totalCalls++
-			isClosing := tc.Function.Name == "reply_user" || tc.Function.Name == "no_action"
-			var toolOut string
-			if totalCalls > maxAPIRouterToolCalls && !isClosing {
-				toolOut, stepHadErr = toolErr(condStr(allowSilent, "本轮工具调用次数已达上限（12次），请立刻用 reply_user 汇总结论，或调用 no_action 静默结束。", "本轮工具调用次数已达上限（12次），请立刻用 reply_user 汇总结论。")), true
-			} else if isClosing && stepHadErr {
-				toolOut = toolErr("同一步前置工具执行失败，请先查看报错并处理后再决定回复或结束。")
-			} else {
-				e.pushToolProgress(ctx, bg, turn, tc, &progress)
-				if toolOut, earlyExit = e.execAPIRouterTool(ctx, turn, trig, turnMeta, tc); strings.Contains(toolOut, `"ok":false`) {
-					stepHadErr = true
-					e.logger.Warn("api router tool rejected", "trigger", trig.ID, "step", step+1, "tool", tc.Function.Name, "result", oneLineClip(toolOut, 240))
-				}
-			}
-			messages = append(messages, LLMMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: clipRunes(toolOut, maxAPIToolOutputRunes, "...[truncated]")})
-			if earlyExit || ctx.Err() != nil {
-				break
-			}
-		}
-		if earlyExit {
-			break
-		}
-		if step == maxAPIRouterSteps-2 && !turn.hasFlag(turnFlagReplied) && ctx.Err() == nil {
-			messages, forceTools = append(messages, LLMMessage{Role: "user", Content: condStr(allowSilent, "[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 汇报结论，或调用 no_action(reason) 静默结束。", "[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 向用户给出明确答复，勿再继续拉取详情。")}), true
-		}
-		exhausted = step == maxAPIRouterSteps-1
+		return
+	}
+	if res.NoToolExit && !turn.hasFlag(turnFlagReplied) && !turn.hasFlag(turnFlagDispatched) && !allowSilent {
+		e.addEvent(bg, turn.thread, "大脑本轮未通过工具发出有效答复，已中止以避免误发，请重试", trig.ID, "error")
+		sealReason = "error"
 	}
 	e.ackAPITriggerOnce(bg, turn, trig)
 	switch {
@@ -339,8 +324,8 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		sealReason = ""
 	case turn.hasFlag(turnFlagDispatched):
 		sealReason = "dispatched"
-	case sealReason != "error" && !allowSilent && !turn.hasFlag(turnFlagNoAction) && (!exhausted || !turn.hasFlag(turnFlagStopped)):
-		e.addEvent(bg, turn.thread, condStr(!exhausted, "大脑本轮未能完成有效回复，已结束本轮，请重试", condStr(turn.hasFlag(turnFlagMutated), fmt.Sprintf("已完成部分操作（%s），但达到最大步数（%d 步）仍未发出最终回复，请确认后续安排", turn.opsText(), maxAPIRouterSteps), fmt.Sprintf("本轮已达最大工具步数（%d 步）仍未发出最终回复，已结束本轮，请重试或补充说明", maxAPIRouterSteps))), trig.ID, "error")
+	case sealReason != "error" && !allowSilent && !turn.hasFlag(turnFlagNoAction) && (!res.Exhausted || !turn.hasFlag(turnFlagStopped)):
+		e.addEvent(bg, turn.thread, condStr(!res.Exhausted, "大脑本轮未能完成有效回复，已结束本轮，请重试", condStr(turn.hasFlag(turnFlagMutated), fmt.Sprintf("已完成部分操作（%s），但达到最大步数（%d 步）仍未发出最终回复，请确认后续安排", turn.opsText(), maxAPIRouterSteps), fmt.Sprintf("本轮已达最大工具步数（%d 步）仍未发出最终回复，已结束本轮，请重试或补充说明", maxAPIRouterSteps))), trig.ID, "error")
 		sealReason = "error"
 	}
 }

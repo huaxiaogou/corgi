@@ -82,81 +82,60 @@ func (e *Engine) runAPIDream(d *dreamRun) {
 		{Role: "system", Content: apiDreamSystemPromptV1},
 		{Role: "user", Content: e.buildAPIDreamUserMessage(dreamCtx, d.at)},
 	}
-	tools := apiDreamToolDefs()
-	totalCalls, nudgedFinish := 0, false
-
-	for step := 0; step < maxAPIDreamSteps; step++ {
-		if dreamCtx.Err() != nil {
-			errMsg = oneLineClip(dreamCtx.Err().Error(), 120)
-			return
-		}
-		e.mu.Lock()
-		if e.dream == d {
-			d.step = step + 1
-		}
-		e.mu.Unlock()
-
-		resp, err := e.llm.ChatCompletion(dreamCtx, cfg, LLMChatRequest{
-			Model: modelName, Messages: messages, Tools: tools,
-			ReasoningEffort: effort, PromptCacheKey: cacheKey + ":dream",
-			Stream: true, StreamOptions: &LLMStreamOptions{IncludeUsage: true},
-		})
-		if err != nil {
-			errMsg, errIsAuth = oneLineClip(err.Error(), 140), errors.Is(err, ErrLLMAuth)
-			e.logger.Warn("api dream llm call failed", "id", d.id, "step", step+1, "model", modelName, "effort", effort, "err", err)
-			return
-		}
-		choice := resp.Choices[0].Message
-		e.logLLMStep("api dream step", "id", d.id, step+1, modelName, effort, resp, choice.ToolCalls)
-
-		if len(choice.ToolCalls) == 0 {
-			if !nudgedFinish && step < maxAPIDreamSteps-1 {
-				nudgedFinish = true
-				messages = append(messages,
-					LLMMessage{Role: "assistant", Content: strings.TrimSpace(choice.Content), ReasoningContent: choice.ReasoningContent},
-					LLMMessage{Role: "user", Content: "请调用 finish_dream 工具，提供 summary 与 journal 落盘本次做梦日志以结束任务。"},
-				)
-				continue
+	res := e.runLLMToolLoop(dreamCtx, llmToolLoopConfig{
+		ClientCfg:             cfg,
+		Model:                 modelName,
+		Effort:                effort,
+		CacheKey:              cacheKey + ":dream",
+		Tools:                 apiDreamToolDefs(),
+		Messages:              messages,
+		MaxSteps:              maxAPIDreamSteps,
+		MaxToolCalls:          maxAPIDreamToolCalls,
+		MaxToolOutputRunes:    maxAPIDreamToolOutputRunes,
+		LogLabel:              "api dream step",
+		LogIDKey:              "id",
+		LogIDVal:              d.id,
+		MaxBareTextRetries:    1,
+		BareTextKeepAssistant: true,
+		BareTextNudge: func(int) string {
+			return "请调用 finish_dream 工具，提供 summary 与 journal 落盘本次做梦日志以结束任务。"
+		},
+		FinalStepNudge: func() (string, bool) {
+			return "即将达到最大整理步数，请立即调用 finish_dream 落盘本次做梦日志。", false
+		},
+		IsClosingTool:    func(name string) bool { return name == "finish_dream" },
+		ToolBudgetErrMsg: "工具调用次数已达上限，请立即调用 finish_dream 落盘本次做梦日志。",
+		OnStepStart: func(step int) {
+			e.mu.Lock()
+			if e.dream == d {
+				d.step = step + 1
 			}
-			errMsg = "模型未调用 finish_dream 完成日志落盘"
-			return
-		}
-
-		messages = append(messages, LLMMessage{Role: "assistant", Content: choice.Content, ReasoningContent: choice.ReasoningContent, ToolCalls: choice.ToolCalls})
-		for _, tc := range choice.ToolCalls {
-			totalCalls++
+			e.mu.Unlock()
+		},
+		OnToolStart: func(_ int, tc LLMToolCall) {
 			e.mu.Lock()
 			if e.dream == d {
 				d.lastTool = tc.Function.Name
 			}
 			e.mu.Unlock()
-
-			var (
-				toolOut string
-				done    bool
-			)
-			if totalCalls > maxAPIDreamToolCalls && tc.Function.Name != "finish_dream" {
-				toolOut = toolErr("工具调用次数已达上限，请立即调用 finish_dream 落盘本次做梦日志。")
-			} else {
-				toolOut, done = e.execAPIDreamTool(d, tc)
-			}
-			if strings.Contains(toolOut, `"ok":false`) {
-				e.logger.Warn("api dream tool rejected", "id", d.id, "step", step+1, "tool", tc.Function.Name, "result", oneLineClip(toolOut, 240))
-			}
-			messages = append(messages, LLMMessage{
-				Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name,
-				Content: clipRunes(toolOut, maxAPIDreamToolOutputRunes, "...[truncated]"),
-			})
-			if done {
-				ok = true
-				return
-			}
+		},
+		ExecTool: func(_ int, tc LLMToolCall) (string, bool) {
+			return e.execAPIDreamTool(d, tc)
+		},
+	})
+	switch {
+	case res.EarlyExit:
+		ok = true
+	case res.Err != nil:
+		if dreamCtx.Err() != nil && res.FailedStep == res.StepsRun {
+			errMsg = oneLineClip(dreamCtx.Err().Error(), 120)
+		} else {
+			errMsg, errIsAuth = oneLineClip(res.Err.Error(), 140), errors.Is(res.Err, ErrLLMAuth)
+			e.logger.Warn("api dream llm call failed", "id", d.id, "step", res.FailedStep, "model", modelName, "effort", effort, "err", res.Err)
 		}
-		if step == maxAPIDreamSteps-2 {
-			messages = append(messages, LLMMessage{Role: "user", Content: "即将达到最大整理步数，请立即调用 finish_dream 落盘本次做梦日志。"})
-		}
-	}
-	if !ok && errMsg == "" {
+	case res.NoToolExit:
+		errMsg = "模型未调用 finish_dream 完成日志落盘"
+	default:
 		errMsg = fmt.Sprintf("达到最大步数（%d 步）仍未完成做梦落盘", maxAPIDreamSteps)
 	}
 }

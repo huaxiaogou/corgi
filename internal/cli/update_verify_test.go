@@ -23,14 +23,10 @@ func setupCLITestDir(t *testing.T, serverURL string) string {
 	return dir
 }
 
-func TestCmdVerifyAndUpdateCheck(t *testing.T) {
-	var gotVerify map[string]any
+func TestCmdUpdateCheckDoesNotTriggerFleetUpdate(t *testing.T) {
 	var fleetCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/super/verify":
-			_ = json.NewDecoder(r.Body).Decode(&gotVerify)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "worker": gotVerify["worker"]})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/version":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"version": "v0.1.64",
@@ -52,13 +48,6 @@ func TestCmdVerifyAndUpdateCheck(t *testing.T) {
 	defer srv.Close()
 
 	dir := setupCLITestDir(t, srv.URL)
-
-	if err := Run(dir, "verify", []string{"--review", "--reviewer", "codex", "--send", "w-1"}); err != nil {
-		t.Fatalf("corgi verify failed: %v", err)
-	}
-	if gotVerify["worker"] != "w-1" || gotVerify["review"] != true || gotVerify["reviewer"] != "codex" || gotVerify["send"] != true {
-		t.Fatalf("unexpected verify payload: %+v", gotVerify)
-	}
 
 	if err := Run(dir, "update", []string{"--check"}); err != nil {
 		t.Fatalf("corgi update --check failed: %v", err)

@@ -17,7 +17,7 @@ cmd/corgi
               ├── internal/channel/wecom  (企微 WSS 协议、加解密与卡片拼装)
               └── internal/core           (仅通过 ChannelSink 接口回调，严禁 import channel/*)
                     ├── internal/fleet    (多机 yamux 隧道、配对鉴权；仅 auth 依赖 store)
-                    ├── internal/gitwt    (git worktree 隔离与只读核验)
+                    ├── internal/gitwt    (git worktree 隔离与清理)
                     ├── internal/runtime/{herdr,agent,codex}
                     └── internal/store
                           └── internal/model   (纯领域模型，零内部依赖)

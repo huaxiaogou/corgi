@@ -235,8 +235,7 @@ func (s *Server) WatchEndings(ctx context.Context) {
 		nowLive := map[string]bool{}
 		for _, a := range st.Agents {
 			nowLive[a.PaneID] = true
-			if a.Name == model.RouterName || a.WorkspaceLabel == model.RouterLabel ||
-				a.Name == model.DreamName || a.WorkspaceLabel == model.DreamLabel || a.Session == "" {
+			if a.Name == model.RouterName || a.Name == model.DreamName || a.Session == "" {
 				delete(prev, a.PaneID)
 				continue
 			}

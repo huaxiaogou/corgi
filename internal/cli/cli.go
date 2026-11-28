@@ -22,7 +22,6 @@ var Commands = map[string]func(corgiDir string, args []string) error{
 	"say":       cmdSay,
 	"spawn":     cmdSpawn,
 	"send":      cmdSend,
-	"verify":    cmdVerify,
 	"report":    cmdReport,
 	"subscribe": cmdSubscribe,
 	"stop":      cmdStop,
@@ -652,31 +651,6 @@ func cmdPair(dir string, args []string) error {
 	fleet.PrintQR(os.Stdout, u)
 	fmt.Printf("\n  %s\n\n", u)
 	return nil
-}
-
-func cmdVerify(dir string, args []string) error {
-	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
-	review := fs.Bool("review", false, "run read-only cross-model diff review after checks")
-	reviewer := fs.String("reviewer", "", "reviewer CLI: codex or claude (default auto)")
-	cmdStr := fs.String("cmd", "", "override auto-detected check command")
-	send := fs.Bool("send", false, "bounce failure or blocking review findings straight back to worker")
-	if err := parseInterspersed(fs, args); err != nil {
-		return err
-	}
-	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: corgi verify [--review] [--reviewer codex|claude] [--cmd \"...\"] [--send] <worker>")
-	}
-	out, err := apiCallWithTimeout(dir, http.MethodPost, "/api/super/verify", map[string]any{
-		"worker":   fs.Arg(0),
-		"cmd":      *cmdStr,
-		"review":   *review,
-		"reviewer": *reviewer,
-		"send":     *send,
-	}, 5*time.Minute)
-	if len(out) > 0 {
-		fmt.Println(strings.TrimSpace(string(out)))
-	}
-	return err
 }
 
 type versionResponse struct {
