@@ -120,7 +120,7 @@ func (e *Engine) runAPIDream(d *dreamRun) {
 			if !nudgedFinish && step < maxAPIDreamSteps-1 {
 				nudgedFinish = true
 				messages = append(messages,
-					LLMMessage{Role: "assistant", Content: strings.TrimSpace(choice.Content)},
+					LLMMessage{Role: "assistant", Content: strings.TrimSpace(choice.Content), ReasoningContent: choice.ReasoningContent},
 					LLMMessage{Role: "user", Content: "请调用 finish_dream 工具，提供 summary 与 journal 落盘本次做梦日志以结束任务。"},
 				)
 				continue
@@ -129,7 +129,7 @@ func (e *Engine) runAPIDream(d *dreamRun) {
 			return
 		}
 
-		messages = append(messages, LLMMessage{Role: "assistant", Content: choice.Content, ToolCalls: choice.ToolCalls})
+		messages = append(messages, LLMMessage{Role: "assistant", Content: choice.Content, ReasoningContent: choice.ReasoningContent, ToolCalls: choice.ToolCalls})
 		for _, tc := range choice.ToolCalls {
 			totalCalls++
 			e.mu.Lock()

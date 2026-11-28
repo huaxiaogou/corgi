@@ -311,7 +311,7 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 			break
 		}
 		forceTools, nudgeIdx = false, -1
-		messages = append(messages, LLMMessage{Role: "assistant", Content: choice.Content, ToolCalls: choice.ToolCalls})
+		messages = append(messages, LLMMessage{Role: "assistant", Content: choice.Content, ReasoningContent: choice.ReasoningContent, ToolCalls: choice.ToolCalls})
 		earlyExit, stepHadErr := false, false
 		for _, tc := range choice.ToolCalls {
 			totalCalls++

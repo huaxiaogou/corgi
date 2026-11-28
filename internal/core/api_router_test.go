@@ -731,6 +731,9 @@ func TestLLMClientSSEStreamingToolsStallAndFallback(t *testing.T) {
 	if resp.Choices[0].Message.Content != "" {
 		t.Fatalf("reasoning_content must NOT leak into Message.Content, got %q", resp.Choices[0].Message.Content)
 	}
+	if resp.Choices[0].Message.ReasoningContent != "深度思考1深度思考2深度思考3" {
+		t.Fatalf("expected accumulated reasoning_content, got %q", resp.Choices[0].Message.ReasoningContent)
+	}
 	if len(resp.Choices[0].Message.ToolCalls) != 1 || resp.Choices[0].Message.ToolCalls[0].Function.Name != "reply_user" ||
 		resp.Choices[0].Message.ToolCalls[0].Function.Arguments != `{"text":"好了"}` {
 		t.Fatalf("unexpected assembled tool calls: %+v", resp.Choices[0].Message.ToolCalls)

@@ -35,11 +35,12 @@ type (
 		Function LLMToolFunctionCall `json:"function"`
 	}
 	LLMMessage struct {
-		Role       string        `json:"role"` // system | user | assistant | tool
-		Content    any           `json:"content,omitempty"`
-		ToolCalls  []LLMToolCall `json:"tool_calls,omitempty"`
-		ToolCallID string        `json:"tool_call_id,omitempty"`
-		Name       string        `json:"name,omitempty"`
+		Role             string        `json:"role"` // system | user | assistant | tool
+		Content          any           `json:"content,omitempty"`
+		ReasoningContent string        `json:"reasoning_content,omitempty"`
+		ToolCalls        []LLMToolCall `json:"tool_calls,omitempty"`
+		ToolCallID       string        `json:"tool_call_id,omitempty"`
+		Name             string        `json:"name,omitempty"`
 	}
 	LLMToolFunctionSpec struct {
 		Name        string         `json:"name"`
@@ -79,9 +80,10 @@ type (
 		Index        int    `json:"index"`
 		FinishReason string `json:"finish_reason"`
 		Message      struct {
-			Role      string        `json:"role"`
-			Content   string        `json:"content"`
-			ToolCalls []LLMToolCall `json:"tool_calls,omitempty"`
+			Role             string        `json:"role"`
+			Content          string        `json:"content"`
+			ReasoningContent string        `json:"reasoning_content,omitempty"`
+			ToolCalls        []LLMToolCall `json:"tool_calls,omitempty"`
 		} `json:"message"`
 	}
 	LLMChatResponse struct {
@@ -250,13 +252,13 @@ func parseLLMStreamResponse(body io.Reader, apiKey string, start time.Time, onAc
 	}
 
 	var (
-		out          LLMChatResponse
-		contentBuf   strings.Builder
-		finishReason string
-		sawDone      bool
-		sawAnyChunk  bool
-		tcByIdx      = map[int]*toolAcc{}
-		lastIdx      = -1
+		out                      LLMChatResponse
+		contentBuf, reasoningBuf strings.Builder
+		finishReason             string
+		sawDone                  bool
+		sawAnyChunk              bool
+		tcByIdx                  = map[int]*toolAcc{}
+		lastIdx                  = -1
 	)
 	for {
 		line, err := reader.ReadString('\n')
@@ -289,6 +291,7 @@ func parseLLMStreamResponse(body io.Reader, apiKey string, start time.Time, onAc
 					}
 					finishReason = orStr(ch.FinishReason, finishReason)
 					contentBuf.WriteString(ch.Delta.Content)
+					reasoningBuf.WriteString(ch.Delta.ReasoningContent)
 					for _, dtc := range ch.Delta.ToolCalls {
 						idx := lastIdx
 						if dtc.Index != nil {
@@ -328,6 +331,7 @@ func parseLLMStreamResponse(body io.Reader, apiKey string, start time.Time, onAc
 	choice.FinishReason = finishReason
 	choice.Message.Role = "assistant"
 	choice.Message.Content = contentBuf.String()
+	choice.Message.ReasoningContent = reasoningBuf.String()
 	idxs := make([]int, 0, len(tcByIdx))
 	for idx := range tcByIdx {
 		idxs = append(idxs, idx)
