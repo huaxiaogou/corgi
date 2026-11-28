@@ -175,49 +175,6 @@ func (s *Store) RerouteTriggerTarget(ctx context.Context, id, oldTarget, newTarg
 	return tx.Commit()
 }
 
-// PrependTriggerText transactionally prepends prefix to a queued trigger's Text without
-// clobbering concurrent status/target updates. Idempotently no-ops if prefix is already present.
-func (s *Store) PrependTriggerText(ctx context.Context, id, prefix string) error {
-	prefix = strings.TrimSpace(prefix)
-	if prefix == "" {
-		return nil
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin prepend trigger text %s: %w", id, err)
-	}
-	defer tx.Rollback()
-
-	var raw string
-	err = tx.QueryRowContext(ctx, `SELECT data FROM triggers WHERE id = ?`, id).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read trigger %s: %w", id, err)
-	}
-	var t model.Trigger
-	if err := json.Unmarshal([]byte(raw), &t); err != nil {
-		return fmt.Errorf("decode trigger %s: %w", id, err)
-	}
-	if t.Status != "queued" || strings.HasPrefix(t.Text, prefix) {
-		return nil
-	}
-	if strings.TrimSpace(t.Text) == "" {
-		t.Text = prefix
-	} else {
-		t.Text = prefix + "\n\n" + t.Text
-	}
-	data, err := mustJSON(&t)
-	if err != nil {
-		return fmt.Errorf("encode trigger %s: %w", id, err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE triggers SET data = ? WHERE id = ?`, data, id); err != nil {
-		return fmt.Errorf("prepend trigger text %s: %w", id, err)
-	}
-	return tx.Commit()
-}
-
 // GetTriggerByIdemKey loads an existing trigger by its unique non-empty idempotency key.
 func (s *Store) GetTriggerByIdemKey(ctx context.Context, idemKey string) (*model.Trigger, error) {
 	idemKey = strings.TrimSpace(idemKey)

@@ -447,7 +447,6 @@ func (e *Engine) prepareRouterModeSwitch(ctx context.Context, prevMode, nextMode
 	e.mu.Unlock()
 
 	if prevMode == "api" && nextMode == "pty" {
-		e.invalidateAllAutoVerify()
 		e.cancelAndSettleAPIRouterTurn(ctx, "", false)
 		return nil
 	}
@@ -1020,11 +1019,6 @@ func (e *Engine) formatAPIToolProgress(ctx context.Context, tc LLMToolCall) stri
 			return "正在向" + lbl + "发送跟进指令…"
 		}
 		return "正在发送跟进指令…"
-	case "verify_worker":
-		if lbl := matterLabel("", strArg("worker")); lbl != "" {
-			return "正在验收" + lbl + "的代码改动…"
-		}
-		return "正在执行代码验收…"
 	case "manage_work":
 		switch strArg("action") {
 		case "stop_worker":

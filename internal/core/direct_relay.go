@@ -566,7 +566,6 @@ func (e *Engine) SendDirectWorkerMessage(ctx context.Context, req DirectWorkerRe
 		return w, resumed, fmt.Errorf("worker %q 正在休眠，请稍后重试", w.Name)
 	}
 	defer e.endWorkerOp(w.Name)
-	e.invalidateWorkerAutoVerify(w.Name, true)
 
 	var slot *pendingDirectTurn
 	if req.OnDone != nil {

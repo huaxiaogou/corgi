@@ -275,11 +275,6 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	if err != nil {
 		return nil, err
 	}
-	if strings.EqualFold(strings.TrimSpace(req.Mode), "implement") {
-		e.markWorkerImplementDispatched(wk.Name)
-	} else {
-		e.invalidateWorkerAutoVerify(wk.Name, true)
-	}
 	if createdDraftTitle && wk.WorkItemID != "" {
 		_ = e.store.SetWorkItemTitleState(ctx, wk.WorkItemID, store.WorkItemTitleDraft)
 	}
@@ -384,9 +379,7 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		}
 		brief := fmt.Sprintf("[corgi task · worker=%s · thread=%s]\n%s%s\n\nHow this works:\n- Report completion with `%s report \"outcome summary & file paths\"`.\n- If blocked on a decision only the human can make or repeated failures, report `BLOCKED: <need> · tried: <attempts> · recommendation: <choice>`.%s",
 			name, thread, strings.TrimSpace(req.Task), extraCtx.String(), workerBin, worktreePromptNote(wtPrep))
-		if bTrig, bErr := e.IngestWithMeta(lctx, "router", thread, model.RouterName, brief, "", name, name, TriggerMeta{WorkItemID: wk.WorkItemID}); bErr == nil && bTrig != nil && strings.EqualFold(strings.TrimSpace(req.Mode), "implement") {
-			e.setWorkerAutoVerifyMinSeq(wk.Name, bTrig.Seq)
-		}
+		_, _ = e.IngestWithMeta(lctx, "router", thread, model.RouterName, brief, "", name, name, TriggerMeta{WorkItemID: wk.WorkItemID})
 	}()
 
 	select {
@@ -906,7 +899,6 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 		}
 	}
 	e.touchWorkerActivity(wk.Name)
-	e.invalidateWorkerAutoVerify(wk.Name, true)
 
 	verb := "新建受管任务"
 	if req.SessionID != "" {
@@ -976,10 +968,6 @@ func (e *Engine) SendToWorkerWithWork(ctx context.Context, workerName, thread, t
 // SendToWorkerWithWorkTitle steers an active or newly-adopted worker while ensuring durable
 // work-item linkage, using explicit workTitle when creating a brand-new work item.
 func (e *Engine) SendToWorkerWithWorkTitle(ctx context.Context, workerName, thread, text, workID, workTitle string) (*model.Trigger, string, error) {
-	return e.sendToWorkerInternal(ctx, workerName, thread, text, workID, workTitle, false, false)
-}
-
-func (e *Engine) sendToWorkerInternal(ctx context.Context, workerName, thread, text, workID, workTitle string, markImplement, keepAutoVerifyGen bool) (*model.Trigger, string, error) {
 	e.waitWorkerGCIdle(ctx, workerName, 3*time.Second)
 	if !e.beginWorkerOp(workerName) {
 		return nil, "", fmt.Errorf("worker %q is hibernating; retry or resume session", workerName)
@@ -1048,19 +1036,11 @@ func (e *Engine) sendToWorkerInternal(ctx context.Context, workerName, thread, t
 	if prevBranch != "" && wi != nil {
 		_ = e.store.RecordWorkItemBranch(ctx, wi.ID, prevBranch)
 	}
-	if markImplement {
-		e.markWorkerImplementDispatched(wk.Name)
-	} else if !keepAutoVerifyGen {
-		e.invalidateWorkerAutoVerify(wk.Name, true)
-	}
 	trig, err := e.IngestWithMeta(ctx, "router", thread, model.RouterName, text, "", wk.Name, wk.Name, TriggerMeta{WorkItemID: wk.WorkItemID})
 	if err != nil {
 		return nil, "", err
 	}
 	if trig != nil {
-		if markImplement {
-			e.setWorkerAutoVerifyMinSeq(wk.Name, trig.Seq)
-		}
 		e.recordWorkerIssued(wk, trig.ID, trig.Seq)
 	}
 	return trig, wk.WorkItemID, nil
@@ -1215,7 +1195,6 @@ func (e *Engine) StopWorker(ctx context.Context, workerName string) error {
 	if err != nil {
 		return fmt.Errorf("worker %q not found", workerName)
 	}
-	e.invalidateWorkerAutoVerify(wk.Name, true)
 	if wk.Session == "" && wk.PaneID != "" {
 		if sess := e.lookupRemoteSession(ctx, wk.PaneID); sess != "" {
 			wk.Session = sess

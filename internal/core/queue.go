@@ -98,7 +98,6 @@ func (e *Engine) SubmitPanePrompt(ctx context.Context, target, text, mode string
 	if workerName != "" {
 		defer e.endWorkerOp(workerName)
 	}
-	e.invalidateWorkerAutoVerifyByTarget(ctx, target, paneID)
 	mode = strings.ToLower(strings.TrimSpace(mode))
 
 	if mode == "steer" {
@@ -183,7 +182,6 @@ func (e *Engine) SteerPanePrompt(ctx context.Context, target, qid string) (*mode
 	if e.fleet == nil {
 		return nil, fmt.Errorf("fleet not configured")
 	}
-	e.invalidateWorkerAutoVerifyByTarget(ctx, target, paneID)
 	sendText, hadConstraint := e.decorateDirectPrompt(ctx, paneID, item.Text)
 	if err := e.fleet.Prompt(ctx, paneID, sendText); err != nil {
 		return nil, err
@@ -602,7 +600,6 @@ func (e *Engine) drainPanePrompts(ctx context.Context, rawAgents []model.Agent) 
 			continue
 		}
 		first := items[0]
-		e.invalidateWorkerAutoVerifyByTarget(ctx, "", paneID)
 		sendText, hadConstraint := e.decorateDirectPrompt(ctx, paneID, first.Text)
 		err := e.fleet.Prompt(ctx, paneID, sendText)
 		if err != nil {

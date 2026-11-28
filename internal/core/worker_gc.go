@@ -410,13 +410,6 @@ func (e *Engine) effectiveWorkerIdle(w *model.Worker, now time.Time) (time.Durat
 	return now.Sub(base), true
 }
 
-func (e *Engine) hasAutoVerifyInFlight(workerName string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	st := e.autoVerify[workerName]
-	return st != nil && st.inFlight
-}
-
 func (e *Engine) recordWorkerGCFailBackoff(workerName string, now time.Time) {
 	if workerName == "" {
 		return
@@ -633,7 +626,7 @@ func (e *Engine) selectWorkerGCCandidates(
 		if e.inWorkerGCFailBackoff(w.Name, now) {
 			continue
 		}
-		if e.isWorkerGCClosing(w.Name) || e.isHealingBypassWorker(w.Name, w.PaneID) || e.hasAutoVerifyInFlight(w.Name) {
+		if e.isWorkerGCClosing(w.Name) || e.isHealingBypassWorker(w.Name, w.PaneID) {
 			continue
 		}
 		if e.hasDirectTurn(w.Name) || e.hasWorkerPendingCheck(w.Name, now) || e.hasWorkerStartupCheck(w.Name) {
@@ -859,7 +852,7 @@ func (e *Engine) hibernateWorker(ctx context.Context, cand workerGCCandidate) {
 	if wk.PaneID == "" || wk.PaneID != cand.paneID || wk.WorkspaceID == "" || wk.WorkspaceID != cand.workspaceID {
 		return
 	}
-	if e.isHealingBypassWorker(wk.Name, wk.PaneID) || e.hasAutoVerifyInFlight(wk.Name) ||
+	if e.isHealingBypassWorker(wk.Name, wk.PaneID) ||
 		e.hasDirectTurn(wk.Name) || e.hasWorkerPendingCheck(wk.Name, now) || e.hasWorkerStartupCheck(wk.Name) {
 		return
 	}
@@ -1089,7 +1082,6 @@ func (e *Engine) finalizeHibernatedWorker(ctx context.Context, wk *model.Worker,
 		e.clearConstraintDelivered(wk.PaneID)
 	}
 	e.clearWorkerTurnState(wk.Name)
-	e.invalidateWorkerAutoVerify(wk.Name, true)
 
 	note := "上下文与目录已保留，可随时续接"
 	if wk.Session == "" {

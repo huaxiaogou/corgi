@@ -115,7 +115,7 @@ func isPrototypeOrReadonlyWorkItem(wi *model.WorkItem) bool {
 	}
 }
 
-// apiRouterToolDefs returns the 9 deterministic, strictly ordered native Go tool definitions
+// apiRouterToolDefs returns the 8 deterministic, strictly ordered native Go tool definitions
 // so the static system+tools prefix consistently hits prompt_cache_key.
 func apiRouterToolDefs() []LLMToolDef {
 	return []LLMToolDef{
@@ -266,23 +266,6 @@ func apiRouterToolDefs() []LLMToolDef {
 				},
 			},
 		},
-		{
-			Type: "function",
-			Function: LLMToolFunctionSpec{
-				Name:        "verify_worker",
-				Description: "对指定 Worker 的 worktree 执行仓库自动检测的构建/测试验证，可选独立代码审查。",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"worker":       map[string]any{"type": "string", "description": "目标 Worker 名称"},
-						"review":       map[string]any{"type": "boolean", "description": "是否启用独立审查"},
-						"reviewer":     map[string]any{"type": "string", "enum": []string{"codex", "claude"}, "description": "独立审查器"},
-						"send_on_fail": map[string]any{"type": "boolean", "description": "失败时是否自动发回 Worker 修复（需具备 implement 授权）"},
-					},
-					"required": []string{"worker"},
-				},
-			},
-		},
 	}
 }
 
@@ -308,8 +291,6 @@ func (e *Engine) execAPIRouterTool(ctx context.Context, turn *apiRouterTurn, tri
 		return e.toolDispatchWork(ctx, turn, trig, meta, tc.Function.Arguments), false
 	case "steer_worker":
 		return e.toolSteerWorker(ctx, turn, trig, meta, tc.Function.Arguments), false
-	case "verify_worker":
-		return e.toolVerifyWorker(ctx, turn, trig, meta, tc.Function.Arguments), false
 	case "manage_work":
 		return e.toolManageWork(ctx, turn, trig, tc.Function.Arguments), false
 	case "manage_timer":
@@ -567,15 +548,13 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		}
 		effWorkID := wk.WorkItemID
 		if goal != "" {
-			_, boundWI, sendErr := e.sendToWorkerInternal(ctx, wk.Name, turn.thread, goal, targetWorkID, "", mode == "implement", false)
+			_, boundWI, sendErr := e.SendToWorkerWithWork(ctx, wk.Name, turn.thread, goal, targetWorkID)
 			if sendErr != nil {
 				return toolErr("续聊已打开但发送任务失败：" + sendErr.Error())
 			}
 			if boundWI != "" {
 				effWorkID = boundWI
 			}
-		} else if mode == "implement" {
-			e.markWorkerImplementDispatched(wk.Name)
 		}
 		if effWorkID != "" {
 			e.updateWorkItemScopeOnDispatch(ctx, effWorkID, mode)
@@ -706,51 +685,6 @@ func (e *Engine) toolSteerWorker(ctx context.Context, turn *apiRouterTurn, trig 
 	turn.markDispatched()
 	e.ackAPITriggerOnce(context.Background(), turn, trig)
 	return toolJSON(map[string]any{"ok": true, "worker": name})
-}
-
-func (e *Engine) toolVerifyWorker(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, meta *turnConsentMeta, rawArgs string) string {
-	var args struct {
-		Worker     string `json:"worker"`
-		Review     bool   `json:"review"`
-		Reviewer   string `json:"reviewer"`
-		SendOnFail bool   `json:"send_on_fail"`
-	}
-	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
-		return toolErr("verify_worker 参数 JSON 无效：" + err.Error())
-	}
-	name := strings.TrimSpace(args.Worker)
-	if name == "" {
-		return toolErr("worker 不能为空")
-	}
-	wk, err := e.store.GetWorker(ctx, name)
-	if err != nil || wk == nil {
-		return toolErr("找不到 Worker：" + name)
-	}
-	if orStr(wk.Thread, model.MainThread) != turn.thread {
-		return toolErr("目标 Worker 不属于当前会话线程")
-	}
-	if args.SendOnFail {
-		if meta == nil || !meta.isHuman {
-			return toolErr("非人类直接指令禁止开启 send_on_fail 自动派发修复；请先不带 send_on_fail 执行验收，再视结果汇报或发确认卡。")
-		}
-		e.recordAPIRouterInflight(context.Background(), trig, "verify_worker", name)
-	}
-
-	res, err := e.VerifyWorker(ctx, VerifyWorkerRequest{
-		Worker:   name,
-		Review:   args.Review,
-		Reviewer: strings.TrimSpace(args.Reviewer),
-		Send:     args.SendOnFail,
-	})
-	if err != nil {
-		return toolErr("验证失败：" + err.Error())
-	}
-	if args.SendOnFail && res.SentToWorker {
-		turn.markMutated("已将验证失败结果回弹给 #" + name)
-		turn.markDispatched()
-		e.ackAPITriggerOnce(context.Background(), turn, trig)
-	}
-	return toolJSON(map[string]any{"ok": true, "result": res})
 }
 
 func (e *Engine) toolManageWork(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, rawArgs string) string {

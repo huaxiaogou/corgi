@@ -40,8 +40,7 @@ const (
 5. 静默边界（严格按事件 response_mode 执行）：
    - 当本轮事件标注 response_mode=must_reply（人类发言、任务完结汇报、异常故障、用户提醒）时，严禁静默，必须调用 reply_user 向用户答复。
    - 仅当本轮事件标注 response_mode=optional_notify（后台巡检/晨检、外部 candidate 事件或纯进度播报）且确认无需要打扰用户的新事项时，调用 no_action(reason) 静默结束。
-6. 自动验收标签：若 Worker 汇报头部带有 [auto_verify: PASS / SKIPPED / FAIL ...]，那是 Hub 自动执行的构建与测试结果——PASS 可直接汇报验收通过的结论（无需重复跑基础检查），FAIL 时向用户说明具体失败项与后续建议。
-7. 工具与真实性约束：严禁编造不存在的文件路径、执行进程名称或执行结果；未亲眼收到对应工具调用成功前，严禁声称「已停止/已派发/已修改/已重跑」；向用户回复必须统一调用 reply_user 工具（禁止直接输出裸文本）。工具返回报错时请按提示修正参数后重试。`
+6. 工具与真实性约束：严禁编造不存在的文件路径、执行进程名称或执行结果；未亲眼收到对应工具调用成功前，严禁声称「已停止/已派发/已修改/已重跑」；向用户回复必须统一调用 reply_user 工具（禁止直接输出裸文本）。工具返回报错时请按提示修正参数后重试。`
 )
 
 func (e *Engine) buildAPIRouterMessages(ctx context.Context, trig *model.Trigger, meta *turnConsentMeta) []LLMMessage {

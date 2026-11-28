@@ -182,11 +182,6 @@ type Engine struct {
 	apiLastErr             string
 	apiAllowPrivateForTest bool
 
-	// Go-driven auto-verify bounce state for implement worktree workers (protected by mu).
-	autoVerify         map[string]*workerAutoVerify
-	autoVerifyReleased map[string]bool
-	autoVerifyFn       func(ctx context.Context, req VerifyWorkerRequest) (*VerifyWorkerResponse, error)
-
 	wakeCh                     chan struct{}
 	queueMu                    sync.Mutex
 	wtMu                       sync.Mutex
@@ -271,8 +266,6 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		watchdogMarks:       map[string]*watchdogMark{},
 		constraintRemindAt:  map[string]time.Time{},
 		workerTurns:         map[string]*workerTurnWatermark{},
-		autoVerify:          map[string]*workerAutoVerify{},
-		autoVerifyReleased:  map[string]bool{},
 		startedAt:           time.Now(),
 		gcClosing:           map[string]bool{},
 		gcClosingPane:       map[string]string{},

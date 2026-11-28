@@ -725,10 +725,6 @@ func (e *Engine) deliverQueuedWithFleet(ctx context.Context, live map[string]liv
 	apiMode := e.isAPIRouterMode()
 	for target, list := range batches {
 		if target == model.RouterName && apiMode {
-			list = e.filterAutoVerifyTriggers(ctx, live, list)
-			if len(list) == 0 {
-				continue
-			}
 			e.deliverAPIRouter(ctx, list)
 			continue
 		}
@@ -940,12 +936,6 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 		e.markConstraintDelivered(paneID)
 	}
 	if target != model.RouterName {
-		for _, t := range list {
-			if t.Source == "chat" || t.Source == "wecom" {
-				e.invalidateWorkerAutoVerify(target, true)
-				break
-			}
-		}
 		e.recordWorkerDelivered(target, paneID, list)
 		e.resetWorkerIdleByName(ctx, target)
 		if targetWorker != nil {
