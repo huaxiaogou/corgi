@@ -31,11 +31,10 @@ type nightlyDreamSlot struct {
 
 type dreamRun struct {
 	id, reason, apiErr, lastTool string
-	at, lastProgressAt           time.Time
+	at                           time.Time
 	recovered, apiDone, apiOK    bool
 	apiErrIsAuth                 bool
 	step                         int
-	cancel                       context.CancelFunc
 }
 
 func (e *Engine) loadActiveDreamMarker(ctx context.Context) {
@@ -196,7 +195,7 @@ func (e *Engine) StartDream(ctx context.Context, reason string) error {
 		e.mu.Unlock()
 		return fmt.Errorf("Corgi 正在整理记忆或升级中")
 	}
-	d := &dreamRun{id: now.Format("20060102-150405.000000000"), at: now, lastProgressAt: now, reason: reason}
+	d := &dreamRun{id: now.Format("20060102-150405.000000000"), at: now, reason: reason}
 	e.dream = d
 	e.mu.Unlock()
 

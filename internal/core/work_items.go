@@ -10,8 +10,6 @@ import (
 	"github.com/kiperjing/corgi/internal/store"
 )
 
-const maxInjectedWorkItems = 12
-
 // DeriveWorkItemTitle returns a clean human-readable title for a newly created WorkItem along with
 // isDraft=true when the title was heuristically cleaned from raw prompt text rather than distilled
 // via an explicit --title from Router/human.

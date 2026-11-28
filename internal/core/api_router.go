@@ -33,7 +33,7 @@ const (
 
 type routerState struct {
 	turn                                     *apiRouterTurn
-	turnGen, configEpoch                     uint64
+	configEpoch                              uint64
 	backoffUntil                             time.Time
 	failCount, sameTriggerFails              int
 	lastFailTriggerID, lastErr, pendingAckID string
@@ -48,11 +48,10 @@ func (s *routerState) resetFailuresLocked(bumpEpoch bool) {
 }
 
 type apiRouterTurn struct {
-	gen, configEpoch  uint64
+	configEpoch       uint64
 	thread, triggerID string
 	cancel            context.CancelFunc
 	done              chan struct{}
-	startedAt         time.Time
 	flags             atomic.Uint32
 	mu                sync.Mutex
 	summaryOps        []string
@@ -198,8 +197,7 @@ func (e *Engine) deliverAPIRouter(ctx context.Context, list []*model.Trigger) {
 		rootCtx = context.Background()
 	}
 	turnCtx, cancel := context.WithTimeout(rootCtx, apiRouterTurnDeadline)
-	e.router.turnGen++
-	turn := &apiRouterTurn{gen: e.router.turnGen, configEpoch: e.router.configEpoch, thread: orStr(strings.TrimSpace(trig.Thread), model.MainThread), triggerID: trig.ID, cancel: cancel, done: make(chan struct{}), startedAt: now}
+	turn := &apiRouterTurn{configEpoch: e.router.configEpoch, thread: orStr(strings.TrimSpace(trig.Thread), model.MainThread), triggerID: trig.ID, cancel: cancel, done: make(chan struct{})}
 	e.router.turn = turn
 	e.mu.Unlock()
 	e.notifyChanged()

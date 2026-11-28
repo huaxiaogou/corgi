@@ -24,7 +24,6 @@ type activeWeComStream struct {
 	chatID             string
 	thread             string
 	cancel             context.CancelFunc
-	startedAt          time.Time
 	initThink          string
 	thinkPrefix        string
 	workerName         string
@@ -32,15 +31,14 @@ type activeWeComStream struct {
 	inFocusMode        bool
 	currentFocusWorker string
 
-	pollMu       sync.Mutex
-	triggerID    string
-	entryID      string
-	apiProgress  string
-	locateFn     func(context.Context) (string, agent.Adapter)
-	tr           *agent.TranscriptReader
-	lastPath     string
-	baselineAt   int64
-	lastChangeAt time.Time
+	pollMu      sync.Mutex
+	triggerID   string
+	entryID     string
+	apiProgress string
+	locateFn    func(context.Context) (string, agent.Adapter)
+	tr          *agent.TranscriptReader
+	lastPath    string
+	baselineAt  int64
 }
 
 func (st *activeWeComStream) setAPIProgress(think string) {
@@ -49,7 +47,6 @@ func (st *activeWeComStream) setAPIProgress(think string) {
 	}
 	st.pollMu.Lock()
 	st.apiProgress = strings.TrimSpace(think)
-	st.lastChangeAt = time.Now()
 	st.pollMu.Unlock()
 }
 
@@ -112,13 +109,11 @@ func (b *Bus) startRouterStream(ctx context.Context, thread, chatID, reqID strin
 	sess := wecom.NewStreamSession(reqID, chatID, b.sendStreamFn)
 	initThink := "正在思考并分析你的请求…"
 	st := &activeWeComStream{
-		session:      sess,
-		chatID:       chatID,
-		thread:       thread,
-		cancel:       cancel,
-		startedAt:    time.Now(),
-		initThink:    initThink,
-		lastChangeAt: time.Now(),
+		session:   sess,
+		chatID:    chatID,
+		thread:    thread,
+		cancel:    cancel,
+		initThink: initThink,
 	}
 
 	// Send Frame 1 immediately so WeCom shows native "思考中..." within ~100ms.
@@ -165,14 +160,12 @@ func (b *Bus) openWorkerStream(ctx context.Context, thread, chatID, reqID, worke
 		chatID:             chatID,
 		thread:             thread,
 		cancel:             cancel,
-		startedAt:          time.Now(),
 		initThink:          initThink,
 		thinkPrefix:        thinkPrefix,
 		workerName:         workerName,
 		workerTitle:        strings.TrimSpace(workerTitle),
 		inFocusMode:        inFocusMode,
 		currentFocusWorker: strings.TrimSpace(currentFocusWorker),
-		lastChangeAt:       time.Now(),
 	}
 	if err := sess.SendProgress(watchCtx, initThink, "", true); err != nil {
 		b.logger.Debug("send initial wecom worker stream frame failed", "worker", workerName, "err", err)
@@ -270,9 +263,6 @@ func (st *activeWeComStream) attachLocalTranscript(ctx context.Context, isBaseli
 		st.lastPath = p
 		st.tr = tr
 		st.baselineAt = baseAt
-		if !isBaseline {
-			st.lastChangeAt = time.Now()
-		}
 	}
 	st.pollMu.Unlock()
 }
@@ -302,11 +292,6 @@ func (st *activeWeComStream) pollLocalThink(ctx context.Context, recheckPath boo
 		baseAt = -1
 		st.pollMu.Lock()
 		st.baselineAt = -1
-		st.pollMu.Unlock()
-	}
-	if polled {
-		st.pollMu.Lock()
-		st.lastChangeAt = time.Now()
 		st.pollMu.Unlock()
 	}
 	recent := filterMessagesAfterOffset(msgs, baseAt)
@@ -373,11 +358,6 @@ func (b *Bus) takeRouterStream(thread string) *activeWeComStream {
 	}
 	return st
 }
-
-// OnRouterTurnEnd satisfies core.ChannelSink. Passive Router streams are sealed by OnReply
-// or by watchRouterStream's continuous-idle safety guard so brief mid-turn tool flickers
-// never prematurely split a WeCom reply into two bubbles.
-func (b *Bus) OnRouterTurnEnd(context.Context) {}
 
 // OnAPIRouterProgress pushes clean, live step/tool progress from the in-process API Router
 // into the matching WeCom stream bubble (replacing any PTY transcript polling).

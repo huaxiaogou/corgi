@@ -56,18 +56,11 @@ func (e *Engine) runAPIDream(d *dreamRun) {
 	dreamCtx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
 
-	e.mu.Lock()
-	if e.dream == d {
-		d.cancel = cancel
-		d.lastProgressAt = time.Now()
-	}
-	e.mu.Unlock()
-
 	ok, errMsg, errIsAuth := false, "", false
 	defer func() {
 		e.mu.Lock()
 		if e.dream == d {
-			d.apiDone, d.apiOK, d.apiErr, d.apiErrIsAuth, d.cancel = true, ok, errMsg, errIsAuth, nil
+			d.apiDone, d.apiOK, d.apiErr, d.apiErrIsAuth = true, ok, errMsg, errIsAuth
 		}
 		e.mu.Unlock()
 		e.wake()
@@ -99,7 +92,7 @@ func (e *Engine) runAPIDream(d *dreamRun) {
 		}
 		e.mu.Lock()
 		if e.dream == d {
-			d.step, d.lastProgressAt = step+1, time.Now()
+			d.step = step + 1
 		}
 		e.mu.Unlock()
 
@@ -134,7 +127,7 @@ func (e *Engine) runAPIDream(d *dreamRun) {
 			totalCalls++
 			e.mu.Lock()
 			if e.dream == d {
-				d.lastTool, d.lastProgressAt = tc.Function.Name, time.Now()
+				d.lastTool = tc.Function.Name
 			}
 			e.mu.Unlock()
 

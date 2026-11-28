@@ -49,7 +49,6 @@ type ChannelSink interface {
 	OnReply(ctx context.Context, entry *model.Entry, action *model.Action, attachments []AttachmentFile) ReplyDelivery
 	OnActionCreated(ctx context.Context, action *model.Action)
 	OnActionResolved(ctx context.Context, action *model.Action)
-	OnRouterTurnEnd(ctx context.Context)
 	OnAPIRouterProgress(ctx context.Context, thread, triggerID, think string)
 	OnAPIRouterTurnEnd(ctx context.Context, thread, triggerID, reason string)
 	WeComOnline() bool
@@ -63,9 +62,8 @@ func (NopSink) OnUserMessage(context.Context, *model.Entry) {}
 func (NopSink) OnReply(context.Context, *model.Entry, *model.Action, []AttachmentFile) ReplyDelivery {
 	return ReplyDelivery{}
 }
-func (NopSink) OnActionCreated(context.Context, *model.Action)                {}
-func (NopSink) OnActionResolved(context.Context, *model.Action)               {}
-func (NopSink) OnRouterTurnEnd(context.Context)                               {}
-func (NopSink) OnAPIRouterProgress(context.Context, string, string, string)   {}
-func (NopSink) OnAPIRouterTurnEnd(context.Context, string, string, string)    {}
-func (NopSink) WeComOnline() bool                                             { return false }
+func (NopSink) OnActionCreated(context.Context, *model.Action)              {}
+func (NopSink) OnActionResolved(context.Context, *model.Action)             {}
+func (NopSink) OnAPIRouterProgress(context.Context, string, string, string) {}
+func (NopSink) OnAPIRouterTurnEnd(context.Context, string, string, string)  {}
+func (NopSink) WeComOnline() bool                                           { return false }

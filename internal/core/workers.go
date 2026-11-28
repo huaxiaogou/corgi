@@ -1638,5 +1638,3 @@ func buildModeConstraint(mode string, allowRelease bool, extra string) string {
 	}
 	return prefix + "\n" + extra
 }
-
-// AddTimer creates and persists a new timer.

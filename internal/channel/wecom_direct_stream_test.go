@@ -275,9 +275,6 @@ func TestRouterStreamNotPrematurelySealedAndCapturesFinalThink(t *testing.T) {
 	st.pollMu.Unlock()
 	st.attachLocalTranscript(ctx, true)
 
-	// Simulate mid-turn flicker calling OnRouterTurnEnd -> must NOT prematurely seal!
-	bus.OnRouterTurnEnd(ctx)
-
 	turnLines := `{"type":"message","role":"user","content":[{"type":"input_text","text":"当前有哪些事项"}]}` + "\n" +
 		`{"type":"function_call","name":"Bash","arguments":{"command":"/usr/local/bin/corgi list","description":"查看当前事项与状态"}}` + "\n" +
 		`{"type":"reasoning","content":[],"rawContent":[{"type":"reasoning_text","text":"整理 4 项待处理事项给用户"}]}` + "\n"
