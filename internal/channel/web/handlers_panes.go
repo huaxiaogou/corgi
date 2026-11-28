@@ -131,6 +131,8 @@ func (s *Server) buildPaneState(ctx context.Context) model.PaneState {
 				v.Keep = wk.Keep
 				v.CreatedBy = wk.CreatedBy
 				v.Constraint = wk.Constraint
+				v.Mode = wk.Mode
+				v.ReadonlyEnforcement = wk.ReadonlyEnforcement
 			} else if wk := workerByName[v.Name]; wk != nil {
 				v.WorktreeBranch = wk.WorktreeBranch
 				v.RepoRoot = wk.RepoRoot
@@ -138,6 +140,8 @@ func (s *Server) buildPaneState(ctx context.Context) model.PaneState {
 				v.Keep = wk.Keep
 				v.CreatedBy = wk.CreatedBy
 				v.Constraint = wk.Constraint
+				v.Mode = wk.Mode
+				v.ReadonlyEnforcement = wk.ReadonlyEnforcement
 			}
 			st.Agents = append(st.Agents, v)
 		} else {

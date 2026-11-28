@@ -77,25 +77,27 @@ type Rect struct {
 
 // AgentView is the UI-facing representation of a live pane (agent or shell).
 type AgentView struct {
-	PaneID         string     `json:"pane_id"`
-	WorkspaceID    string     `json:"workspace_id"`
-	WorkspaceLabel string     `json:"workspace_label"`
-	Name           string     `json:"name"`
-	Kind           string     `json:"kind"`
-	Status         string     `json:"status"`
-	Cwd            string     `json:"cwd"`
-	Title          string     `json:"title"`
-	Topic          string     `json:"topic,omitempty"`
-	Session        string     `json:"session,omitempty"`
-	IsAgent        bool       `json:"is_agent"`
-	Machine        string     `json:"machine"`
-	Run            *[2]string `json:"run,omitempty"`
-	RepoRoot       string     `json:"repo_root,omitempty"`
-	WorktreeBranch string     `json:"worktree_branch,omitempty"`
-	IdleSince      *time.Time `json:"idle_since,omitempty"`
-	Keep           bool       `json:"keep,omitempty"`
-	CreatedBy      string     `json:"created_by,omitempty"`
-	Constraint     string     `json:"constraint,omitempty"`
+	PaneID              string     `json:"pane_id"`
+	WorkspaceID         string     `json:"workspace_id"`
+	WorkspaceLabel      string     `json:"workspace_label"`
+	Name                string     `json:"name"`
+	Kind                string     `json:"kind"`
+	Status              string     `json:"status"`
+	Cwd                 string     `json:"cwd"`
+	Title               string     `json:"title"`
+	Topic               string     `json:"topic,omitempty"`
+	Session             string     `json:"session,omitempty"`
+	IsAgent             bool       `json:"is_agent"`
+	Machine             string     `json:"machine"`
+	Run                 *[2]string `json:"run,omitempty"`
+	RepoRoot            string     `json:"repo_root,omitempty"`
+	WorktreeBranch      string     `json:"worktree_branch,omitempty"`
+	IdleSince           *time.Time `json:"idle_since,omitempty"`
+	Keep                bool       `json:"keep,omitempty"`
+	CreatedBy           string     `json:"created_by,omitempty"`
+	Constraint          string     `json:"constraint,omitempty"`
+	Mode                string     `json:"mode,omitempty"`
+	ReadonlyEnforcement string     `json:"readonly_enforcement,omitempty"`
 }
 
 // QueuedPrompt is one durable human prompt waiting for a busy agent pane or main Corgi chat thread.
@@ -217,27 +219,29 @@ type ToolStats struct {
 
 // EndedSession remembers a closed agent session for review or --resume.
 type EndedSession struct {
-	ID             string    `json:"id"`
-	Kind           string    `json:"kind"`
-	Machine        string    `json:"machine,omitempty"`
-	Cwd            string    `json:"cwd"`
-	Title          string    `json:"title,omitempty"`
-	Name           string    `json:"name,omitempty"`
-	Session        string    `json:"session"`
-	WorkItemID     string    `json:"work_item_id,omitempty"`
-	Model          string    `json:"model,omitempty"`
-	Effort         string    `json:"effort,omitempty"`
-	Constraint     string    `json:"constraint,omitempty"`
-	CreatedBy      string    `json:"created_by,omitempty"`
-	Thread         string    `json:"thread,omitempty"`
-	Keep           bool      `json:"keep,omitempty"`
-	RepoRoot       string    `json:"repo_root,omitempty"`
-	RepoCommonDir  string    `json:"repo_common_dir,omitempty"`
-	WorktreePath   string    `json:"worktree_path,omitempty"`
-	WorktreeBranch string    `json:"worktree_branch,omitempty"`
-	WorktreeBase   string    `json:"worktree_base,omitempty"`
-	Subscribers    []string  `json:"subscribers,omitempty"`
-	EndedAt        time.Time `json:"ended_at"`
+	ID                  string    `json:"id"`
+	Kind                string    `json:"kind"`
+	Machine             string    `json:"machine,omitempty"`
+	Cwd                 string    `json:"cwd"`
+	Title               string    `json:"title,omitempty"`
+	Name                string    `json:"name,omitempty"`
+	Session             string    `json:"session"`
+	WorkItemID          string    `json:"work_item_id,omitempty"`
+	Model               string    `json:"model,omitempty"`
+	Effort              string    `json:"effort,omitempty"`
+	Constraint          string    `json:"constraint,omitempty"`
+	Mode                string    `json:"mode,omitempty"`
+	ReadonlyEnforcement string    `json:"readonly_enforcement,omitempty"`
+	CreatedBy           string    `json:"created_by,omitempty"`
+	Thread              string    `json:"thread,omitempty"`
+	Keep                bool      `json:"keep,omitempty"`
+	RepoRoot            string    `json:"repo_root,omitempty"`
+	RepoCommonDir       string    `json:"repo_common_dir,omitempty"`
+	WorktreePath        string    `json:"worktree_path,omitempty"`
+	WorktreeBranch      string    `json:"worktree_branch,omitempty"`
+	WorktreeBase        string    `json:"worktree_base,omitempty"`
+	Subscribers         []string  `json:"subscribers,omitempty"`
+	EndedAt             time.Time `json:"ended_at"`
 }
 
 // RouterView summarizes the live state of Corgi's native in-process API Router.

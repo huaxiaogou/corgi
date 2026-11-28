@@ -63,6 +63,8 @@ type Adapter interface {
 	Kind() string
 	DisplayName() string
 	LaunchArgs(modelName, effort string, bypassPerm bool) []string
+	LaunchArgsWithOptions(opts LaunchOptions) []string
+	ReadonlyEnforcement() ReadonlyEnforcement
 	ResumeArgs(sessionID string) []string
 	PreTrustWorkspace(home, cwd string) error
 	DiscoverModels(ctx context.Context, home string) (*model.ModelCatalog, error)

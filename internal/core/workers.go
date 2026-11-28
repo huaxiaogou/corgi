@@ -35,6 +35,7 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		resumeCreatedBy  string
 		resumeTitle      string
 		resumeKeep       bool
+		resumeMode       string
 		resumeWtPrep     *worktreePrep
 		resumeSubs       []string
 		workerConstraint = reqConstraint
@@ -62,6 +63,7 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		resumeCreatedBy = old.CreatedBy
 		resumeTitle = old.Title
 		resumeKeep = old.Keep
+		resumeMode = old.Mode
 		fellBack := false
 		if old.RepoRoot != "" {
 			req.Cwd, fellBack = e.resolveResumeCwd(ctx, old.Machine, old.Cwd, old.RepoRoot)
@@ -255,24 +257,32 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	}
 
 	createdBy := orStr(req.By, orStr(resumeCreatedBy, model.RouterName))
+	workerMode := strings.ToLower(strings.TrimSpace(orStr(req.Mode, resumeMode)))
+	readonly := workerMode == "readonly"
+	roEnforcement := ""
+	if readonly {
+		roEnforcement = string(ad.ReadonlyEnforcement())
+	}
 	wk := &model.Worker{
-		Name:        name,
-		Kind:        kind,
-		Machine:     machine,
-		Cwd:         cwd,
-		Task:        req.Task,
-		Thread:      thread,
-		CreatedBy:   createdBy,
-		CreatedAt:   time.Now(),
-		Title:       resumeTitle,
-		Keep:        resumeKeep,
-		Model:       modelName,
-		Effort:      effort,
-		ModelSource: modelSource,
-		Run:         &[2]string{modelName, effort},
-		Status:      "starting",
-		Session:     sessionID,
-		Constraint:  workerConstraint,
+		Name:                name,
+		Kind:                kind,
+		Machine:             machine,
+		Cwd:                 cwd,
+		Task:                req.Task,
+		Thread:              thread,
+		CreatedBy:           createdBy,
+		CreatedAt:           time.Now(),
+		Title:               resumeTitle,
+		Keep:                resumeKeep,
+		Model:               modelName,
+		Effort:              effort,
+		ModelSource:         modelSource,
+		Run:                 &[2]string{modelName, effort},
+		Status:              "starting",
+		Session:             sessionID,
+		Constraint:          workerConstraint,
+		Mode:                workerMode,
+		ReadonlyEnforcement: roEnforcement,
 	}
 	if proj != nil {
 		wk.ProjectID = proj.ID
@@ -337,7 +347,13 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	if wk.ProjectName != "" {
 		projTag = " · " + wk.ProjectName
 	}
-	e.addEvent(ctx, thread, fmt.Sprintf("%s %s（%s%s%s%s%s）", verb, name, kind, modelTag, machineTag(mc.Name, mc.Local), projTag, wtTag), name, "spawn")
+	roTag := ""
+	if readonly {
+		if lbl := agent.ReadonlyEnforcementLabel(agent.ReadonlyEnforcement(roEnforcement)); lbl != "" {
+			roTag = " · 只读(" + lbl + ")"
+		}
+	}
+	e.addEvent(ctx, thread, fmt.Sprintf("%s %s（%s%s%s%s%s%s）", verb, name, kind, modelTag, machineTag(mc.Name, mc.Local), projTag, wtTag, roTag), name, "spawn")
 	e.notifyChanged()
 
 	workerBin := e.binPath
@@ -345,7 +361,12 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 		workerBin = "corgi"
 	}
 	// Note: Codex `resume <id>` is a subcommand and MUST precede launch flags.
-	args := append(ad.ResumeArgs(sessionID), ad.LaunchArgs(modelName, effort, !st.AskPermissions)...)
+	args := append(ad.ResumeArgs(sessionID), ad.LaunchArgsWithOptions(agent.LaunchOptions{
+		Model:      modelName,
+		Effort:     effort,
+		BypassPerm: !st.AskPermissions,
+		Readonly:   readonly,
+	})...)
 	if kind == "claude" {
 		args = append(args, "--allowedTools", fmt.Sprintf("Bash(%s report:*),Bash(corgi report:*)", workerBin))
 	}
@@ -421,29 +442,31 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 
 // LaunchManagedRequest describes a user-initiated agent launch from the `+` modal or History/Card resume.
 type LaunchManagedRequest struct {
-	Kind           string
-	Machine        string
-	Cwd            string
-	Name           string
-	Label          string
-	Model          string
-	Effort         string
-	Prompt         string
-	SessionID      string
-	WorkItemID     string
-	ProjectID      string
-	Worktree       string // auto (default) | on | off
-	Constraint     string
-	ExtraArgs      []string
-	CreatedBy      string
-	Thread         string
-	Keep           bool
-	RepoRoot       string
-	RepoCommonDir  string
-	WorktreePath   string
-	WorktreeBranch string
-	WorktreeBase   string
-	Subscribers    []string
+	Kind                string
+	Machine             string
+	Cwd                 string
+	Name                string
+	Label               string
+	Model               string
+	Effort              string
+	Prompt              string
+	SessionID           string
+	WorkItemID          string
+	ProjectID           string
+	Worktree            string // auto (default) | on | off
+	Constraint          string
+	Mode                string
+	ReadonlyEnforcement string
+	ExtraArgs           []string
+	CreatedBy           string
+	Thread              string
+	Keep                bool
+	RepoRoot            string
+	RepoCommonDir       string
+	WorktreePath        string
+	WorktreeBranch      string
+	WorktreeBase        string
+	Subscribers         []string
 }
 
 // ResumeWorkerRequest identifies a specific historical worker session to reopen for direct follow-up.
@@ -480,6 +503,7 @@ func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerReques
 	}
 	var (
 		modelName, effort, title, savedConstraint string
+		savedMode, savedROEnforcement             string
 		createdBy, thread                         string
 		keep                                      bool
 		repoRoot, repoCommonDir                   string
@@ -516,6 +540,7 @@ func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerReques
 			workID = es.WorkItemID
 		}
 		modelName, effort, title, savedConstraint = es.Model, es.Effort, es.Title, es.Constraint
+		savedMode, savedROEnforcement = es.Mode, es.ReadonlyEnforcement
 		createdBy, thread, keep = es.CreatedBy, es.Thread, es.Keep
 		repoRoot, repoCommonDir = es.RepoRoot, es.RepoCommonDir
 		worktreePath, worktreeBranch, wtBase = es.WorktreePath, es.WorktreeBranch, es.WorktreeBase
@@ -581,6 +606,12 @@ func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerReques
 				}
 				if savedConstraint == "" {
 					savedConstraint = old.Constraint
+				}
+				if savedMode == "" {
+					savedMode = old.Mode
+				}
+				if savedROEnforcement == "" {
+					savedROEnforcement = old.ReadonlyEnforcement
 				}
 				if createdBy == "" {
 					createdBy = old.CreatedBy
@@ -648,6 +679,12 @@ func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerReques
 				if savedConstraint == "" {
 					savedConstraint = es.Constraint
 				}
+				if savedMode == "" {
+					savedMode = es.Mode
+				}
+				if savedROEnforcement == "" {
+					savedROEnforcement = es.ReadonlyEnforcement
+				}
 				if createdBy == "" {
 					createdBy = es.CreatedBy
 				}
@@ -705,25 +742,27 @@ func (e *Engine) ResumeWorkerSession(ctx context.Context, req ResumeWorkerReques
 	}
 
 	wk, err := e.LaunchManaged(ctx, LaunchManagedRequest{
-		Kind:           kind,
-		Machine:        machine,
-		Cwd:            cwd,
-		Name:           name,
-		Label:          title,
-		Model:          modelName,
-		Effort:         effort,
-		SessionID:      sess,
-		WorkItemID:     workID,
-		Constraint:     savedConstraint,
-		CreatedBy:      createdBy,
-		Thread:         thread,
-		Keep:           keep,
-		RepoRoot:       repoRoot,
-		RepoCommonDir:  repoCommonDir,
-		WorktreePath:   worktreePath,
-		WorktreeBranch: worktreeBranch,
-		WorktreeBase:   wtBase,
-		Subscribers:    subscribers,
+		Kind:                kind,
+		Machine:             machine,
+		Cwd:                 cwd,
+		Name:                name,
+		Label:               title,
+		Model:               modelName,
+		Effort:              effort,
+		SessionID:           sess,
+		WorkItemID:          workID,
+		Constraint:          savedConstraint,
+		Mode:                savedMode,
+		ReadonlyEnforcement: savedROEnforcement,
+		CreatedBy:           createdBy,
+		Thread:              thread,
+		Keep:                keep,
+		RepoRoot:            repoRoot,
+		RepoCommonDir:       repoCommonDir,
+		WorktreePath:        worktreePath,
+		WorktreeBranch:      worktreeBranch,
+		WorktreeBase:        wtBase,
+		Subscribers:         subscribers,
 	})
 	if err != nil {
 		return nil, false, err
@@ -815,8 +854,19 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 	if !mc.Local || workerBin == "" {
 		workerBin = "corgi"
 	}
+	workerMode := strings.ToLower(strings.TrimSpace(req.Mode))
+	readonly := workerMode == "readonly"
+	roEnforcement := strings.TrimSpace(req.ReadonlyEnforcement)
+	if readonly && roEnforcement == "" {
+		roEnforcement = string(ad.ReadonlyEnforcement())
+	}
 	// Codex `resume <id>` is a subcommand and must precede launch flags.
-	args := append(ad.ResumeArgs(req.SessionID), ad.LaunchArgs(effModel, effEffort, !st.AskPermissions)...)
+	args := append(ad.ResumeArgs(req.SessionID), ad.LaunchArgsWithOptions(agent.LaunchOptions{
+		Model:      effModel,
+		Effort:     effEffort,
+		BypassPerm: !st.AskPermissions,
+		Readonly:   readonly,
+	})...)
 	if kind == "claude" {
 		args = append(args, "--allowedTools", fmt.Sprintf("Bash(%s report:*),Bash(corgi report:*)", workerBin))
 	}
@@ -870,26 +920,28 @@ func (e *Engine) LaunchManaged(ctx context.Context, req LaunchManagedRequest) (*
 		savedTitle = ""
 	}
 	wk := &model.Worker{
-		Name:        name,
-		Kind:        kind,
-		Machine:     machine,
-		Cwd:         cwd,
-		Task:        taskDesc,
-		Thread:      thread,
-		PaneID:      paneID,
-		WorkspaceID: wsID,
-		CreatedBy:   createdBy,
-		CreatedAt:   time.Now(),
-		Title:       savedTitle,
-		Keep:        req.Keep,
-		Model:       effModel,
-		Effort:      effEffort,
-		ModelSource: modelSource,
-		Run:         &[2]string{effModel, effEffort},
-		Status:      status,
-		Session:     req.SessionID,
-		WorkItemID:  strings.TrimSpace(req.WorkItemID),
-		Constraint:  constraint,
+		Name:                name,
+		Kind:                kind,
+		Machine:             machine,
+		Cwd:                 cwd,
+		Task:                taskDesc,
+		Thread:              thread,
+		PaneID:              paneID,
+		WorkspaceID:         wsID,
+		CreatedBy:           createdBy,
+		CreatedAt:           time.Now(),
+		Title:               savedTitle,
+		Keep:                req.Keep,
+		Model:               effModel,
+		Effort:              effEffort,
+		ModelSource:         modelSource,
+		Run:                 &[2]string{effModel, effEffort},
+		Status:              status,
+		Session:             req.SessionID,
+		WorkItemID:          strings.TrimSpace(req.WorkItemID),
+		Constraint:          constraint,
+		Mode:                workerMode,
+		ReadonlyEnforcement: roEnforcement,
 	}
 	if proj := ResolveProject(st.Projects, req.ProjectID, cwd); proj != nil {
 		wk.ProjectID = proj.ID

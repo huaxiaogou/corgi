@@ -242,6 +242,10 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		"ok": true, "worker": wk.Name, "work_item_id": wk.WorkItemID,
 		"machine": orStr(wk.Machine, "hub"), "kind": wk.Kind, "model": wk.Model, "branch": wk.WorktreeBranch, "mode": mode,
 	}
+	if wk.ReadonlyEnforcement != "" {
+		res["readonly_enforcement"] = wk.ReadonlyEnforcement
+		res["readonly_label"] = agent.ReadonlyEnforcementLabel(agent.ReadonlyEnforcement(wk.ReadonlyEnforcement))
+	}
 	if len(stageWarns) > 0 {
 		res["staging_warnings"] = stageWarns
 	}

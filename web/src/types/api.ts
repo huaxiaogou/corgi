@@ -117,6 +117,8 @@ export interface Worker {
   snooze_until?: string;
   work_item_id?: string;
   constraint?: string;
+  mode?: "readonly" | "prototype" | "implement" | string;
+  readonly_enforcement?: "hard_sandbox" | "permission_mode" | "soft_prompt" | string;
 }
 
 export interface WorkArtifact {
@@ -284,6 +286,8 @@ export interface AgentView {
   keep?: boolean;
   created_by?: string;
   constraint?: string;
+  mode?: "readonly" | "prototype" | "implement" | string;
+  readonly_enforcement?: "hard_sandbox" | "permission_mode" | "soft_prompt" | string;
 }
 
 export interface PaneState {
@@ -486,6 +490,8 @@ export interface EndedSession {
   title?: string;
   name?: string;
   session: string;
+  mode?: "readonly" | "prototype" | "implement" | string;
+  readonly_enforcement?: "hard_sandbox" | "permission_mode" | "soft_prompt" | string;
   ended_at: string;
 }
 

@@ -231,7 +231,12 @@ func (e *Engine) healWorkerBypassInPlace(w model.Worker, targetPID uint32) {
 			effort = st.WorkerEffort
 		}
 	}
-	args := append(ad.ResumeArgs(w.Session), ad.LaunchArgs(modelName, effort, true)...)
+	args := append(ad.ResumeArgs(w.Session), ad.LaunchArgsWithOptions(agent.LaunchOptions{
+		Model:      modelName,
+		Effort:     effort,
+		BypassPerm: true,
+		Readonly:   isReadonlyWorker(&w),
+	})...)
 	if w.Kind == "claude" {
 		workerBin := e.binPath
 		if w.Machine != "" || workerBin == "" {
@@ -341,12 +346,16 @@ func isRetryableInPlaceStartErr(err error) bool {
 	return errors.As(err, &he) && (he.Code == "agent_name_taken" || he.Code == "agent_pane_busy")
 }
 
+func isReadonlyWorker(w *model.Worker) bool {
+	return w != nil && (strings.EqualFold(strings.TrimSpace(w.Mode), "readonly") || strings.Contains(w.Constraint, "【只读范围】"))
+}
+
 // answerRestoredAgyEditDialog auto-accepts an Antigravity file-edit confirmation prompt when
 // AskPermissions is false AND pane.process_info confirms the pane lost --dangerously-skip-permissions
 // (for example, mid-turn after a herdr restart). It also invalidates the bypass check cache so
 // the worker is healed to full bypass mode as soon as the turn finishes.
 func (e *Engine) answerRestoredAgyEditDialog(ctx context.Context, w *model.Worker, ap model.Approval) bool {
-	if e.fleet == nil || w == nil || w.PaneID == "" || e.Settings().AskPermissions || len(ap.Choices) < 2 {
+	if e.fleet == nil || w == nil || w.PaneID == "" || e.Settings().AskPermissions || len(ap.Choices) < 2 || isReadonlyWorker(w) {
 		return false
 	}
 	if agent.NormalizeKind(w.Kind) != "agy" {

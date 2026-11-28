@@ -233,6 +233,8 @@ type Worker struct {
 	SnoozeUntil          *time.Time `json:"snooze_until,omitempty"`
 	WorkItemID           string     `json:"work_item_id,omitempty"`
 	Constraint           string     `json:"constraint,omitempty"`
+	Mode                 string     `json:"mode,omitempty"`                 // readonly | prototype | implement
+	ReadonlyEnforcement  string     `json:"readonly_enforcement,omitempty"` // hard_sandbox | permission_mode | soft_prompt
 }
 
 const (

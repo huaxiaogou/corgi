@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/kiperjing/corgi/internal/model"
+	"github.com/kiperjing/corgi/internal/runtime/agent"
 )
 
 const (
@@ -247,6 +248,7 @@ func (e *Engine) buildLiveTailState(ctx context.Context, thread string, trig *mo
 			ln := fmt.Sprintf("- #%s [%s/%s · %s] status=%s%s", w.Name, w.Kind, orStr(w.Machine, "hub"), orStr(w.Model, "default"), w.Status, formatWorkItemTag(wiByID, w.WorkItemID, false)) +
 				condStr(w.ProjectID != "", " project="+w.ProjectID, "") +
 				condStr(w.WorktreeBranch != "", " branch="+w.WorktreeBranch, "") +
+				condStr(w.ReadonlyEnforcement != "", " readonly="+agent.ReadonlyEnforcementLabel(agent.ReadonlyEnforcement(w.ReadonlyEnforcement)), "") +
 				condStr(w.LastReport != "", " | last="+oneLineClip(w.LastReport, maxAPICardPreviewRunes), "")
 			lines = append(lines, ln)
 		}

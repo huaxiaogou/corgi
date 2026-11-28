@@ -16,6 +16,7 @@ import (
 	"github.com/kiperjing/corgi/internal/core"
 	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
+	"github.com/kiperjing/corgi/internal/runtime/agent"
 	"github.com/kiperjing/corgi/internal/runtime/herdr"
 	"github.com/kiperjing/corgi/internal/store"
 )
@@ -144,7 +145,10 @@ func (s *Server) handleResumeHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Note: Codex `resume <id>` is a subcommand and must precede launch flags.
-	args := append(ad.ResumeArgs(target.Session), ad.LaunchArgs("", "", !askPerm)...)
+	args := append(ad.ResumeArgs(target.Session), ad.LaunchArgsWithOptions(agent.LaunchOptions{
+		BypassPerm: !askPerm,
+		Readonly:   strings.EqualFold(target.Mode, "readonly"),
+	})...)
 	name := target.Name
 	if name == "" || name == model.RouterName {
 		name = ad.Kind() + "-" + fleet.RandomToken()[:4]
