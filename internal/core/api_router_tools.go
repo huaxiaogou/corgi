@@ -35,8 +35,8 @@ func apiRouterToolDefs() []LLMToolDef {
 			"kind":          propEnum([]string{"claude", "codex", "agy", "codebuddy"}, "指定 CLI 工具（留空用全局默认）"),
 			"resume":        prop("string", "续聊已有/已结束 Worker 的名称（仅人类回合）"),
 			"constraint":    prop("string", "给 Worker 的额外硬约束"),
-			"worktree":      propEnum([]string{"auto", "on", "off"}, "worktree 隔离策略"),
-			"allow_release": prop("boolean", "仅人类明确批准合入/推送/发版部署时设为 true（仅人类回合 + implement）"),
+			"worktree":      propEnum([]string{"auto", "on", "off"}, "worktree 隔离策略（未拍板发布的 implement 强制为 on）"),
+			"allow_release": prop("boolean", "仅人类在含 choices 的决策卡上点选批准合入/推送/发版部署时设为 true（仅限决策卡拍板回合 + implement；普通文本消息需先发确认卡）"),
 		}, "mode", "goal"),
 		configRouterToolDef(),
 		toolSpec("manage_timer", "列出、创建或删除本线程的定时提醒/巡检任务（固定唤醒大脑）。", map[string]any{

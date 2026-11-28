@@ -32,6 +32,42 @@ func (e *Engine) requireThreadWorker(ctx context.Context, name, thread string) (
 	return wk, ""
 }
 
+// hasReleaseCardApproval verifies that this human turn originated from an explicit
+// preset choice selection on a same-thread decision card (Action.Choices) via a
+// trusted human channel, never plain chat text, custom free-text, or router_check.
+func hasReleaseCardApproval(meta *turnConsentMeta) bool {
+	if meta == nil || !meta.isHuman || meta.approvedAction == nil || meta.sourceEntry == nil {
+		return false
+	}
+	act := meta.approvedAction
+	if meta.sourceEntry.Role != "user" || strings.TrimSpace(meta.sourceEntry.ActionID) != act.ID {
+		return false
+	}
+	if act.Status != model.ActionResolved || !isHumanChannel(act.ResolvedChannel) {
+		return false
+	}
+	if act.Kind != model.ActionKindRouterChoice && act.Kind != model.ActionKindPatrolDigest {
+		return false
+	}
+	if len(act.Choices) < 2 {
+		return false
+	}
+	if len(act.ChosenKeys) > 0 {
+		for _, k := range act.ChosenKeys {
+			if _, _, _, ok := matchStrictActionChoice(act, k); !ok {
+				return false
+			}
+		}
+		return true
+	}
+	key := strings.TrimSpace(act.ChosenKey)
+	if key == "" || strings.EqualFold(key, "reply") || strings.EqualFold(key, "custom") || strings.EqualFold(key, "ack") {
+		return false
+	}
+	_, _, _, ok := matchStrictActionChoice(act, key)
+	return ok
+}
+
 func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, meta *turnConsentMeta, rawArgs string) string {
 	var args struct {
 		Mode         string `json:"mode"`
@@ -62,12 +98,15 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 	if args.AllowRelease && mode != "implement" {
 		return toolErr(`allow_release 仅可与 mode="implement" 配合使用`)
 	}
-	wtMode := strings.TrimSpace(args.Worktree)
+	wtMode := strings.ToLower(strings.TrimSpace(args.Worktree))
 	if meta == nil || !meta.isHuman {
 		if mode != "readonly" || args.AllowRelease || strings.TrimSpace(args.Resume) != "" {
 			return toolErr("后台事件只能新派 readonly Worker，不能写盘、发布或续派已有 Worker")
 		}
 		wtMode = "off"
+	}
+	if args.AllowRelease && !hasReleaseCardApproval(meta) {
+		return toolErr("allow_release=true 必须由用户在含 choices 的决策卡片上点选确认后才能开启，不能仅凭普通消息文本推断；请先调用 reply_user 下发发布确认卡，待用户点选后再执行。")
 	}
 
 	targetWorkID := strings.TrimSpace(args.WorkID)
@@ -117,12 +156,15 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		return toolJSON(res)
 	}
 
-	if wtMode == "" {
-		if mode == "implement" && !args.AllowRelease {
+	if mode == "implement" {
+		if !args.AllowRelease {
+			// Without explicit card-approved release, implement MUST stay isolated in a git worktree.
 			wtMode = "on"
-		} else {
+		} else if wtMode == "" {
 			wtMode = "off"
 		}
+	} else if wtMode == "" {
+		wtMode = "off"
 	}
 
 	st := e.Settings()
@@ -262,136 +304,4 @@ func (e *Engine) toolSteerWorker(ctx context.Context, turn *apiRouterTurn, trig 
 		res["staging_warnings"] = stageWarns
 	}
 	return toolJSON(res)
-}
-
-func (e *Engine) toolManageWork(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, rawArgs string) string {
-	var args struct {
-		Action   string `json:"action"`
-		Target   string `json:"target"`
-		Title    string `json:"title"`
-		NextStep string `json:"next_step"`
-		Note     string `json:"note"`
-		Keep     bool   `json:"keep"`
-	}
-	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
-		return toolErr("manage_work 参数 JSON 无效：" + err.Error())
-	}
-	target := strings.TrimSpace(args.Target)
-	switch strings.ToLower(strings.TrimSpace(args.Action)) {
-	case "create_work":
-		wi, err := e.SetWorkItem(ctx, "new", turn.thread, args.Title, args.NextStep, "", "")
-		if err != nil {
-			return toolErr(err.Error())
-		}
-		turn.markMutated("已创建工作项 " + wi.ID)
-		e.ackAPITriggerOnce(context.Background(), turn, trig)
-		return toolJSON(map[string]any{"ok": true, "work_item": wi})
-	case "update_work":
-		if _, errMsg := e.requireThreadWorkItem(ctx, target, turn.thread); errMsg != "" {
-			return toolErr(errMsg)
-		}
-		wi, err := e.SetWorkItem(ctx, target, turn.thread, args.Title, args.NextStep, "", "")
-		if err != nil {
-			return toolErr(err.Error())
-		}
-		turn.markMutated("已更新工作项 " + wi.ID)
-		e.ackAPITriggerOnce(context.Background(), turn, trig)
-		return toolJSON(map[string]any{"ok": true, "work_item": wi})
-	case "close_work":
-		if _, errMsg := e.requireThreadWorkItem(ctx, target, turn.thread); errMsg != "" {
-			return toolErr(errMsg)
-		}
-		wi, err := e.CloseWorkItem(ctx, target, args.Note)
-		if err != nil {
-			return toolErr(err.Error())
-		}
-		turn.markMutated("已关闭工作项 " + wi.ID)
-		e.ackAPITriggerOnce(context.Background(), turn, trig)
-		return toolJSON(map[string]any{"ok": true, "work_item": wi})
-	case "stop_worker":
-		if _, errMsg := e.requireThreadWorker(ctx, target, turn.thread); errMsg != "" {
-			return toolErr(errMsg)
-		}
-		if err := e.StopWorker(ctx, target); err != nil {
-			return toolErr(err.Error())
-		}
-		turn.markMutated("已停止 #" + target)
-		e.ackAPITriggerOnce(context.Background(), turn, trig)
-		return toolJSON(map[string]any{"ok": true, "worker": target, "stopped": true})
-	case "keep_worker":
-		if _, errMsg := e.requireThreadWorker(ctx, target, turn.thread); errMsg != "" {
-			return toolErr(errMsg)
-		}
-		wk, err := e.SetWorkerKeep(ctx, target, args.Keep)
-		if err != nil {
-			return toolErr(err.Error())
-		}
-		turn.markMutated(fmt.Sprintf("已设置 #%s keep=%v", target, wk.Keep))
-		e.ackAPITriggerOnce(context.Background(), turn, trig)
-		return toolJSON(map[string]any{"ok": true, "worker": wk.Name, "keep": wk.Keep})
-	default:
-		return toolErr("不支持的 manage_work action：" + args.Action)
-	}
-}
-
-func (e *Engine) toolManageTimer(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, rawArgs string) string {
-	var args struct {
-		Action  string `json:"action"`
-		Spec    string `json:"spec"`
-		Text    string `json:"text"`
-		TimerID string `json:"timer_id"`
-	}
-	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
-		return toolErr("manage_timer 参数 JSON 无效：" + err.Error())
-	}
-	switch strings.ToLower(strings.TrimSpace(args.Action)) {
-	case "list":
-		all, err := e.store.ListTimers(ctx)
-		if err != nil {
-			return toolErr(err.Error())
-		}
-		var scoped []*model.Timer
-		for _, tm := range all {
-			if orStr(tm.Thread, model.MainThread) == turn.thread {
-				scoped = append(scoped, tm)
-			}
-		}
-		return toolJSON(map[string]any{"ok": true, "timers": scoped})
-	case "add":
-		if strings.TrimSpace(args.Spec) == "" || strings.TrimSpace(args.Text) == "" {
-			return toolErr("add 定时器必须提供 spec 和 text")
-		}
-		tm, err := e.AddTimer(ctx, args.Spec, args.Text, turn.thread, model.RouterName, "corgi")
-		if err != nil {
-			return toolErr(err.Error())
-		}
-		turn.markMutated("已设提醒 " + tm.ID)
-		e.ackAPITriggerOnce(context.Background(), turn, trig)
-		return toolJSON(map[string]any{"ok": true, "timer": tm})
-	case "remove":
-		tid := strings.TrimSpace(args.TimerID)
-		if tid == "" {
-			return toolErr("remove 必须提供 timer_id")
-		}
-		all, _ := e.store.ListTimers(ctx)
-		allowed := false
-		for _, tm := range all {
-			if tm.ID == tid && orStr(tm.Thread, model.MainThread) == turn.thread {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return toolErr("找不到本线程下的定时器：" + tid)
-		}
-		if err := e.store.DeleteTimer(ctx, tid); err != nil {
-			return toolErr(err.Error())
-		}
-		e.notifyChanged()
-		turn.markMutated("已删除提醒 " + tid)
-		e.ackAPITriggerOnce(context.Background(), turn, trig)
-		return toolJSON(map[string]any{"ok": true, "deleted": tid})
-	default:
-		return toolErr("manage_timer action 必须是 list、add 或 remove")
-	}
 }

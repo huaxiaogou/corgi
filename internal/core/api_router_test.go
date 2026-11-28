@@ -352,7 +352,8 @@ func TestAPIRouterMobileConsentContract(t *testing.T) {
 		t.Fatalf("expected non-human allow_release block, got: %s", resWorkerRel)
 	}
 
-	// Case 3: Human turn with arbitrary phrasing / English / card click passes allow_release cleanly (zero regex restriction).
+	// Case 3: Plain human text cannot bypass decision-card approval for allow_release;
+	// only an explicit human choice click on a decision card passes allow_release.
 	_, shipTrig, err := eng.Say(context.Background(), SayRequest{
 		Thread:  model.MainThread,
 		Channel: "wecom",
@@ -367,10 +368,35 @@ func TestAPIRouterMobileConsentContract(t *testing.T) {
 	if !strings.Contains(resBadMode, `"ok":false`) || !strings.Contains(resBadMode, "allow_release") {
 		t.Fatalf("expected allow_release rejected on readonly mode, got: %s", resBadMode)
 	}
-	// With mode=implement + allow_release=true on a human turn, consent gate MUST pass (reaches fleet nil check, not regex rejection).
-	resShip := eng.toolDispatchWork(context.Background(), &apiRouterTurn{thread: model.MainThread, triggerID: shipTrig.ID}, shipTrig, sMeta, `{"mode":"implement","allow_release":true,"goal":"合入并走完构建→部署→健康核验"}`)
+	// Plain chat text without a clicked decision card MUST be rejected.
+	resPlainShip := eng.toolDispatchWork(context.Background(), &apiRouterTurn{thread: model.MainThread, triggerID: shipTrig.ID}, shipTrig, sMeta, `{"mode":"implement","allow_release":true,"goal":"合入并走完构建→部署→健康核验"}`)
+	if !strings.Contains(resPlainShip, `"ok":false`) || !strings.Contains(resPlainShip, "决策卡片") {
+		t.Fatalf("expected plain text allow_release rejected without decision card, got: %s", resPlainShip)
+	}
+	// With a real human-clicked decision card choice, allow_release=true passes consent gate (hits fleet nil check).
+	_, relAct, _, err := eng.Reply(context.Background(), model.MainThread, "确认合入并部署？", "", []string{"合入并部署", "暂缓"}, false)
+	if err != nil || relAct == nil {
+		t.Fatalf("create release decision card: act=%v err=%v", relAct, err)
+	}
+	if _, err := eng.ResolveAction(context.Background(), relAct.ID, "wecom", "1"); err != nil {
+		t.Fatalf("resolve release decision card: %v", err)
+	}
+	var cardTrig *model.Trigger
+	if queued, qErr := st.ListQueuedTriggers(context.Background()); qErr == nil {
+		for _, tr := range queued {
+			if en, eErr := st.GetEntry(context.Background(), tr.Ref); eErr == nil && en != nil && en.ActionID == relAct.ID {
+				cardTrig = tr
+				break
+			}
+		}
+	}
+	if cardTrig == nil {
+		t.Fatalf("expected queued trigger from resolved release decision card %s", relAct.ID)
+	}
+	cMeta := eng.resolveTurnConsentMeta(context.Background(), cardTrig)
+	resShip := eng.toolDispatchWork(context.Background(), &apiRouterTurn{thread: model.MainThread, triggerID: cardTrig.ID}, cardTrig, cMeta, `{"mode":"implement","allow_release":true,"goal":"合入并走完构建→部署→健康核验"}`)
 	if !strings.Contains(resShip, "Fleet 暂未连接") {
-		t.Fatalf("expected human allow_release to pass consent gate and hit fleet check, got: %s", resShip)
+		t.Fatalf("expected card-approved allow_release to pass consent gate and hit fleet check, got: %s", resShip)
 	}
 
 	// Case 4: Fresh explicit mobile coding request passes consent check cleanly.
