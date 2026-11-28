@@ -700,8 +700,69 @@ func (e *Engine) deliverQueuedWithFleet(ctx context.Context, live map[string]liv
 				continue
 			}
 		}
+		if e.isDeliveringWorker(target) {
+			continue
+		}
+		if triggersHaveHumanMedia(list) {
+			if e.tryBeginWorkerDelivery(target) {
+				batchCopy := append([]*model.Trigger(nil), list...)
+				if rootCtx := e.backgroundRunCtx(); rootCtx != nil {
+					go e.deliverBatchAsync(rootCtx, target, li.pane, batchCopy)
+				} else {
+					e.deliverBatchAsync(ctx, target, li.pane, batchCopy)
+				}
+			}
+			continue
+		}
 		e.deliverBatch(ctx, target, li.pane, list)
 	}
+}
+
+func triggersHaveHumanMedia(list []*model.Trigger) bool {
+	for _, t := range list {
+		if t != nil && len(t.Media) > 0 && !strings.EqualFold(strings.TrimSpace(t.From), "machine") {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) isDeliveringWorker(target string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.deliveringWorkers[target]
+}
+
+func (e *Engine) tryBeginWorkerDelivery(target string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.deliveringWorkers == nil {
+		e.deliveringWorkers = map[string]bool{}
+	}
+	if e.deliveringWorkers[target] {
+		return false
+	}
+	e.deliveringWorkers[target] = true
+	return true
+}
+
+func (e *Engine) endWorkerDelivery(target string) {
+	e.mu.Lock()
+	delete(e.deliveringWorkers, target)
+	e.mu.Unlock()
+}
+
+func (e *Engine) backgroundRunCtx() context.Context {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.runCtx
+}
+
+func (e *Engine) deliverBatchAsync(parent context.Context, target, paneID string, list []*model.Trigger) {
+	defer e.endWorkerDelivery(target)
+	dctx, cancel := context.WithTimeout(parent, stageBatchTimeout+20*time.Second)
+	defer cancel()
+	e.deliverBatch(dctx, target, paneID, list)
 }
 
 func filterWorkerSteeringTriggers(list []*model.Trigger) []*model.Trigger {
@@ -769,6 +830,14 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 		body := strings.TrimSpace(t.Text)
 		if r := []rune(body); len(r) > 700 { // Inline & Spill
 			body = string(r[:700]) + fmt.Sprintf(" … [spilled; run `corgi show %s`]", t.ID)
+		}
+		if targetWorker != nil && len(t.Media) > 0 && !strings.EqualFold(strings.TrimSpace(t.From), "machine") {
+			stagedBody, _, sErr := e.stageMediaForDirectText(ctx, workerMachineID(targetWorker), body, t.Media)
+			if sErr != nil {
+				e.logger.Warn("stage trigger media for worker failed", "target", target, "trigger", t.ID, "err", sErr)
+				return
+			}
+			body = stagedBody
 		}
 		b.WriteString("  " + strings.ReplaceAll(body, "\n", "\n  ") + "\n")
 	}

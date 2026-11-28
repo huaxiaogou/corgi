@@ -10,7 +10,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -67,8 +66,6 @@ func writeReadFileError(w http.ResponseWriter, r *http.Request, code int, msg st
 	}
 	writeJSON(w, code, map[string]any{"error": msg})
 }
-
-var unsafeUploadRe = regexp.MustCompile(`[^\p{L}\p{N}._-]+`)
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	kind := r.URL.Query().Get("kind")
@@ -280,23 +277,34 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
-	name := sanitizeFilename(r.URL.Query().Get("name"))
-	dir := filepath.Join(s.CorgiDir, "uploads", time.Now().Format("20060102"))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+	name := core.SanitizeUploadName(r.URL.Query().Get("name"))
+	day := time.Now().Format("20060102")
+	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if r.URL.Query().Get("scope") == "staged" {
+		shaHex := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sha256")))
+		if !core.IsValidSHA256Hex(shaHex) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "无效的 sha256 参数"})
+			return
+		}
+		dest, actualSHA, n, deduped, err := core.StageLocalFileFromReader(s.CorgiDir, day, shaHex, name, body, maxUploadBytes)
+		if err != nil {
+			code := http.StatusBadRequest
+			if strings.Contains(err.Error(), "限制") {
+				code = http.StatusRequestEntityTooLarge
+			}
+			writeJSON(w, code, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"path": dest, "name": name, "size": n, "sha256": actualSHA, "deduped": deduped})
 		return
 	}
-	dest := filepath.Join(dir, fleet.RandomToken()[:6]+"-"+name)
-	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	dest, n, err := core.WriteRegularUploadAtomic(s.CorgiDir, day, fleet.RandomToken()[:6], name, body, maxUploadBytes)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	n, err := io.Copy(f, http.MaxBytesReader(w, r.Body, maxUploadBytes))
-	_ = f.Close()
-	if err != nil {
-		_ = os.Remove(dest)
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "上传失败或超过 25 MB 限制"})
+		code := http.StatusRequestEntityTooLarge
+		if !strings.Contains(err.Error(), "限制") {
+			code = http.StatusInternalServerError
+		}
+		writeJSON(w, code, map[string]any{"error": "上传失败或超过 25 MB 限制"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"path": dest, "name": name, "size": n})
@@ -330,16 +338,6 @@ func (s *Server) handleReadAttachment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
-}
-
-func sanitizeFilename(name string) string {
-	name = filepath.Base(strings.ReplaceAll(strings.TrimSpace(name), "\\", "/"))
-	ext := unsafeUploadRe.ReplaceAllString(filepath.Ext(name), "")
-	stem := strings.Trim(unsafeUploadRe.ReplaceAllString(strings.TrimSuffix(name, filepath.Ext(name)), "-"), "-.")
-	if stem == "" {
-		stem = "file"
-	}
-	return stem + ext
 }
 
 func (s *Server) expand(p string) string {

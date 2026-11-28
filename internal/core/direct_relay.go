@@ -38,6 +38,7 @@ type DirectWorkerRequest struct {
 	Cwd        string
 	WorkItemID string
 	Text       string
+	Media      []model.MediaRef
 	OnDone     func(ctx context.Context, res DirectTurnResult)
 }
 
@@ -507,6 +508,13 @@ func (e *Engine) SendDirectWorkerMessage(ctx context.Context, req DirectWorkerRe
 	})
 	if err != nil {
 		return nil, false, err
+	}
+	if len(req.Media) > 0 || strings.Contains(text, "/uploads/") {
+		stagedText, _, sErr := e.stageMediaForDirectText(ctx, workerMachineID(w), text, req.Media)
+		if sErr != nil {
+			return w, resumed, fmt.Errorf("附件跨机同步失败：%w", sErr)
+		}
+		text = stagedText
 	}
 	e.waitWorkerGCIdle(ctx, w.Name, 3*time.Second)
 	if !e.beginWorkerOp(w.Name) {

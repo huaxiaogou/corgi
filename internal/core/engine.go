@@ -145,6 +145,7 @@ type Engine struct {
 	drainCooldown              map[string]time.Time
 	directTurns                map[string][]*pendingDirectTurn
 	directBgNotes              []string
+	deliveringWorkers          map[string]bool
 	watchdogMarks              map[string]*watchdogMark
 	constraintRemindAt         map[string]time.Time
 	workerTurns                map[string]*workerTurnWatermark
@@ -213,6 +214,7 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		pausedQueues:        map[string]bool{},
 		drainCooldown:       map[string]time.Time{},
 		directTurns:         map[string][]*pendingDirectTurn{},
+		deliveringWorkers:   map[string]bool{},
 		watchdogMarks:       map[string]*watchdogMark{},
 		constraintRemindAt:  map[string]time.Time{},
 		workerTurns:         map[string]*workerTurnWatermark{},

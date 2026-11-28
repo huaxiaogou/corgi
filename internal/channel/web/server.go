@@ -161,6 +161,8 @@ func (s *Server) registerMachineRoutes(mux *http.ServeMux, wrap func(http.Handle
 	mux.Handle("GET /api/dirs", wrap(s.handleListDirs))
 	mux.Handle("GET /api/file", wrap(s.handleReadFile))
 	mux.Handle("POST /api/attachments/read", wrap(s.handleReadAttachment))
+	mux.Handle("POST /api/uploads/read", wrap(s.handleReadUpload))
+	mux.Handle("HEAD /api/uploads", wrap(s.handleHeadUpload))
 	mux.Handle("POST /api/uploads", wrap(s.handleUpload))
 	mux.Handle("GET /api/models", wrap(s.handleListModels))
 	mux.Handle("GET /api/transcript", wrap(s.handleGetTranscript))
@@ -448,7 +450,8 @@ func (s *Server) routed(h http.HandlerFunc) http.HandlerFunc {
 		}
 		var body []byte
 		switch {
-		case r.URL.Path == "/api/dirs", r.URL.Path == "/api/file", r.URL.Path == "/api/attachments/read", r.URL.Path == "/api/uploads",
+		case r.URL.Path == "/api/dirs", r.URL.Path == "/api/file", r.URL.Path == "/api/attachments/read",
+			r.URL.Path == "/api/uploads", r.URL.Path == "/api/uploads/read",
 			r.URL.Path == "/api/models", r.URL.Path == "/api/transcript", r.URL.Path == "/api/path/inspect",
 			r.URL.Path == "/api/git/inspect", r.URL.Path == "/api/git/worktree/create", r.URL.Path == "/api/git/worktree/cleanup":
 			machine = s.Fleet.ResolveMachine(r.URL.Query().Get("machine"))

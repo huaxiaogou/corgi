@@ -1555,4 +1555,24 @@ func approvalToChoices(ap model.Approval) []model.ActionChoice {
 	return out
 }
 
+func buildModeConstraint(mode string, allowRelease bool, extra string) string {
+	var prefix string
+	switch mode {
+	case "readonly":
+		prefix = "【只读范围】仅允许阅读、分析、调研和输出报告，严禁修改仓库源码、严禁 git commit/merge/push。"
+	case "prototype":
+		prefix = "【原型范围】仅允许产出或更新原型/设计文档/HTML 草图，严禁修改产品源码或执行 git merge/push。"
+	case "implement":
+		if allowRelease {
+			prefix = "【已获用户发布授权】按本次明确目标执行合入、构建、部署与核验，严格遵守任务说明中的范围与检查步骤。"
+		} else {
+			prefix = "【源码实现范围】仅在当前隔离分支完成本次改动与所请求的测试；严禁擅自 git merge 到主分支、git push 或部署上线。"
+		}
+	}
+	if extra == "" {
+		return prefix
+	}
+	return prefix + "\n" + extra
+}
+
 // AddTimer creates and persists a new timer.

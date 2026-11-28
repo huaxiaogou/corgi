@@ -140,6 +140,7 @@ func runHub(dir string) {
 	}
 	eng.SetPublicURLs(pubURLs)
 	eng.SweepArtifacts(ctx)
+	core.StartUploadsGC(ctx, dir, logger)
 	srv := &web.Server{
 		Store:          st,
 		Engine:         eng,
@@ -249,6 +250,7 @@ func runNode(dir string, args []string) {
 	if err := fleet.StartLocalUIProxy(ctx, *localUI, cfg.Hub, logger); err != nil {
 		logger.Warn("start local ui proxy skipped", "addr", *localUI, "err", err)
 	}
+	core.StartUploadsGC(ctx, dir, logger)
 
 	err := fleet.RunNodeLoop(ctx, fleet.NodeSessionOpts{
 		Config:      cfg,

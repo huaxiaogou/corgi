@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -358,11 +357,11 @@ func (e *Engine) readTrustedImageMedia(ctx context.Context, ref model.MediaRef) 
 	var data []byte
 	var err error
 	if machine == "" || machine == "hub" || machine == "local" {
-		fi, sErr := os.Stat(p)
-		if !e.isTrustedHubMediaPath(p) || sErr != nil || fi.IsDir() || fi.Size() <= 0 || fi.Size() > maxAPIImageBytes {
+		var ok bool
+		data, ok = readLocalTrustedMedia(e.corgiDir, e.dbPath(), p, maxAPIImageBytes)
+		if !ok {
 			return nil, "", false
 		}
-		data, err = os.ReadFile(p)
 	} else if strings.Contains(filepath.ToSlash(filepath.Clean(p)), "/.corgi/uploads/") {
 		_, data, _, err = e.readRemoteAttachmentFile(ctx, machine, p)
 	} else {
@@ -375,25 +374,4 @@ func (e *Engine) readTrustedImageMedia(ctx context.Context, ref model.MediaRef) 
 		return data, mime, true
 	}
 	return nil, "", false
-}
-
-func (e *Engine) isTrustedHubMediaPath(rawPath string) bool {
-	if e.corgiDir == "" || (e.store != nil && IsProtectedHubDBPath(e.store.DBPath(), rawPath)) {
-		return false
-	}
-	realPath, err := filepath.EvalSymlinks(rawPath)
-	if err != nil {
-		return false
-	}
-	realPath = filepath.Clean(realPath)
-	for _, sub := range []string{"uploads", "wecom-media", "wecom"} {
-		root := filepath.Join(e.corgiDir, sub)
-		if realRoot, rErr := filepath.EvalSymlinks(root); rErr == nil {
-			root = realRoot
-		}
-		if strings.HasPrefix(realPath, filepath.Clean(root)+string(os.PathSeparator)) {
-			return true
-		}
-	}
-	return false
 }

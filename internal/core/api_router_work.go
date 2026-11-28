@@ -96,8 +96,12 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		if err != nil {
 			return toolErr("续聊 Worker 失败：" + err.Error())
 		}
+		stagedGoal, _, stageWarns, sErr := e.stageTurnMediaForGoal(ctx, workerMachineID(wk), goal, "", trig, meta)
+		if sErr != nil {
+			return toolErr("附件跨机同步失败：" + sErr.Error())
+		}
 		effWorkID := wk.WorkItemID
-		if _, boundWI, sendErr := e.SendToWorkerWithWork(ctx, wk.Name, turn.thread, goal, targetWorkID); sendErr != nil {
+		if _, boundWI, sendErr := e.SendToWorkerWithWork(ctx, wk.Name, turn.thread, stagedGoal, targetWorkID); sendErr != nil {
 			return toolErr("续聊已打开但发送任务失败：" + sendErr.Error())
 		} else if boundWI != "" {
 			effWorkID = boundWI
@@ -106,7 +110,11 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		turn.markMutated("已续聊 #" + wk.Name)
 		turn.flags.Or(turnFlagDispatched)
 		e.ackAPITriggerOnce(context.Background(), turn, trig)
-		return toolJSON(map[string]any{"ok": true, "resumed": resumed, "worker": wk.Name, "work_item_id": effWorkID, "machine": orStr(wk.Machine, "hub"), "kind": wk.Kind})
+		res := map[string]any{"ok": true, "resumed": resumed, "worker": wk.Name, "work_item_id": effWorkID, "machine": orStr(wk.Machine, "hub"), "kind": wk.Kind}
+		if len(stageWarns) > 0 {
+			res["staging_warnings"] = stageWarns
+		}
+		return toolJSON(res)
 	}
 
 	if wtMode == "" {
@@ -128,12 +136,9 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		reqKind = orStr(agent.NormalizeKind(st.WorkerKind), reqKind)
 	}
 	reqModel, reqEffort := ov.Model, ov.Effort
-	effMachine := st.WorkerMachine
-	if reqMachine != "" {
-		effMachine = reqMachine
-		if e.fleet != nil {
-			effMachine = e.fleet.ResolveMachine(reqMachine)
-		}
+	effMachine := orStr(reqMachine, st.WorkerMachine)
+	if effMachine != "" && e.fleet != nil {
+		effMachine = e.fleet.ResolveMachine(effMachine)
 	}
 	if strings.EqualFold(effMachine, "hub") || strings.EqualFold(effMachine, "local") {
 		effMachine = ""
@@ -165,6 +170,11 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		return toolErr("本机或远端 Worker Fleet 暂未连接，无法启动 Worker")
 	}
 
+	goal, origReq, stageWarns, sErr := e.stageTurnMediaForGoal(ctx, effMachine, goal, origReq, trig, meta)
+	if sErr != nil {
+		return toolErr("附件跨机同步失败：" + sErr.Error())
+	}
+
 	_, seq, err := e.store.NextID(ctx, "w")
 	if err != nil {
 		return toolErr("分配 Worker 编号失败：" + err.Error())
@@ -174,7 +184,7 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 		return toolErr("记录防重标记失败，已中止派发：" + err.Error())
 	}
 	wk, err := e.Spawn(ctx, SpawnRequest{
-		Name: reservedName, Kind: reqKind, Machine: reqMachine, Model: reqModel, Effort: reqEffort, Cwd: resolvedCwd,
+		Name: reservedName, Kind: reqKind, Machine: orStr(effMachine, "hub"), Model: reqModel, Effort: reqEffort, Cwd: resolvedCwd,
 		Task: goal, Thread: turn.thread, By: model.RouterName, Worktree: wtMode,
 		WorkID: targetWorkID, WorkTitle: strings.TrimSpace(args.Title), ProjectID: resolvedProjID,
 		OriginalRequest: origReq, Constraint: buildModeConstraint(mode, args.AllowRelease, rawConstraint), Mode: mode,
@@ -186,30 +196,14 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 	turn.markMutated("已派发 #" + wk.Name)
 	turn.flags.Or(turnFlagDispatched)
 	e.ackAPITriggerOnce(context.Background(), turn, trig)
-	return toolJSON(map[string]any{
+	res := map[string]any{
 		"ok": true, "worker": wk.Name, "work_item_id": wk.WorkItemID,
 		"machine": orStr(wk.Machine, "hub"), "kind": wk.Kind, "model": wk.Model, "branch": wk.WorktreeBranch, "mode": mode,
-	})
-}
-
-func buildModeConstraint(mode string, allowRelease bool, extra string) string {
-	var prefix string
-	switch mode {
-	case "readonly":
-		prefix = "【只读范围】仅允许阅读、分析、调研和输出报告，严禁修改仓库源码、严禁 git commit/merge/push。"
-	case "prototype":
-		prefix = "【原型范围】仅允许产出或更新原型/设计文档/HTML 草图，严禁修改产品源码或执行 git merge/push。"
-	case "implement":
-		if allowRelease {
-			prefix = "【已获用户发布授权】按本次明确目标执行合入、构建、部署与核验，严格遵守任务说明中的范围与检查步骤。"
-		} else {
-			prefix = "【源码实现范围】仅在当前隔离分支完成本次改动与所请求的测试；严禁擅自 git merge 到主分支、git push 或部署上线。"
-		}
 	}
-	if extra == "" {
-		return prefix
+	if len(stageWarns) > 0 {
+		res["staging_warnings"] = stageWarns
 	}
-	return prefix + "\n" + extra
+	return toolJSON(res)
 }
 
 func (e *Engine) updateWorkItemScopeOnDispatch(ctx context.Context, workID, mode string) {
@@ -250,16 +244,24 @@ func (e *Engine) toolSteerWorker(ctx context.Context, turn *apiRouterTurn, trig 
 			return toolErr(errMsg)
 		}
 	}
+	stagedMsg, _, stageWarns, sErr := e.stageTurnMediaForGoal(ctx, workerMachineID(wk), msg, "", trig, meta)
+	if sErr != nil {
+		return toolErr("附件跨机同步失败：" + sErr.Error())
+	}
 	if err := e.recordAPIRouterInflight(context.Background(), trig, "steer_worker", name); err != nil {
 		return toolErr("记录防重标记失败，已中止发送：" + err.Error())
 	}
-	if _, _, err := e.SendToWorkerWithWork(ctx, name, turn.thread, msg, workID); err != nil {
+	if _, _, err := e.SendToWorkerWithWork(ctx, name, turn.thread, stagedMsg, workID); err != nil {
 		return toolErr("发送指令给 #" + name + " 失败：" + err.Error())
 	}
 	turn.markMutated("已向 #" + name + " 发送跟进指令")
 	turn.flags.Or(turnFlagDispatched)
 	e.ackAPITriggerOnce(context.Background(), turn, trig)
-	return toolJSON(map[string]any{"ok": true, "worker": name})
+	res := map[string]any{"ok": true, "worker": name}
+	if len(stageWarns) > 0 {
+		res["staging_warnings"] = stageWarns
+	}
+	return toolJSON(res)
 }
 
 func (e *Engine) toolManageWork(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, rawArgs string) string {

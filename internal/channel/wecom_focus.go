@@ -10,6 +10,7 @@ import (
 
 	"github.com/kiperjing/corgi/internal/channel/wecom"
 	"github.com/kiperjing/corgi/internal/core"
+	"github.com/kiperjing/corgi/internal/model"
 )
 
 type wecomFocus = core.WeComFocus
@@ -283,7 +284,7 @@ func (b *Bus) formatWeComHelp(ctx context.Context, focusKey string) string {
 	)
 }
 
-func (b *Bus) handleWeComControlOrDirect(ctx context.Context, msg wecom.IncomingMessage, thread, text string) bool {
+func (b *Bus) handleWeComControlOrDirect(ctx context.Context, msg wecom.IncomingMessage, thread, text string, mediaRefs []model.MediaRef) bool {
 	focusKey := wecomFocusKey(msg.ChatType, msg.ChatID, msg.FromUser)
 	replyChatID := msg.ChatID
 	if replyChatID == "" {
@@ -349,14 +350,14 @@ func (b *Bus) handleWeComControlOrDirect(ctx context.Context, msg wecom.Incoming
 	if tag := core.ExtractQuoteWorkerTag(msg.QuoteText); tag != "" {
 		curFocus := b.loadWeComFocus(ctx, focusKey)
 		if curFocus != nil && strings.EqualFold(curFocus.Worker, tag) {
-			b.dispatchWeComDirectWorker(ctx, msg, thread, replyChatID, focusKey, *curFocus, text, true, curFocus.Worker)
+			b.dispatchWeComDirectWorker(ctx, msg, thread, replyChatID, focusKey, *curFocus, text, mediaRefs, true, curFocus.Worker)
 			return true
 		}
 		curWorker := ""
 		if curFocus != nil {
 			curWorker = curFocus.Worker
 		}
-		b.dispatchWeComDirectWorker(ctx, msg, thread, replyChatID, focusKey, wecomFocus{Worker: tag}, text, false, curWorker)
+		b.dispatchWeComDirectWorker(ctx, msg, thread, replyChatID, focusKey, wecomFocus{Worker: tag}, text, mediaRefs, false, curWorker)
 		return true
 	}
 
@@ -377,7 +378,7 @@ func (b *Bus) handleWeComControlOrDirect(ctx context.Context, msg wecom.Incoming
 		if strings.TrimSpace(msg.QuoteText) != "" && b.engine != nil && b.engine.MatchesMainChatCorgiReply(ctx, thread, msg.QuoteText) {
 			return false
 		}
-		b.dispatchWeComDirectWorker(ctx, msg, thread, replyChatID, focusKey, *focus, text, true, focus.Worker)
+		b.dispatchWeComDirectWorker(ctx, msg, thread, replyChatID, focusKey, *focus, text, mediaRefs, true, focus.Worker)
 		return true
 	}
 	return false
@@ -484,7 +485,7 @@ func (b *Bus) handleNavCardClick(ctx context.Context, ev wecom.CardClickEvent) b
 	return true
 }
 
-func (b *Bus) dispatchWeComDirectWorker(ctx context.Context, msg wecom.IncomingMessage, thread, chatID, focusKey string, target wecomFocus, text string, inFocusMode bool, currentFocusWorker string) {
+func (b *Bus) dispatchWeComDirectWorker(ctx context.Context, msg wecom.IncomingMessage, thread, chatID, focusKey string, target wecomFocus, text string, mediaRefs []model.MediaRef, inFocusMode bool, currentFocusWorker string) {
 	// Open passive stream immediately for instant WeCom "思考中..." feedback, then start watching
 	// once SendDirectWorkerMessage has resolved/resumed the exact live Worker pane.
 	stream, watchCtx := b.openWorkerStream(ctx, thread, chatID, msg.ReqID, target.Worker, target.Title, inFocusMode, currentFocusWorker)
@@ -538,6 +539,7 @@ func (b *Bus) dispatchWeComDirectWorker(ctx context.Context, msg wecom.IncomingM
 		Kind:       target.Kind,
 		WorkItemID: target.WorkItemID,
 		Text:       promptText,
+		Media:      mediaRefs,
 		OnDone:     onDone,
 	})
 	if err != nil {

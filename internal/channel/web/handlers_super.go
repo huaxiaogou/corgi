@@ -51,6 +51,7 @@ func (s *Server) handleSuperSay(w http.ResponseWriter, r *http.Request) {
 	} else {
 		req.Channel = "machine"
 		req.From = "machine"
+		req.Media = nil
 	}
 	queued, item, entry, trig, err := s.Engine.SubmitChatSay(r.Context(), req.SayRequest, req.Mode)
 	if err != nil {

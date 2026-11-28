@@ -1044,7 +1044,7 @@ func (b *Bus) HandleWeComMessage(ctx context.Context, msg wecom.IncomingMessage)
 		thread = "wecom:" + msg.ChatID
 	}
 
-	if b.handleWeComControlOrDirect(ctx, msg, thread, text) {
+	if b.handleWeComControlOrDirect(ctx, msg, thread, text, mediaRefs) {
 		return
 	}
 	b.clearPendingWebQuote(thread)
