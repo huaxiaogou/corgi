@@ -4,6 +4,7 @@ import { ChunkErrorBoundary } from "../../components/ChunkErrorBoundary";
 import { AgentGlyph } from "../../components/CorgiMark";
 import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
+import { useKeyboardViewport } from "../../hooks/useKeyboardViewport";
 import { formatAgentComposerContext, formatPaneHandle } from "../../lib/agentIdentity";
 import { api, uploadFile } from "../../lib/api";
 import { createIMETracker, isPostCompositionSafariEnter } from "../../lib/composerInput";
@@ -123,7 +124,10 @@ export function AgentPaneView({
   const prevServerQueueRef = useRef<QueuedPrompt[]>(queuedPrompts);
   const localHandledIdsRef = useRef<Set<string>>(new Set());
   const fileRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const composerDockRef = useRef<HTMLDivElement>(null);
   const imeRef = useRef(createIMETracker());
+  useKeyboardViewport(composerDockRef);
 
   useEffect(() => {
     setMode(!pane.is_agent ? "screen" : "chat");
@@ -611,7 +615,7 @@ export function AgentPaneView({
         )}
       </div>
 
-      <div className="px-5 pb-4 pt-2 shrink-0 space-y-2">
+      <div ref={composerDockRef} className="px-5 pt-2 shrink-0 space-y-2 kb-dock">
         {pane.is_agent && mode === "chat" && (
           <PromptQueueTray
             items={effectiveQueue}
@@ -669,6 +673,7 @@ export function AgentPaneView({
                 </button>
               )}
               <input
+                ref={inputRef}
                 type="text"
                 value={input}
                 onCompositionStart={() => {
@@ -723,7 +728,17 @@ export function AgentPaneView({
                   <Square className="w-3 h-3 fill-current" />
                 </button>
               )}
-              <button type="submit" disabled={!stateReady} title={!stateReady ? "正在同步实时状态…" : pane.is_agent && mode === "chat" && (liveStatus === "working" || effectiveQueue.length > 0) ? "加入待发送队列" : "发送"} className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer shrink-0 disabled:opacity-35 disabled:cursor-not-allowed">
+              <button
+                type="submit"
+                disabled={!stateReady}
+                onPointerDown={(e) => {
+                  if (document.activeElement === inputRef.current) {
+                    e.preventDefault();
+                  }
+                }}
+                title={!stateReady ? "正在同步实时状态…" : pane.is_agent && mode === "chat" && (liveStatus === "working" || effectiveQueue.length > 0) ? "加入待发送队列" : "发送"}
+                className="w-8 h-8 rounded-full btn-accent flex items-center justify-center cursor-pointer shrink-0 disabled:opacity-35 disabled:cursor-not-allowed"
+              >
                 <ArrowUp className="w-4 h-4" />
               </button>
             </div>

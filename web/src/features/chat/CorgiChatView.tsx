@@ -12,6 +12,7 @@ import { MarkdownText, type MarkdownImagePayload } from "../../components/Markdo
 import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { QuoteBlock } from "../../components/QuoteBlock";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
+import { useKeyboardViewport } from "../../hooks/useKeyboardViewport";
 import { formatWeComFocusBanner } from "../../lib/agentIdentity";
 import { api } from "../../lib/api";
 import {
@@ -161,6 +162,8 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
   const highlightTimerRef = useRef<number | null>(null);
   const inlineOpenersRef = useRef<Map<string, (mode: InlineReplyMode) => void>>(new Map());
   const firstUnreadIdRef = useRef("");
+  const composerDockRef = useRef<HTMLDivElement>(null);
+  useKeyboardViewport(composerDockRef);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1647,7 +1650,7 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
         )}
       </div>
 
-      <div className="px-5 pb-4 pt-2 shrink-0 space-y-2">
+      <div ref={composerDockRef} className="px-5 pt-2 shrink-0 space-y-2 kb-dock">
         <PromptQueueTray
           items={effectiveQueue}
           paused={Boolean(data?.chat_queue_paused)}

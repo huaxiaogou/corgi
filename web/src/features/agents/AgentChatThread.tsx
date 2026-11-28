@@ -1,6 +1,7 @@
 import { Terminal } from "lucide-react";
 import { AgentGlyph, StatusDot } from "../../components/CorgiMark";
 import { MarkdownText } from "../../components/MarkdownText";
+import { WorkerEnvelopeBubble } from "../../components/WorkerEnvelopeBubble";
 import { formatAgentSpeakerLabel } from "../../lib/agentIdentity";
 import type { Approval, ChatMessage } from "../../types/api";
 import { ToolMessageItem } from "./ToolMessageItem";
@@ -99,13 +100,7 @@ export function AgentChatThread({
 
       {messages.map((m, idx) => {
         if (m.kind === "user") {
-          return (
-            <div key={idx} className="flex justify-end">
-              <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-sm text-[14px] pill-user whitespace-pre-wrap">
-                {m.text}
-              </div>
-            </div>
-          );
+          return <WorkerEnvelopeBubble key={idx} text={m.text ?? ""} />;
         }
         if (m.kind === "thinking") {
           return (

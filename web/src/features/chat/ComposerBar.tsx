@@ -87,7 +87,7 @@ export function ComposerBar({
 
   useEffect(() => {
     if (replyTo) {
-      textareaRef.current?.focus();
+      textareaRef.current?.focus({ preventScroll: true });
     }
   }, [replyTo?.id]);
 
@@ -603,6 +603,11 @@ export function ComposerBar({
             <button
               type="submit"
               disabled={disabled || submitting || (!text.trim() && attachments.length === 0)}
+              onPointerDown={(e) => {
+                if (document.activeElement === textareaRef.current) {
+                  e.preventDefault();
+                }
+              }}
               title={disabled ? "正在同步实时状态…" : working || queuedCount > 0 ? "加入待发队列" : "发送"}
               className="w-7 h-7 rounded-full btn-accent flex items-center justify-center cursor-pointer disabled:opacity-30"
             >

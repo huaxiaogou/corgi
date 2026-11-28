@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Menu, Plus, RefreshCw } from "lucide-react";
 import { AppShellSkeleton } from "./components/AppShellSkeleton";
 import { AgentGlyph, CorgiMark, StatusDot } from "./components/CorgiMark";
 import { Sidebar, type AppRoute } from "./components/Sidebar";
+import { TabletSidebarRail } from "./components/TabletSidebarRail";
 import { UpdatePill } from "./components/UpdatePill";
 import { AgentEndedView } from "./features/agents/AgentEndedView";
 import { AgentPaneView } from "./features/agents/AgentPaneView";
@@ -13,6 +14,7 @@ import { FileDrawer } from "./features/files/FileDrawer";
 import { LauncherModal } from "./features/launcher/LauncherModal";
 import { useCorgiStream } from "./hooks/useCorgiStream";
 import { useFleetUpdate } from "./hooks/useFleetUpdate";
+import { useKeyboardViewport } from "./hooks/useKeyboardViewport";
 import {
   formatDocumentTitle,
   formatMobileAgentBar,
@@ -26,6 +28,47 @@ export function App() {
   const [route, setRoute] = useState<AppRoute>({ view: "corgi", thread: "chat:main" });
   const [navSeq, setNavSeq] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const drawerRootRef = useRef<HTMLDivElement>(null);
+  const drawerPanelRef = useRef<HTMLDivElement>(null);
+  const lastDrawerTriggerRef = useRef<HTMLElement | null>(null);
+
+  useKeyboardViewport(drawerPanelRef, drawerOpen);
+
+  const openDrawer = useCallback((triggerEl?: HTMLElement | null) => {
+    lastDrawerTriggerRef.current = triggerEl ?? (document.activeElement as HTMLElement | null);
+    setDrawerOpen(true);
+  }, []);
+
+  const closeDrawer = useCallback(() => {
+    setDrawerOpen(false);
+    const trigger = lastDrawerTriggerRef.current;
+    if (trigger && trigger.isConnected) {
+      window.requestAnimationFrame(() => trigger.focus());
+    }
+  }, []);
+
+  useEffect(() => {
+    const el = drawerRootRef.current as (HTMLDivElement & { inert: boolean }) | null;
+    if (el) {
+      el.inert = !drawerOpen;
+    }
+    if (!drawerOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeDrawer();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    const focusTimer = window.requestAnimationFrame(() => {
+      const closeBtn = drawerPanelRef.current?.querySelector<HTMLElement>('button[aria-label="关闭侧栏"]');
+      closeBtn?.focus({ preventScroll: true });
+    });
+    return () => {
+      window.cancelAnimationFrame(focusTimer);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [drawerOpen, closeDrawer]);
 
   const selectRoute = (next: AppRoute) => {
     setRoute(next);
@@ -162,16 +205,23 @@ export function App() {
               </div>
               <button
                 type="button"
-                onClick={() => setDrawerOpen(true)}
+                onClick={(e) => openDrawer(e.currentTarget)}
                 className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer shrink-0"
                 title="打开侧栏"
+                aria-label="打开侧栏"
               >
                 <Menu className="w-4 h-4" />
               </button>
             </>
           ) : (
             <>
-              <button type="button" onClick={() => setDrawerOpen(true)} className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer" title="打开侧栏">
+              <button
+                type="button"
+                onClick={(e) => openDrawer(e.currentTarget)}
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer"
+                title="打开侧栏"
+                aria-label="打开侧栏"
+              >
                 <Menu className="w-4 h-4" />
               </button>
               <div className="flex items-center gap-2 text-sm font-semibold">
@@ -195,6 +245,18 @@ export function App() {
           )}
         </div>
 
+        <TabletSidebarRail
+          route={route}
+          pendingCount={pendingCount}
+          agents={agents}
+          stateReady={stateReady}
+          dark={dark}
+          onExpand={(triggerEl) => openDrawer(triggerEl)}
+          onSelect={selectRoute}
+          onOpenLauncher={() => setLaunchOpen(true)}
+          onToggleTheme={toggleTheme}
+        />
+
         <Sidebar
           route={route}
           superView={superView}
@@ -211,29 +273,36 @@ export function App() {
           onToast={toast}
         />
 
-        {drawerOpen && (
-          <div className="fixed inset-0 z-40 md:hidden flex" style={{ background: "rgba(0,0,0,0.35)" }} onClick={() => setDrawerOpen(false)}>
-            <div onClick={(e) => e.stopPropagation()} className="h-full">
-              <Sidebar
-                mobile
-                route={route}
-                superView={superView}
-                agents={agents}
-                shells={shells}
-                machines={machines}
-                connected={connected}
-                stateReady={stateReady}
-                dark={dark}
-                fleetUpdate={fleetUpdate}
-                onSelect={selectRoute}
-                onOpenLauncher={() => setLaunchOpen(true)}
-                onToggleTheme={toggleTheme}
-                onCloseMobile={() => setDrawerOpen(false)}
-                onToast={toast}
-              />
-            </div>
+        <div
+          ref={drawerRootRef}
+          aria-hidden={!drawerOpen}
+          className={`fixed inset-0 z-40 lg:hidden flex overlay-drawer-root ${drawerOpen ? "is-open" : ""}`}
+        >
+          <div className="absolute inset-0 overlay-drawer-scrim" onClick={closeDrawer} />
+          <div
+            ref={drawerPanelRef}
+            onClick={(e) => e.stopPropagation()}
+            className="relative z-10 h-full overlay-drawer-panel kb-drawer"
+          >
+            <Sidebar
+              mobile
+              route={route}
+              superView={superView}
+              agents={agents}
+              shells={shells}
+              machines={machines}
+              connected={connected}
+              stateReady={stateReady}
+              dark={dark}
+              fleetUpdate={fleetUpdate}
+              onSelect={selectRoute}
+              onOpenLauncher={() => setLaunchOpen(true)}
+              onToggleTheme={toggleTheme}
+              onCloseMobile={closeDrawer}
+              onToast={toast}
+            />
           </div>
-        )}
+        </div>
 
         <main className="flex-1 flex min-w-0 min-h-0 overflow-hidden">
           {route.view === "corgi" && (

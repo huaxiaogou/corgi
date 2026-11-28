@@ -1,6 +1,55 @@
 @import "tailwindcss";
 @import "./tokens.css";
 
+/* Non-inherited Houdini custom properties isolate soft-keyboard inset updates to active containers */
+@property --kb-inset {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --kb-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+.kb-dock {
+  padding-bottom: calc(1rem + var(--kb-inset));
+  contain: layout style;
+}
+.kb-drawer {
+  padding-top: var(--kb-top);
+  padding-bottom: var(--kb-inset);
+  contain: layout style;
+}
+.overlay-drawer-root {
+  pointer-events: none;
+  visibility: hidden;
+  transition: visibility 0s linear 200ms;
+}
+.overlay-drawer-root.is-open {
+  pointer-events: auto;
+  visibility: visible;
+  transition: visibility 0s linear 0s;
+}
+.overlay-drawer-scrim {
+  background: rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transition: opacity 180ms ease;
+}
+.overlay-drawer-root.is-open .overlay-drawer-scrim {
+  opacity: 1;
+}
+.overlay-drawer-panel {
+  transform: translate3d(-100%, 0, 0);
+  will-change: transform;
+  contain: layout style;
+  transition: transform 200ms var(--ease-quiet);
+}
+.overlay-drawer-root.is-open .overlay-drawer-panel {
+  transform: translate3d(0, 0, 0);
+}
+
 html, body, #root {
   height: 100%;
   margin: 0;
@@ -186,7 +235,10 @@ html, body, #root {
   }
   .margin-notebook-row,
   .notebook-acc-row,
-  .notebook-row-exiting {
+  .notebook-row-exiting,
+  .overlay-drawer-root,
+  .overlay-drawer-scrim,
+  .overlay-drawer-panel {
     transition-duration: 0.01ms !important;
   }
 }

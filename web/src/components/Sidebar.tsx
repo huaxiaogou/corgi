@@ -120,7 +120,7 @@ export function Sidebar({
 
   return (
     <aside
-      className={`${mobile ? "w-[272px] h-full" : "hidden md:flex w-[252px] shrink-0"} flex flex-col surface-rail border-r border-hairline select-none`}
+      className={`${mobile ? "w-[272px] h-full" : "hidden lg:flex w-[252px] shrink-0"} flex flex-col surface-rail border-r border-hairline select-none`}
     >
       <div className="h-14 px-4 flex items-center justify-between">
         <div className="flex items-center gap-2.5">
@@ -143,6 +143,8 @@ export function Sidebar({
             <button
               type="button"
               onClick={onCloseMobile}
+              aria-label="关闭侧栏"
+              title="关闭侧栏"
               className="w-7 h-7 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer"
             >
               <X className="w-4 h-4" />
