@@ -53,6 +53,9 @@ func (s *Server) handleSuperSay(w http.ResponseWriter, r *http.Request) {
 		req.From = "machine"
 		req.Media = nil
 	}
+	if req.Channel != "web" {
+		req.InPlace = false
+	}
 	queued, item, entry, trig, err := s.Engine.SubmitChatSay(r.Context(), req.SayRequest, req.Mode)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -272,6 +275,7 @@ func (s *Server) handleResolveAction(w http.ResponseWriter, r *http.Request) {
 		Choices []string `json:"choices"`
 		By      string   `json:"by"`
 		Custom  bool     `json:"custom"`
+		InPlace bool     `json:"in_place"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -282,7 +286,7 @@ func (s *Server) handleResolveAction(w http.ResponseWriter, r *http.Request) {
 		err error
 	)
 	if body.Custom {
-		act, err = s.Engine.ResolveActionCustom(r.Context(), id, by, body.Choice)
+		act, err = s.Engine.ResolveActionCustomInPlace(r.Context(), id, by, body.Choice, body.InPlace)
 	} else if len(body.Choices) > 0 {
 		act, err = s.Engine.ResolveActionChoices(r.Context(), id, by, body.Choices)
 	} else {

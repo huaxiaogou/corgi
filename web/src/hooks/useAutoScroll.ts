@@ -11,6 +11,8 @@ interface UseAutoScrollOptions {
   hasContent: boolean;
   /** Set false when another renderer (e.g. xterm.js) owns scrolling. */
   enabled?: boolean;
+  /** Optional scroll observer for viewport-aware features (e.g. unread anchor tracking). */
+  onViewportScroll?: (container: HTMLDivElement) => void;
 }
 
 const STICK_THRESHOLD_PX = 80;
@@ -18,15 +20,24 @@ const JUMP_BUTTON_THRESHOLD_PX = 180;
 const INITIAL_SETTLE_MS = 650;
 const USER_GESTURE_WINDOW_MS = 800;
 
+function isInlineReplyFocused(): boolean {
+  if (typeof document === "undefined") return false;
+  const active = document.activeElement;
+  return Boolean(active && active instanceof Element && active.closest("[data-inline-reply-box]"));
+}
+
 export function useAutoScroll({
   resetKey,
   contentKey,
   prependKey,
   hasContent,
   enabled = true,
+  onViewportScroll,
 }: UseAutoScrollOptions) {
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const onViewportScrollRef = useRef(onViewportScroll);
+  onViewportScrollRef.current = onViewportScroll;
   const pendingInitialRef = useRef(true);
   const stickToBottomRef = useRef(true);
   const userScrolledUpRef = useRef(false);
@@ -35,11 +46,14 @@ export function useAutoScroll({
   const lastScrollTopRef = useRef(0);
   const jumpingRef = useRef(false);
   const jumpTimerRef = useRef<number | null>(null);
+  const targetJumpingRef = useRef(false);
+  const targetJumpTimerRef = useRef<number | null>(null);
   const raf1Ref = useRef<number | null>(null);
   const raf2Ref = useRef<number | null>(null);
   const prependSnapRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const visibleAnchorRef = useRef<{ entryId: string; topOffset: number; expiresAt: number } | null>(null);
   const [showJumpBottom, setShowJumpBottom] = useState(false);
+  const [userScrolledUp, setUserScrolledUp] = useState(false);
 
   const cancelRafs = useCallback(() => {
     if (raf1Ref.current !== null) {
@@ -58,6 +72,11 @@ export function useAutoScroll({
       window.clearTimeout(jumpTimerRef.current);
       jumpTimerRef.current = null;
     }
+    targetJumpingRef.current = false;
+    if (targetJumpTimerRef.current !== null) {
+      window.clearTimeout(targetJumpTimerRef.current);
+      targetJumpTimerRef.current = null;
+    }
   }, []);
 
   const snapNow = useCallback((el: HTMLDivElement) => {
@@ -70,12 +89,12 @@ export function useAutoScroll({
     raf1Ref.current = window.requestAnimationFrame(() => {
       raf1Ref.current = null;
       const el = containerRef.current;
-      if (!el || !stickToBottomRef.current || userScrolledUpRef.current || prependSnapRef.current) return;
+      if (!el || !stickToBottomRef.current || userScrolledUpRef.current || prependSnapRef.current || isInlineReplyFocused()) return;
       snapNow(el);
       raf2Ref.current = window.requestAnimationFrame(() => {
         raf2Ref.current = null;
         const el2 = containerRef.current;
-        if (!el2 || !stickToBottomRef.current || userScrolledUpRef.current || prependSnapRef.current) return;
+        if (!el2 || !stickToBottomRef.current || userScrolledUpRef.current || prependSnapRef.current || isInlineReplyFocused()) return;
         snapNow(el2);
       });
     });
@@ -91,6 +110,7 @@ export function useAutoScroll({
         clearJumpGuard();
         stickToBottomRef.current = true;
         userScrolledUpRef.current = false;
+        setUserScrolledUp(false);
         setShowJumpBottom(false);
       }
       return;
@@ -99,12 +119,13 @@ export function useAutoScroll({
     if (gap <= STICK_THRESHOLD_PX) {
       stickToBottomRef.current = true;
       userScrolledUpRef.current = false;
+      setUserScrolledUp(false);
       setShowJumpBottom(false);
       return;
     }
 
     const userActive = movedUp || performance.now() < userGestureUntilRef.current;
-    if (allowAutoResnap && stickToBottomRef.current && !userScrolledUpRef.current && !userActive) {
+    if (allowAutoResnap && stickToBottomRef.current && !userScrolledUpRef.current && !userActive && !isInlineReplyFocused()) {
       snapNow(el);
       setShowJumpBottom(false);
       return;
@@ -112,6 +133,7 @@ export function useAutoScroll({
 
     stickToBottomRef.current = false;
     userScrolledUpRef.current = true;
+    setUserScrolledUp(true);
     setShowJumpBottom(gap > JUMP_BUTTON_THRESHOLD_PX);
   }, [clearJumpGuard, snapNow]);
 
@@ -120,6 +142,7 @@ export function useAutoScroll({
     if (!enabled || !el) return;
     if (pendingInitialRef.current || prependSnapRef.current) return;
     updateScrollState(el, true);
+    onViewportScrollRef.current?.(el);
   }, [enabled, updateScrollState]);
 
   const capturePrependAnchor = useCallback(() => {
@@ -130,6 +153,7 @@ export function useAutoScroll({
     pendingInitialRef.current = false;
     stickToBottomRef.current = false;
     userScrolledUpRef.current = true;
+    setUserScrolledUp(true);
     initialSettleUntilRef.current = 0;
     prependSnapRef.current = {
       scrollHeight: el.scrollHeight,
@@ -163,6 +187,7 @@ export function useAutoScroll({
     pendingInitialRef.current = false;
     stickToBottomRef.current = false;
     userScrolledUpRef.current = true;
+    setUserScrolledUp(true);
     initialSettleUntilRef.current = 0;
     visibleAnchorRef.current = {
       ...chosen,
@@ -170,10 +195,37 @@ export function useAutoScroll({
     };
   }, [cancelRafs, clearJumpGuard]);
 
+  const scrollToEntry = useCallback(
+    (entryId: string): boolean => {
+      const el = containerRef.current;
+      if (!el || !entryId) return false;
+      const target = el.querySelector<HTMLElement>(`#entry-${CSS.escape(entryId)}`);
+      if (!target) return false;
+      cancelRafs();
+      clearJumpGuard();
+      pendingInitialRef.current = false;
+      stickToBottomRef.current = false;
+      userScrolledUpRef.current = true;
+      setUserScrolledUp(true);
+      targetJumpingRef.current = true;
+      targetJumpTimerRef.current = window.setTimeout(() => {
+        targetJumpingRef.current = false;
+        targetJumpTimerRef.current = null;
+      }, 750);
+      const cRect = el.getBoundingClientRect();
+      const tRect = target.getBoundingClientRect();
+      const targetTop = Math.max(0, el.scrollTop + (tRect.top - cRect.top) - 48);
+      el.scrollTo({ top: targetTop, behavior: "smooth" });
+      return true;
+    },
+    [cancelRafs, clearJumpGuard]
+  );
+
   const scrollToBottom = useCallback((smooth = false) => {
     const el = containerRef.current;
     stickToBottomRef.current = true;
     userScrolledUpRef.current = false;
+    setUserScrolledUp(false);
     prependSnapRef.current = null;
     visibleAnchorRef.current = null;
     setShowJumpBottom(false);
@@ -201,6 +253,7 @@ export function useAutoScroll({
     pendingInitialRef.current = true;
     stickToBottomRef.current = true;
     userScrolledUpRef.current = false;
+    setUserScrolledUp(false);
     userGestureUntilRef.current = 0;
     initialSettleUntilRef.current = 0;
     prependSnapRef.current = null;
@@ -231,7 +284,7 @@ export function useAutoScroll({
       if (performance.now() > anchor.expiresAt) {
         visibleAnchorRef.current = null;
       } else {
-        const target = el.querySelector<HTMLElement>(`#entry-${anchor.entryId}`);
+        const target = el.querySelector<HTMLElement>(`#entry-${CSS.escape(anchor.entryId)}`);
         if (target) {
           const delta = target.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.topOffset;
           if (Math.abs(delta) > 0.5) {
@@ -247,13 +300,14 @@ export function useAutoScroll({
       pendingInitialRef.current = false;
       stickToBottomRef.current = true;
       userScrolledUpRef.current = false;
+      setUserScrolledUp(false);
       initialSettleUntilRef.current = performance.now() + INITIAL_SETTLE_MS;
       setShowJumpBottom(false);
       snapNow(el);
       scheduleSnapConfirm();
       return;
     }
-    if (stickToBottomRef.current && !userScrolledUpRef.current) {
+    if (stickToBottomRef.current && !userScrolledUpRef.current && !isInlineReplyFocused()) {
       setShowJumpBottom(false);
       snapNow(el);
       scheduleSnapConfirm();
@@ -265,18 +319,22 @@ export function useAutoScroll({
     const el = containerRef.current;
     if (!enabled || !el) return;
 
+    const cancelActiveSmoothScroll = () => {
+      if (jumpingRef.current || targetJumpingRef.current) {
+        clearJumpGuard();
+        el.scrollTo({ top: el.scrollTop, behavior: "auto" });
+      }
+    };
     const markUserGesture = () => {
       userGestureUntilRef.current = performance.now() + USER_GESTURE_WINDOW_MS;
       visibleAnchorRef.current = null;
-      if (jumpingRef.current) {
-        clearJumpGuard();
-      }
+      cancelActiveSmoothScroll();
     };
     const onWheel = (ev: WheelEvent) => {
       if (ev.deltaY < 0) {
         markUserGesture();
-      } else if (jumpingRef.current) {
-        clearJumpGuard();
+      } else {
+        cancelActiveSmoothScroll();
       }
     };
     const onKeyDown = (ev: KeyboardEvent) => {
@@ -285,13 +343,19 @@ export function useAutoScroll({
       }
     };
     const onMediaLoad = () => {
-      if (stickToBottomRef.current && !userScrolledUpRef.current && !prependSnapRef.current) {
+      if (stickToBottomRef.current && !userScrolledUpRef.current && !prependSnapRef.current && !isInlineReplyFocused()) {
         snapNow(el);
       }
     };
 
     const viewportRO = new ResizeObserver(() => {
-      if (stickToBottomRef.current && !userScrolledUpRef.current && !prependSnapRef.current && !pendingInitialRef.current) {
+      if (
+        stickToBottomRef.current &&
+        !userScrolledUpRef.current &&
+        !prependSnapRef.current &&
+        !pendingInitialRef.current &&
+        !isInlineReplyFocused()
+      ) {
         snapNow(el);
       }
     });
@@ -304,7 +368,8 @@ export function useAutoScroll({
             performance.now() < initialSettleUntilRef.current &&
             stickToBottomRef.current &&
             !userScrolledUpRef.current &&
-            !prependSnapRef.current
+            !prependSnapRef.current &&
+            !isInlineReplyFocused()
           ) {
             snapNow(el);
           }
@@ -340,7 +405,9 @@ export function useAutoScroll({
     contentRef,
     onScroll,
     showJumpBottom,
+    userScrolledUp,
     scrollToBottom,
+    scrollToEntry,
     capturePrependAnchor,
     captureVisibleAnchor,
   };

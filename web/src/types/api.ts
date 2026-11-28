@@ -48,6 +48,7 @@ export interface Entry {
   work_item_id?: string;
   check?: boolean;
   pinned?: boolean;
+  in_place?: boolean;
 }
 
 export interface ActionChoice {
@@ -201,6 +202,7 @@ export interface QueuedPrompt {
   thread?: string;
   text: string;
   re?: string;
+  in_place?: boolean;
   machine?: string;
   kind?: string;
   model?: string;

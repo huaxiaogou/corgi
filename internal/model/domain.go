@@ -69,6 +69,7 @@ type Entry struct {
 	WorkItemID  string            `json:"work_item_id,omitempty"`
 	Check       bool              `json:"check,omitempty"`
 	Pinned      bool              `json:"pinned,omitempty"`
+	InPlace     bool              `json:"in_place,omitempty"`
 }
 
 // ArtifactSummary is the compact, UI-facing descriptor for a Hub-hosted immutable deliverable snapshot.

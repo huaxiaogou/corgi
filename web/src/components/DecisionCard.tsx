@@ -17,6 +17,7 @@ export interface DecisionResolvePayload {
   choice?: string;
   choices?: string[];
   custom?: boolean;
+  inPlace?: boolean;
 }
 
 interface Props {
@@ -305,6 +306,7 @@ export function DecisionCard({
         )}
 
         <DecisionCardFooter
+          actionId={action.id}
           busy={locked}
           isWorkerDialog={isWorkerDialog}
           isPatrolDigest={isPatrolDigest}

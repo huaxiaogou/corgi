@@ -109,6 +109,7 @@ type QueuedPrompt struct {
 	Thread      string     `json:"thread,omitempty"`
 	Text        string     `json:"text"`
 	ReEntryID   string     `json:"re,omitempty"`
+	InPlace     bool       `json:"in_place,omitempty"`
 	Machine     string     `json:"machine,omitempty"`
 	Kind        string     `json:"kind,omitempty"`
 	Model       string     `json:"model,omitempty"`

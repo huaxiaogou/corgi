@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, Check, Download, ExternalLink, Link2, Pin, X } from "lucide-react";
 import { CorgiButtMark, CorgiMark, StatusDot } from "../../components/CorgiMark";
 import { DecisionCard, type DecisionResolvePayload } from "../../components/DecisionCard";
@@ -6,6 +6,8 @@ import { isFastSingleAction } from "../../lib/decisionCard";
 import { DecisionReceiptCard } from "../../components/DecisionReceiptCard";
 import { ImageGallery } from "../../components/ImageGallery";
 import { ImageLightbox } from "../../components/ImageLightbox";
+import { InPlaceReplies } from "../../components/InPlaceReplies";
+import { InlineReplyBox, type InlineReplyMode } from "../../components/InlineReplyBox";
 import { MarkdownText, type MarkdownImagePayload } from "../../components/MarkdownText";
 import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { QuoteBlock } from "../../components/QuoteBlock";
@@ -17,6 +19,19 @@ import {
   partitionEntryFiles,
   type GalleryImageItem,
 } from "../../lib/imageGallery";
+import {
+  hasDraftText,
+  partitionInPlaceReplies,
+  setDraftEntry,
+  shouldUseInlineReplyBox,
+} from "../../lib/inPlaceReply";
+import {
+  computeLatestSeq,
+  computeUnreadSummary,
+  nextReadSeqOnStick,
+  readStoredReadSeq,
+  writeStoredReadSeq,
+} from "../../lib/unreadTracker";
 import {
   isDecisionAction,
   isInlineBubbleAction,
@@ -101,6 +116,9 @@ function artifactBadgeLabel(kind: string): string {
 
 export function CorgiChatView({ data, superReady = true, machines, thread, focusSeq = 0, onSelectWorker, onOpenFile, onOpenArtifact, onOpenSettings, onToast }: Props) {
   const [replyTo, setReplyTo] = useState<Entry | null>(null);
+  const [replyInPlace, setReplyInPlace] = useState(false);
+  const [replyActionTarget, setReplyActionTarget] = useState<Action | null>(null);
+  const [draftsByEntryId, setDraftsByEntryId] = useState<Record<string, string>>({});
   const [resumingWorkerKey, setResumingWorkerKey] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQ, setSearchQ] = useState("");
@@ -116,6 +134,8 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
   const [moreOlder, setMoreOlder] = useState<boolean | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [highlightedEntryId, setHighlightedEntryId] = useState("");
+  const [readSeq, setReadSeq] = useState(() => readStoredReadSeq(thread));
+  const [firstUnreadPassed, setFirstUnreadPassed] = useState(false);
   const [optimisticQueued, setOptimisticQueued] = useState<QueuedPrompt[]>([]);
   const [removedQueueIds, setRemovedQueueIds] = useState<string[]>([]);
   const [queueBusyId, setQueueBusyId] = useState("");
@@ -125,6 +145,9 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
   const [lightboxState, setLightboxState] = useState<{ items: GalleryImageItem[]; index: number } | null>(null);
   const [isDesktop, setIsDesktop] = useState(() =>
     typeof window !== "undefined" ? window.matchMedia("(min-width: 1024px)").matches : true
+  );
+  const [isTabletOrDesktop, setIsTabletOrDesktop] = useState(() =>
+    typeof window !== "undefined" ? shouldUseInlineReplyBox(window.innerWidth) : true
   );
   const [notebookMode, setNotebookMode] = useState<NotebookMode>(() =>
     typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches
@@ -136,16 +159,38 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
   const tmpSeqRef = useRef(0);
   const draftSeqRef = useRef(0);
   const highlightTimerRef = useRef<number | null>(null);
+  const inlineOpenersRef = useRef<Map<string, (mode: InlineReplyMode) => void>>(new Map());
+  const firstUnreadIdRef = useRef("");
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const mq = window.matchMedia("(min-width: 1024px)");
-    const onChange = (e: MediaQueryListEvent) => {
+    const mqDesktop = window.matchMedia("(min-width: 1024px)");
+    const mqTablet = window.matchMedia("(min-width: 768px)");
+    const onDesktopChange = (e: MediaQueryListEvent) => {
       setIsDesktop(e.matches);
       setNotebookMode(e.matches ? readDesktopNotebookMode() : "hidden");
     };
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
+    const onTabletChange = (e: MediaQueryListEvent) => {
+      setIsTabletOrDesktop(e.matches);
+    };
+    mqDesktop.addEventListener("change", onDesktopChange);
+    mqTablet.addEventListener("change", onTabletChange);
+    return () => {
+      mqDesktop.removeEventListener("change", onDesktopChange);
+      mqTablet.removeEventListener("change", onTabletChange);
+    };
+  }, []);
+
+  const registerInlineOpen = useCallback((entryId: string, opener: ((mode: InlineReplyMode) => void) | null) => {
+    if (opener) {
+      inlineOpenersRef.current.set(entryId, opener);
+    } else {
+      inlineOpenersRef.current.delete(entryId);
+    }
+  }, []);
+
+  const updateInlineDraft = useCallback((entryId: string, value: string) => {
+    setDraftsByEntryId((prev) => setDraftEntry(prev, entryId, value));
   }, []);
 
   const updateNotebookMode = (next: NotebookMode) => {
@@ -170,6 +215,11 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
     setOptimisticQueued([]);
     setRemovedQueueIds([]);
     setLinkedWork(null);
+    setReplyTo(null);
+    setReplyInPlace(false);
+    setReplyActionTarget(null);
+    setReadSeq(readStoredReadSeq(thread));
+    setFirstUnreadPassed(false);
   }, [thread]);
 
   useEffect(() => {
@@ -218,6 +268,7 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
   const pendingDecisions = pendingActions.filter(isDecisionAction);
   const pendingChecks = pendingActions.filter((a) => !isDecisionAction(a));
   const visibleEntries = entries.filter((e) => !isRoutineChatterEvent(e, resolvedActions));
+  const { timelineEntries, inPlaceByTarget } = useMemo(() => partitionInPlaceReplies(visibleEntries), [visibleEntries]);
   const visibleEntryIds = new Set(visibleEntries.map((e) => e.id));
   const pendingByEntryId = new Map<string, Action>();
   for (const act of pendingActions) {
@@ -254,7 +305,31 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
   const routerWorking = router?.status === "working";
   const hasThreadContent = entries.length > 0 || pendingActions.length > 0 || routerWorking;
 
-  const { containerRef, contentRef, onScroll, showJumpBottom, scrollToBottom, capturePrependAnchor, captureVisibleAnchor } = useAutoScroll({
+  const latestLoadedSeq = useMemo(() => computeLatestSeq(entries), [entries]);
+
+  const checkFirstUnreadInView = useCallback((el: HTMLDivElement) => {
+    const targetId = firstUnreadIdRef.current;
+    if (!targetId) return;
+    const node = el.querySelector<HTMLElement>(`#entry-${CSS.escape(targetId)}`);
+    if (!node) return;
+    const cRect = el.getBoundingClientRect();
+    const nRect = node.getBoundingClientRect();
+    if (nRect.top <= cRect.bottom - 24) {
+      setFirstUnreadPassed(true);
+    }
+  }, []);
+
+  const {
+    containerRef,
+    contentRef,
+    onScroll,
+    showJumpBottom,
+    userScrolledUp,
+    scrollToBottom,
+    scrollToEntry,
+    capturePrependAnchor,
+    captureVisibleAnchor,
+  } = useAutoScroll({
     resetKey: `${thread}:${focusSeq}`,
     contentKey: [
       liveEntries.length,
@@ -264,7 +339,53 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
     ].join("|"),
     prependKey: olderEntries.length,
     hasContent: liveEntries.length > 0 || pendingActions.length > 0,
+    onViewportScroll: checkFirstUnreadInView,
   });
+
+  const unreadSummary = useMemo(
+    () =>
+      computeUnreadSummary({
+        entries,
+        readSeq,
+        userScrolledUp,
+        showJumpBottom,
+        firstUnreadPassed,
+        hasEarlier: canLoadMore,
+      }),
+    [entries, readSeq, userScrolledUp, showJumpBottom, firstUnreadPassed, canLoadMore]
+  );
+
+  firstUnreadIdRef.current = unreadSummary.firstUnreadId;
+
+  useEffect(() => {
+    if (!unreadSummary.firstUnreadId) {
+      setFirstUnreadPassed(false);
+    }
+  }, [unreadSummary.firstUnreadId]);
+
+  useEffect(() => {
+    if (!superReady || userScrolledUp || latestLoadedSeq <= 0) return;
+    const next = nextReadSeqOnStick({
+      superReady,
+      currentReadSeq: readSeq,
+      latestSeq: latestLoadedSeq,
+    });
+    if (next > readSeq) {
+      setReadSeq(next);
+      writeStoredReadSeq(thread, next);
+      setFirstUnreadPassed(false);
+    }
+  }, [superReady, userScrolledUp, latestLoadedSeq, readSeq, thread]);
+
+  const flashEntryHighlight = useCallback((entryId: string, durationMs = 1600) => {
+    setHighlightedEntryId(entryId);
+    if (highlightTimerRef.current !== null) {
+      window.clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = window.setTimeout(() => {
+      setHighlightedEntryId((cur) => (cur === entryId ? "" : cur));
+    }, durationMs);
+  }, []);
 
   const jumpToEntry = (entryId: string) => {
     const el = document.getElementById(`entry-${entryId}`);
@@ -273,13 +394,34 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
       return;
     }
     el.scrollIntoView({ behavior: "smooth", block: "center" });
-    setHighlightedEntryId(entryId);
-    if (highlightTimerRef.current !== null) {
-      window.clearTimeout(highlightTimerRef.current);
+    flashEntryHighlight(entryId, 1600);
+  };
+
+  const jumpToFirstUnread = () => {
+    if (!unreadSummary.firstUnreadId) return;
+    const ok = scrollToEntry(unreadSummary.firstUnreadId);
+    if (!ok) {
+      scrollToBottom(true);
+      return;
     }
-    highlightTimerRef.current = window.setTimeout(() => {
-      setHighlightedEntryId((cur) => (cur === entryId ? "" : cur));
-    }, 1600);
+    flashEntryHighlight(unreadSummary.firstUnreadId, 1200);
+    setFirstUnreadPassed(true);
+  };
+
+  const jumpToBottomAndMarkRead = () => {
+    scrollToBottom(true);
+    if (superReady && latestLoadedSeq > 0) {
+      const next = nextReadSeqOnStick({
+        superReady,
+        currentReadSeq: readSeq,
+        latestSeq: latestLoadedSeq,
+      });
+      if (next > readSeq) {
+        setReadSeq(next);
+        writeStoredReadSeq(thread, next);
+      }
+      setFirstUnreadPassed(false);
+    }
   };
 
   const openWorkerByName = (name: string) => {
@@ -519,10 +661,15 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
           {searchHits.length > 0 && (
             <div className="max-h-36 overflow-y-auto space-y-1 text-xs">
               {searchHits.map((h) => (
-                <div key={h.id} className="px-2.5 py-1.5 rounded-lg surface-bg border border-hairline text-secondary truncate">
+                <button
+                  key={h.id}
+                  type="button"
+                  onClick={() => jumpToEntry(h.id)}
+                  className="w-full text-left px-2.5 py-1.5 rounded-lg surface-bg border border-hairline surface-hover text-secondary truncate cursor-pointer"
+                >
                   <span className="font-mono-code text-muted mr-2">{h.role}</span>
                   {h.snippet}
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -756,7 +903,7 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
 
           {(() => {
             const quoteState: QuoteVisibilityState = { lastUserId: "", seenSinceUser: false, lastEventRef: "" };
-            return visibleEntries.map((entry, idx) => {
+            return timelineEntries.map((entry, idx) => {
               const hlClass = highlightedEntryId === entry.id ? "entry-highlight px-2 py-1.5 -mx-2 transition-colors" : "transition-colors";
               if (entry.role === "event") {
                 quoteState.lastEventRef = entry.ref ?? "";
@@ -842,8 +989,8 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
                       ? legacyAct
                       : undefined;
                 if (receiptAction) {
-                  const hasFollowingReply = visibleEntries.slice(idx + 1, idx + 5).some((n) => n.role === "corgi");
-                  const isLatestUserEntry = idx === visibleEntries.length - 1;
+                  const hasFollowingReply = timelineEntries.slice(idx + 1, idx + 5).some((n) => n.role === "corgi");
+                  const isLatestUserEntry = idx === timelineEntries.length - 1;
                   const statusNote = hasFollowingReply
                     ? "Corgi 已响应"
                     : isLatestUserEntry && routerWorking
@@ -857,7 +1004,11 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
                         originEntryId={entry.re?.entry || receiptAction.entry_id}
                         statusNote={statusNote}
                         onJumpToEntry={jumpToEntry}
-                        onFollowUp={() => setReplyTo(entry.action_id ? entry : { ...entry, action_id: receiptAction.id })}
+                        onFollowUp={() => {
+                          setReplyInPlace(false);
+                          setReplyActionTarget(null);
+                          setReplyTo(entry.action_id ? entry : { ...entry, action_id: receiptAction.id });
+                        }}
                         onOpenWorker={openWorkerByName}
                       />
                     </div>
@@ -1238,10 +1389,22 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
                         <button
                           type="button"
                           disabled={inlineBusy || !superReady}
-                          onClick={() => setReplyTo(entry)}
-                          className="px-2.5 py-1 rounded-full text-xs border border-hairline text-secondary surface-hover cursor-pointer disabled:opacity-50"
+                          onClick={() => {
+                            const opener = inlineOpenersRef.current.get(entry.id);
+                            if (opener) {
+                              opener("action");
+                            } else {
+                              setReplyTo(entry);
+                              setReplyInPlace(true);
+                              setReplyActionTarget(inlineAction);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs border border-hairline text-secondary surface-hover cursor-pointer disabled:opacity-50"
                         >
-                          回复其他…
+                          <span>回复其他…</span>
+                          {hasDraftText(draftsByEntryId, entry.id) && (
+                            <span className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--attn)" }} />
+                          )}
                         </button>
                         <button
                           type="button"
@@ -1254,8 +1417,124 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
                         </button>
                       </div>
                     )}
-                    <div className="flex items-center gap-3 text-[11px] text-muted opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button type="button" onClick={() => setReplyTo(entry)} className="hover:underline cursor-pointer">
+                    <InPlaceReplies
+                      replies={inPlaceByTarget.get(entry.id) ?? []}
+                      resolvedActions={resolvedActions}
+                      highlightedEntryId={highlightedEntryId}
+                    />
+                    <InlineReplyBox
+                      key={entry.id}
+                      entryId={entry.id}
+                      initialDraft={draftsByEntryId[entry.id] ?? ""}
+                      disabled={!superReady || inlineBusy}
+                      isDesktopOrTablet={isTabletOrDesktop}
+                      hasInlineAction={Boolean(inlineAction)}
+                      onDraftChange={updateInlineDraft}
+                      onRegisterOpen={registerInlineOpen}
+                      onMobileReply={(mode) => {
+                        setReplyTo(entry);
+                        setReplyInPlace(true);
+                        setReplyActionTarget(mode === "action" && inlineAction ? inlineAction : null);
+                      }}
+                      onSubmit={async (replyText, mode) => {
+                        captureVisibleAnchor();
+                        if (mode === "action" && inlineAction) {
+                          setBusyActionId(inlineAction.id);
+                          try {
+                            await api(`/api/super/actions/${encodeURIComponent(inlineAction.id)}/resolve`, {
+                              choice: replyText,
+                              custom: true,
+                              in_place: true,
+                              by: "web",
+                            });
+                            onToast("已原位提交自定义回答并同步");
+                          } catch (err) {
+                            onToast(err instanceof Error ? err.message : "提交失败");
+                            throw err;
+                          } finally {
+                            setBusyActionId((cur) => (cur === inlineAction.id ? "" : cur));
+                          }
+                          return;
+                        }
+                        const shouldQueue = router?.status === "working" || effectiveQueue.length > 0;
+                        const clientMsgId =
+                          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+                            ? crypto.randomUUID()
+                            : `ip-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+                        const tmpId = shouldQueue ? `tmp-${++tmpSeqRef.current}` : "";
+                        if (tmpId) {
+                          setOptimisticQueued((prev) => [
+                            ...prev,
+                            { id: tmpId, thread, text: replyText, re: entry.id, in_place: true, created_at: new Date().toISOString() },
+                          ]);
+                        }
+                        try {
+                          const res = await api<{ ok: boolean; queued?: boolean; item?: QueuedPrompt }>("/api/super/say", {
+                            thread,
+                            text: replyText,
+                            re: entry.id,
+                            in_place: true,
+                            client_msg_id: clientMsgId,
+                            mode: shouldQueue ? "queue" : "auto",
+                          });
+                          if (tmpId) {
+                            setOptimisticQueued((prev) => {
+                              const without = prev.filter((x) => x.id !== tmpId);
+                              return res.queued && res.item ? [...without, res.item] : without;
+                            });
+                          } else if (res.queued && res.item) {
+                            setOptimisticQueued((prev) => [...prev, res.item!]);
+                          }
+                          onToast(res.queued ? "已加入待发队列（原位）" : "已原位补充");
+                        } catch (err) {
+                          if (tmpId) {
+                            setOptimisticQueued((prev) => prev.filter((x) => x.id !== tmpId));
+                          }
+                          onToast(err instanceof Error ? err.message : "发送失败");
+                          throw err;
+                        }
+                      }}
+                    />
+                    <div
+                      className={`flex items-center gap-3 text-[11px] text-muted transition-opacity ${
+                        hasDraftText(draftsByEntryId, entry.id)
+                          ? "opacity-100"
+                          : "opacity-0 group-hover:opacity-100"
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        disabled={!superReady}
+                        onClick={() => {
+                          const opener = inlineOpenersRef.current.get(entry.id);
+                          if (opener) {
+                            opener("say");
+                          } else {
+                            setReplyTo(entry);
+                            setReplyInPlace(true);
+                            setReplyActionTarget(null);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 hover:underline cursor-pointer disabled:opacity-40"
+                      >
+                        <span>原位补充</span>
+                        {hasDraftText(draftsByEntryId, entry.id) && (
+                          <span
+                            className="w-1.5 h-1.5 rounded-full"
+                            style={{ background: "var(--attn)" }}
+                            title="有未发送草稿"
+                          />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReplyInPlace(false);
+                          setReplyActionTarget(null);
+                          setReplyTo(entry);
+                        }}
+                        className="hover:underline cursor-pointer"
+                      >
                         引用回复
                       </button>
                       <button type="button" disabled={!superReady} onClick={() => void api("/api/super/pin", { id: entry.id, pinned: !entry.pinned })} className="inline-flex items-center gap-1 hover:underline cursor-pointer disabled:opacity-40">
@@ -1336,14 +1615,34 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
             )}
           </div>
         </div>
-        {showJumpBottom && (
+        {unreadSummary.jumpStage === "unread" && (
           <button
             type="button"
-            onClick={() => scrollToBottom(true)}
-            className="absolute bottom-3 left-1/2 -translate-x-1/2 inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs card-floating border-strong text-secondary surface-hover cursor-pointer"
+            onClick={jumpToFirstUnread}
+            title={
+              unreadSummary.windowTruncated
+                ? "统计范围为当前已加载窗口，点击跳到第一条未读消息"
+                : "跳到第一条未读消息"
+            }
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs card-floating border-strong text-primary surface-hover cursor-pointer"
           >
-            <ArrowDown className="w-3.5 h-3.5" />
-            <span>回到最新</span>
+            <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: "var(--attn)" }} />
+            <ArrowDown className="w-3.5 h-3.5 text-secondary" />
+            <span>
+              {unreadSummary.unreadCount}
+              {unreadSummary.windowTruncated ? "+" : ""} 条未读
+            </span>
+          </button>
+        )}
+        {unreadSummary.jumpStage === "bottom" && (
+          <button
+            type="button"
+            onClick={jumpToBottomAndMarkRead}
+            aria-label="回到最新"
+            title="回到最新"
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 w-8 h-8 inline-flex items-center justify-center rounded-full card-floating border-strong text-secondary hover:text-primary surface-hover cursor-pointer"
+          >
+            <ArrowDown className="w-4 h-4" />
           </button>
         )}
       </div>
@@ -1359,7 +1658,9 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
             setRemovedQueueIds((prev) => [...prev, item.id]);
             try {
               await api(`/api/super/queue/${encodeURIComponent(item.id)}/steer`, { thread });
-              scrollToBottom(true);
+              if (!item.in_place) {
+                scrollToBottom(true);
+              }
             } catch (err) {
               setRemovedQueueIds((prev) => prev.filter((x) => x !== item.id));
               onToast(err instanceof Error ? err.message : "引导发送失败");
@@ -1417,22 +1718,54 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
               setStopping(false);
             }
           }}
-          onClearReply={() => setReplyTo(null)}
+          onClearReply={() => {
+            setReplyTo(null);
+            setReplyInPlace(false);
+            setReplyActionTarget(null);
+          }}
           onClearLinkedWork={() => setLinkedWork(null)}
           onToast={onToast}
           onSend={async ({ text, machine, kind, model, effort, projectId, media, clientMsgId }) => {
             const reId = replyTo?.id ?? "";
+            const isInPlaceSend = Boolean(replyInPlace && reId);
+            const actionTarget = replyActionTarget;
+            if (actionTarget) {
+              captureVisibleAnchor();
+              try {
+                await api(`/api/super/actions/${encodeURIComponent(actionTarget.id)}/resolve`, {
+                  choice: text,
+                  custom: true,
+                  in_place: isInPlaceSend,
+                  by: "web",
+                });
+                setReplyTo(null);
+                setReplyInPlace(false);
+                setReplyActionTarget(null);
+                onToast("已提交自定义回答并同步");
+              } catch (err) {
+                onToast(err instanceof Error ? err.message : "提交失败");
+                throw err;
+              }
+              return;
+            }
             const finalText = linkedWork ? formatWorkItemPrompt(linkedWork, text) : text;
             const shouldQueue = router?.status === "working" || effectiveQueue.length > 0;
             const tmpId = shouldQueue ? `tmp-${++tmpSeqRef.current}` : "";
+            if (isInPlaceSend) {
+              captureVisibleAnchor();
+            }
             if (tmpId) {
-              setOptimisticQueued((prev) => [...prev, { id: tmpId, thread, text: finalText, created_at: new Date().toISOString() }]);
+              setOptimisticQueued((prev) => [
+                ...prev,
+                { id: tmpId, thread, text: finalText, re: reId || undefined, in_place: isInPlaceSend || undefined, created_at: new Date().toISOString() },
+              ]);
             }
             try {
               const res = await api<{ ok: boolean; queued?: boolean; item?: QueuedPrompt }>("/api/super/say", {
                 thread,
                 text: finalText,
                 re: reId,
+                in_place: isInPlaceSend,
                 machine,
                 kind,
                 model,
@@ -1443,6 +1776,8 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
                 mode: shouldQueue ? "queue" : "auto",
               });
               setReplyTo(null);
+              setReplyInPlace(false);
+              setReplyActionTarget(null);
               setLinkedWork(null);
               if (tmpId) {
                 setOptimisticQueued((prev) => {
@@ -1452,7 +1787,7 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
               } else if (res.queued && res.item) {
                 setOptimisticQueued((prev) => [...prev, res.item!]);
               }
-              if (!res.queued) {
+              if (!res.queued && !isInPlaceSend) {
                 scrollToBottom(true);
               }
             } catch (err) {

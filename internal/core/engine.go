@@ -73,6 +73,7 @@ type SayRequest struct {
 	From          string           `json:"from"`
 	Text          string           `json:"text"`
 	ReEntryID     string           `json:"re"`
+	InPlace       bool             `json:"in_place,omitempty"`
 	ActionID      string           `json:"action_id,omitempty"`
 	PromptContext string           `json:"-"`
 	QuoteText     string           `json:"quote_text,omitempty"`
@@ -319,9 +320,12 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 	}
 	idemKey := normalizeSayIdemKey(req)
 
-	var quote *model.Quote
+	var (
+		quote        *model.Quote
+		validInPlace bool
+	)
 	if req.ReEntryID != "" {
-		if prev, err := e.store.GetEntry(ctx, req.ReEntryID); err == nil {
+		if prev, err := e.store.GetEntry(ctx, req.ReEntryID); err == nil && prev != nil {
 			who := "Corgi"
 			if prev.Role == "user" {
 				who = "你"
@@ -331,6 +335,10 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 				qText = oneLineClip("拍板「"+prev.Text+"」｜原问："+prev.Re.Text, 260)
 			}
 			quote = &model.Quote{Entry: prev.ID, Who: who, Text: qText}
+			prevThread := orStr(strings.TrimSpace(prev.Thread), model.MainThread)
+			if channel == "web" && req.InPlace && prevThread == thread {
+				validInPlace = true
+			}
 		}
 	} else if req.QuoteText != "" {
 		quote = &model.Quote{Who: "引用", Text: oneLineClip(req.QuoteText, 240)}
@@ -354,6 +362,7 @@ func (e *Engine) sayWithSteer(ctx context.Context, req SayRequest, steer bool) (
 		Text:     text,
 		At:       now,
 		Re:       quote,
+		InPlace:  validInPlace,
 		ActionID: strings.TrimSpace(req.ActionID),
 		Media:    append([]model.MediaRef(nil), req.Media...),
 	}

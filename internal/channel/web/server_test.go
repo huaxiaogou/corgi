@@ -701,6 +701,86 @@ func TestResolveActionCustomHTTPAndWorkerDialogGuard(t *testing.T) {
 	}
 }
 
+func TestSuperSayAndResolveActionInPlaceHTTP(t *testing.T) {
+	srv, master := newTestServer(t)
+	h := srv.Routes()
+	ctx := context.Background()
+
+	plainEntry, _, _, err := srv.Engine.Reply(ctx, model.MainThread, "需要补充细节的历史普通回复", "", nil, false)
+	if err != nil || plainEntry == nil {
+		t.Fatalf("plain Reply failed: %v", err)
+	}
+	targetEntry, act, _, err := srv.Engine.Reply(ctx, model.MainThread, "需要确认的历史决策卡", "", []string{"方案A", "方案B"}, false)
+	if err != nil || targetEntry == nil || act == nil {
+		t.Fatalf("decision Reply failed: %v", err)
+	}
+
+	postJSON := func(path string, payload map[string]any) (int, []byte) {
+		b, _ := json.Marshal(payload)
+		r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+		r.Header.Set("Authorization", "Bearer "+master)
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, w.Body.Bytes()
+	}
+
+	// 1. /api/super/say with valid web in_place persists in_place=true.
+	code, body := postJSON("/api/super/say", map[string]any{
+		"thread":   model.MainThread,
+		"text":     "HTTP 原位补充一条细节",
+		"re":       plainEntry.ID,
+		"in_place": true,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("POST /api/super/say want 200, got %d body=%s", code, string(body))
+	}
+	var sayOut struct {
+		OK    bool   `json:"ok"`
+		Entry string `json:"entry"`
+	}
+	if err := json.Unmarshal(body, &sayOut); err != nil || sayOut.Entry == "" {
+		t.Fatalf("decode say response: err=%v body=%s", err, string(body))
+	}
+	gotSay, err := srv.Store.GetEntry(ctx, sayOut.Entry)
+	if err != nil || !gotSay.InPlace {
+		t.Fatalf("expected persisted say entry in_place=true, got %+v err=%v", gotSay, err)
+	}
+
+	// 2. /api/super/actions/{id}/resolve with custom=true & in_place=true persists in_place=true and keeps 409 guard.
+	code2, body2 := postJSON("/api/super/actions/"+act.ID+"/resolve", map[string]any{
+		"choice":   "改走自定义灰度方案",
+		"custom":   true,
+		"in_place": true,
+	})
+	if code2 != http.StatusOK {
+		t.Fatalf("POST resolve want 200, got %d body=%s", code2, string(body2))
+	}
+	if codeDup, _ := postJSON("/api/super/actions/"+act.ID+"/resolve", map[string]any{
+		"choice":   "重复提交",
+		"custom":   true,
+		"in_place": true,
+	}); codeDup != http.StatusConflict {
+		t.Fatalf("duplicate resolve want 409, got %d", codeDup)
+	}
+	entries, _, err := srv.Store.ListEntries(ctx, model.MainThread, 20)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	foundActionEntry := false
+	for _, en := range entries {
+		if en.Role == "user" && en.ActionID == act.ID {
+			foundActionEntry = true
+			if !en.InPlace {
+				t.Fatalf("expected custom action entry in_place=true, got %+v", en)
+			}
+		}
+	}
+	if !foundActionEntry {
+		t.Fatalf("custom action user entry not found")
+	}
+}
+
 func TestSuperReplyMultilineJSONRoundTrip(t *testing.T) {
 	srv, master := newTestServer(t)
 	h := srv.Routes()

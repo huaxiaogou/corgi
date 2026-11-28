@@ -1359,16 +1359,22 @@ func (e *Engine) GetAction(ctx context.Context, actionID string) (*model.Action,
 
 // ResolveAction atomically resolves a pending Action from Web, WeCom, Router, or CLI.
 func (e *Engine) ResolveAction(ctx context.Context, actionID, resolvedBy, choiceInput string) (*model.Action, error) {
-	return e.resolveAction(ctx, actionID, resolvedBy, choiceInput, false)
+	return e.resolveAction(ctx, actionID, resolvedBy, choiceInput, false, false)
 }
 
 // ResolveActionCustom atomically resolves a pending decision card with a human-written custom answer,
 // bypassing preset choice fuzzy matching so custom text is never overwritten by a preset option.
 func (e *Engine) ResolveActionCustom(ctx context.Context, actionID, resolvedBy, customText string) (*model.Action, error) {
-	return e.resolveAction(ctx, actionID, resolvedBy, customText, true)
+	return e.resolveAction(ctx, actionID, resolvedBy, customText, true, false)
 }
 
-func (e *Engine) resolveAction(ctx context.Context, actionID, resolvedBy, choiceInput string, custom bool) (*model.Action, error) {
+// ResolveActionCustomInPlace atomically resolves a pending decision card with a human-written custom answer
+// while preserving explicit Web in-place intent for the recorded user entry.
+func (e *Engine) ResolveActionCustomInPlace(ctx context.Context, actionID, resolvedBy, customText string, inPlace bool) (*model.Action, error) {
+	return e.resolveAction(ctx, actionID, resolvedBy, customText, true, inPlace)
+}
+
+func (e *Engine) resolveAction(ctx context.Context, actionID, resolvedBy, choiceInput string, custom, inPlace bool) (*model.Action, error) {
 	trimmed := strings.TrimSpace(choiceInput)
 	if trimmed == "" {
 		return nil, fmt.Errorf("empty action choice")
@@ -1442,6 +1448,7 @@ func (e *Engine) resolveAction(ctx context.Context, actionID, resolvedBy, choice
 				From:          resolvedBy,
 				Text:          chosenLabel,
 				ReEntryID:     resolved.EntryID,
+				InPlace:       custom && inPlace,
 				ActionID:      resolved.ID,
 				PromptContext: promptCtx,
 			})
@@ -1457,6 +1464,7 @@ func (e *Engine) resolveAction(ctx context.Context, actionID, resolvedBy, choice
 			From:          resolvedBy,
 			Text:          chosenLabel,
 			ReEntryID:     resolved.EntryID,
+			InPlace:       custom && inPlace,
 			ActionID:      resolved.ID,
 			PromptContext: promptCtx,
 		})

@@ -1,9 +1,10 @@
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Clock, PenLine } from "lucide-react";
 import { useAutoResizeTextarea } from "../hooks/useAutoResizeTextarea";
 import { classifyEnterKey, createIMETracker } from "../lib/composerInput";
 
 interface Props {
+  actionId?: string;
   busy: boolean;
   isWorkerDialog: boolean;
   isPatrolDigest: boolean;
@@ -14,6 +15,7 @@ interface Props {
 }
 
 export function DecisionCardFooter({
+  actionId = "",
   busy,
   isWorkerDialog,
   isPatrolDigest,
@@ -22,19 +24,36 @@ export function DecisionCardFooter({
   onSnooze,
   onDismiss,
 }: Props) {
-  const [customText, setCustomText] = useState("");
+  const draftsByActionRef = useRef<Record<string, string>>({});
+  const [customText, setCustomText] = useState(() => (actionId ? draftsByActionRef.current[actionId] ?? "" : ""));
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imeRef = useRef(createIMETracker());
 
+  useEffect(() => {
+    setCustomText(actionId ? draftsByActionRef.current[actionId] ?? "" : "");
+    setSnoozeOpen(false);
+  }, [actionId]);
+
   useAutoResizeTextarea(textareaRef, customText, { minHeight: 34, maxHeight: 120 });
+
+  const updateCustomText = (next: string) => {
+    setCustomText(next);
+    if (actionId) {
+      if (next) {
+        draftsByActionRef.current[actionId] = next;
+      } else {
+        delete draftsByActionRef.current[actionId];
+      }
+    }
+  };
 
   const submitCustom = (e?: FormEvent) => {
     e?.preventDefault();
     if (busy) return;
     const trimmed = customText.trim();
     if (!trimmed) return;
-    void onSubmitCustom(trimmed).then(() => setCustomText(""));
+    void onSubmitCustom(trimmed).then(() => updateCustomText(""));
   };
 
   if (isWorkerDialog) {
@@ -69,7 +88,7 @@ export function DecisionCardFooter({
           rows={1}
           value={customText}
           disabled={busy}
-          onChange={(e) => setCustomText(e.target.value)}
+          onChange={(e) => updateCustomText(e.target.value)}
           onCompositionStart={() => {
             imeRef.current.composing = true;
           }}
@@ -110,6 +129,11 @@ export function DecisionCardFooter({
         <button
           type="submit"
           disabled={busy || !customText.trim()}
+          onPointerDown={(e) => {
+            if (document.activeElement === textareaRef.current) {
+              e.preventDefault();
+            }
+          }}
           className="w-full sm:w-auto px-3.5 py-1.5 min-h-[34px] rounded-lg btn-accent text-xs font-medium cursor-pointer shrink-0 disabled:opacity-35 disabled:cursor-not-allowed"
         >
           {isPatrolDigest ? "发送指令" : "提交想法"}
