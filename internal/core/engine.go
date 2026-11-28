@@ -98,6 +98,7 @@ type Engine struct {
 	fleet    *fleet.Fleet
 	agents   *agent.Registry
 	memory   *MemoryManager
+	llm      *LLMClient
 	sink     ChannelSink
 	logger   *slog.Logger
 	corgiDir string
@@ -133,16 +134,7 @@ type Engine struct {
 	bypassStartRetryTimeout time.Duration
 
 	// In-process native API Router runtime state (protected by mu).
-	apiTurn                *apiRouterTurn
-	apiTurnGen             uint64
-	apiConfigEpoch         uint64
-	apiBackoffUntil        time.Time
-	apiFailCount           int
-	apiLastFailTriggerID   string
-	apiSameTriggerFails    int
-	apiAuthPaused          bool
-	apiLastErr             string
-	apiAllowPrivateForTest bool
+	router routerState
 
 	wakeCh                     chan struct{}
 	queueMu                    sync.Mutex
@@ -197,6 +189,7 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		fleet:               fl,
 		agents:              reg,
 		memory:              mem,
+		llm:                 NewLLMClient(),
 		sink:                NopSink{},
 		logger:              logger,
 		corgiDir:            corgiDir,
@@ -362,7 +355,7 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 		}
 		ns.PublicURL = normPubURL
 		NormalizeDispatchConfig(&ns)
-		if err := normalizeRouterAPISettings(&ns, e.apiAllowPrivateForTest); err != nil {
+		if err := normalizeRouterAPISettings(&ns); err != nil {
 			e.mu.Unlock()
 			return err
 		}
@@ -406,13 +399,7 @@ func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []mode
 		}
 		e.settings = nextSettings
 		if apiConfigChanged {
-			e.apiConfigEpoch++
-			e.apiBackoffUntil = time.Time{}
-			e.apiFailCount = 0
-			e.apiLastFailTriggerID = ""
-			e.apiSameTriggerFails = 0
-			e.apiAuthPaused = false
-			e.apiLastErr = ""
+			e.router.resetFailuresLocked(true)
 		}
 	}
 	if pols != nil {

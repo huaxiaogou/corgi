@@ -159,8 +159,8 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 
 	e.mu.Lock()
 	st := e.settings
-	apiTurn := e.apiTurn
-	apiAuthPaused := e.apiAuthPaused
+	apiTurn := e.router.turn
+	apiAuthPaused := e.router.authPaused
 	rv := model.RouterView{
 		Kind:     "api",
 		Model:    orStr(st.RouterAPIModel, TokenHubDefaultModel),
@@ -171,7 +171,7 @@ func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 	if apiTurn != nil {
 		rv.Alive = true
 		rv.Status = "working"
-		rv.Replied = apiTurn.hasReplied()
+		rv.Replied = apiTurn.hasFlag(turnFlagReplied)
 	} else if e.dream != nil {
 		rv.Alive = true
 		rv.Status = "dreaming"

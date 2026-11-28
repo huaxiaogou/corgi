@@ -41,7 +41,7 @@ func (e *Engine) TryReserveHubRestart(ctx context.Context) (func(), bool, string
 	case e.dream != nil:
 		e.mu.Unlock()
 		return nil, false, "Corgi 正在做梦整理记忆"
-	case e.apiTurn != nil || e.routerDispatching:
+	case e.router.turn != nil || e.routerDispatching:
 		e.mu.Unlock()
 		return nil, false, "Corgi 正在回复中"
 	case e.settings.Paused:
@@ -126,7 +126,7 @@ func (e *Engine) checkAutoUpdate(ctx context.Context, hasRouterQueued bool, now 
 	updater := e.autoUpdater
 	enabled := e.settings.AutoUpdate
 	lastCheck := e.lastAutoUpdateCheck
-	busy := e.dream != nil || e.hubUpdating || e.apiTurn != nil || e.routerDispatching || e.settings.Paused
+	busy := e.dream != nil || e.hubUpdating || e.router.turn != nil || e.routerDispatching || e.settings.Paused
 	runCtx := e.runCtx
 	e.mu.Unlock()
 	if updater == nil || !enabled || busy || hasRouterQueued || now.Sub(lastCheck) < time.Minute {

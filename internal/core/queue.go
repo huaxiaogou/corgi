@@ -422,7 +422,7 @@ func (e *Engine) ChatQueueSnapshot(ctx context.Context, thread string) ([]*model
 
 func (e *Engine) isRouterWorking(_ context.Context) bool {
 	e.mu.Lock()
-	busy := e.apiTurn != nil
+	busy := e.router.turn != nil
 	e.mu.Unlock()
 	return busy
 }
@@ -431,7 +431,7 @@ func (e *Engine) isRouterWorking(_ context.Context) bool {
 // once Router is idle and has no pending triggers waiting.
 func (e *Engine) drainRouterPrompts(ctx context.Context) {
 	e.mu.Lock()
-	if e.hubUpdating || e.routerDispatching || e.apiTurn != nil {
+	if e.hubUpdating || e.routerDispatching || e.router.turn != nil {
 		e.mu.Unlock()
 		return
 	}

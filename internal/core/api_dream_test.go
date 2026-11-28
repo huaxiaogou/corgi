@@ -100,7 +100,7 @@ func TestAPIDreamNoFleetFullLoopAndSkillCards(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	eng, st, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	eng, st, sink, _ := newTestAPIEngine(t, srv)
 	ctx := context.Background()
 
 	// Seed a note whose body must NOT be dumped upfront (only filename in prompt).
@@ -232,8 +232,14 @@ func TestAPIDreamFailureConvergesReportsToBrainAndNightlyDoesNotSpin(t *testing.
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"id": "cmpl-brain", "model": "kimi-k3",
 					"choices": []map[string]any{{
-						"index": 0, "finish_reason": "stop",
-						"message": map[string]any{"role": "assistant", "content": "[SILENT]"},
+						"index": 0, "finish_reason": "tool_calls",
+						"message": map[string]any{
+							"role": "assistant",
+							"tool_calls": []map[string]any{{
+								"id": "c-na", "type": "function",
+								"function": map[string]any{"name": "no_action", "arguments": `{"reason":"做梦异常已记录，无需打扰"}`},
+							}},
+						},
 					}},
 				})
 				return
@@ -243,7 +249,7 @@ func TestAPIDreamFailureConvergesReportsToBrainAndNightlyDoesNotSpin(t *testing.
 	}))
 	defer srv.Close()
 
-	eng, st, _, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	eng, st, _, _ := newTestAPIEngine(t, srv)
 	ctx := context.Background()
 
 	if err := eng.StartDream(ctx, "nightly"); err != nil {
@@ -404,7 +410,7 @@ func TestAPIDreamAsyncNonBlockingAndModeSwitchMutex(t *testing.T) {
 					"tool_calls": []map[string]any{
 						{"id": "r1", "type": "function", "function": map[string]any{
 							"name":      "reply_user",
-							"arguments": `{"purpose":"answer","text":"做梦中也能秒回"}`,
+							"arguments": `{"text":"做梦中也能秒回"}`,
 						}},
 					},
 				},
@@ -413,7 +419,7 @@ func TestAPIDreamAsyncNonBlockingAndModeSwitchMutex(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	eng, _, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	eng, _, sink, _ := newTestAPIEngine(t, srv)
 	ctx := context.Background()
 
 	// 1. Start async API dream.

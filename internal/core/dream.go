@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -32,18 +30,12 @@ type nightlyDreamSlot struct {
 }
 
 type dreamRun struct {
-	id             string
-	at             time.Time
-	recovered      bool
-	apiDone        bool
-	apiOK          bool
-	apiErr         string
-	apiErrIsAuth   bool
-	step           int
-	lastTool       string
-	lastProgressAt time.Time
-	cancel         context.CancelFunc
-	reason         string
+	id, reason, apiErr, lastTool string
+	at, lastProgressAt           time.Time
+	recovered, apiDone, apiOK    bool
+	apiErrIsAuth                 bool
+	step                         int
+	cancel                       context.CancelFunc
 }
 
 func (e *Engine) loadActiveDreamMarker(ctx context.Context) {
@@ -51,20 +43,12 @@ func (e *Engine) loadActiveDreamMarker(ctx context.Context) {
 		return
 	}
 	raw, ok, err := e.store.GetKV(ctx, activeDreamKVKey)
-	if err != nil || !ok || strings.TrimSpace(raw) == "" {
-		return
-	}
 	var m activeDreamMarker
-	if err := json.Unmarshal([]byte(raw), &m); err != nil || strings.TrimSpace(m.ID) == "" || m.At.IsZero() {
+	if err != nil || !ok || json.Unmarshal([]byte(raw), &m) != nil || strings.TrimSpace(m.ID) == "" || m.At.IsZero() {
 		return
 	}
 	e.mu.Lock()
-	e.dream = &dreamRun{
-		id:        m.ID,
-		at:        m.At,
-		recovered: true,
-		reason:    m.Reason,
-	}
+	e.dream = &dreamRun{id: m.ID, at: m.At, recovered: true, reason: m.Reason}
 	e.mu.Unlock()
 	if e.logger != nil {
 		e.logger.Info("loaded active dream marker for restart recovery", "id", m.ID, "at", m.At.Format(time.RFC3339))
@@ -75,14 +59,7 @@ func (e *Engine) saveActiveDreamMarker(ctx context.Context, d *dreamRun) error {
 	if e.store == nil || d == nil || d.id == "" {
 		return nil
 	}
-	e.mu.Lock()
-	m := activeDreamMarker{
-		ID:     d.id,
-		At:     d.at,
-		Reason: d.reason,
-	}
-	e.mu.Unlock()
-	b, err := json.Marshal(m)
+	b, err := json.Marshal(activeDreamMarker{ID: d.id, At: d.at, Reason: d.reason})
 	if err != nil {
 		return err
 	}
@@ -90,14 +67,11 @@ func (e *Engine) saveActiveDreamMarker(ctx context.Context, d *dreamRun) error {
 }
 
 func (e *Engine) recordNightlyDreamSlot(ctx context.Context, slotDate, outcome string, at time.Time) {
-	if e.store == nil {
-		return
+	if e.store != nil {
+		if b, err := json.Marshal(nightlyDreamSlot{Date: slotDate, Outcome: outcome, At: at}); err == nil {
+			_ = e.store.SetKV(ctx, nightlyDreamSlotKey, string(b))
+		}
 	}
-	b, err := json.Marshal(nightlyDreamSlot{Date: slotDate, Outcome: outcome, At: at})
-	if err != nil {
-		return
-	}
-	_ = e.store.SetKV(ctx, nightlyDreamSlotKey, string(b))
 }
 
 func (e *Engine) readNightlyDreamSlot(ctx context.Context) (nightlyDreamSlot, bool) {
@@ -105,11 +79,8 @@ func (e *Engine) readNightlyDreamSlot(ctx context.Context) (nightlyDreamSlot, bo
 		return nightlyDreamSlot{}, false
 	}
 	raw, ok, err := e.store.GetKV(ctx, nightlyDreamSlotKey)
-	if err != nil || !ok || strings.TrimSpace(raw) == "" {
-		return nightlyDreamSlot{}, false
-	}
 	var s nightlyDreamSlot
-	if err := json.Unmarshal([]byte(raw), &s); err != nil || s.Date == "" {
+	if err != nil || !ok || json.Unmarshal([]byte(raw), &s) != nil || s.Date == "" {
 		return nightlyDreamSlot{}, false
 	}
 	return s, true
@@ -128,10 +99,7 @@ func (e *Engine) LastDream(ctx context.Context) time.Time {
 	if err != nil || !ok {
 		return time.Time{}
 	}
-	t, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return time.Time{}
-	}
+	t, _ := time.Parse(time.RFC3339, raw)
 	return t
 }
 
@@ -140,10 +108,7 @@ func (e *Engine) setLastDream(ctx context.Context, t time.Time) {
 }
 
 func (e *Engine) dreamAtLocked() (h, m int, ok bool) {
-	v := strings.TrimSpace(e.settings.DreamAt)
-	if v == "" {
-		v = "04:00"
-	}
+	v := orStr(strings.TrimSpace(e.settings.DreamAt), "04:00")
 	if strings.EqualFold(v, "off") {
 		return 0, 0, false
 	}
@@ -161,9 +126,8 @@ func (e *Engine) NextDream(ctx context.Context, now time.Time) time.Time {
 	if !ok {
 		return time.Time{}
 	}
-	last := e.LastDream(ctx)
 	t := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, now.Location())
-	if !last.Before(t) || now.After(t.Add(3*time.Hour)) {
+	if !e.LastDream(ctx).Before(t) || now.After(t.Add(3*time.Hour)) {
 		t = t.AddDate(0, 0, 1)
 	}
 	return t
@@ -190,16 +154,11 @@ func (e *Engine) hasActivitySince(ctx context.Context, since time.Time) (bool, e
 func (e *Engine) checkDream(ctx context.Context, hasQueued bool) {
 	e.mu.Lock()
 	d := e.dream
-	e.mu.Unlock()
 	if d != nil {
-		e.mu.Lock()
-		recovered := d.recovered
-		apiDone := d.apiDone
-		apiOK := d.apiOK
+		recovered, apiDone, apiOK := d.recovered, d.apiDone, d.apiOK
 		e.mu.Unlock()
 		if recovered {
-			journal := filepath.Join(e.memory.DreamsDir(), journalName(d.at)+".md")
-			fi, err := os.Stat(journal)
+			fi, err := e.memory.StatDreamJournal(journalName(d.at) + ".md")
 			e.finishDream(ctx, d, err == nil && !fi.ModTime().Before(d.at) && fi.Size() > 0)
 			return
 		}
@@ -208,16 +167,12 @@ func (e *Engine) checkDream(ctx context.Context, hasQueued bool) {
 		}
 		return
 	}
+	busy := e.hubUpdating || e.routerDispatching || e.router.turn != nil || e.settings.Paused || hasQueued
+	e.mu.Unlock()
 
 	now := time.Now()
 	next := e.NextDream(ctx, now)
-	if next.IsZero() || now.Before(next) || now.After(next.Add(3*time.Hour)) {
-		return
-	}
-	e.mu.Lock()
-	busy := e.hubUpdating || e.routerDispatching || e.apiTurn != nil || e.settings.Paused || hasQueued
-	e.mu.Unlock()
-	if busy {
+	if busy || next.IsZero() || now.Before(next) || now.After(next.Add(3*time.Hour)) {
 		return
 	}
 	active, err := e.hasActivitySince(ctx, e.LastDream(ctx))
@@ -226,7 +181,7 @@ func (e *Engine) checkDream(ctx context.Context, hasQueued bool) {
 		return
 	}
 	if !active {
-		e.setLastDream(ctx, now) // quiet day: skip waking LLM, zero tokens spent
+		e.setLastDream(ctx, now)
 		e.recordNightlyDreamSlot(ctx, next.Format("2006-01-02"), "skipped", now)
 		return
 	}
@@ -237,17 +192,11 @@ func (e *Engine) checkDream(ctx context.Context, hasQueued bool) {
 func (e *Engine) StartDream(ctx context.Context, reason string) error {
 	now := time.Now()
 	e.mu.Lock()
-	st := e.settings
 	if e.dream != nil || e.hubUpdating {
 		e.mu.Unlock()
 		return fmt.Errorf("Corgi 正在整理记忆或升级中")
 	}
-	d := &dreamRun{
-		id:             now.Format("20060102-150405.000000000"),
-		at:             now,
-		lastProgressAt: now,
-		reason:         reason,
-	}
+	d := &dreamRun{id: now.Format("20060102-150405.000000000"), at: now, lastProgressAt: now, reason: reason}
 	e.dream = d
 	e.mu.Unlock()
 
@@ -259,10 +208,9 @@ func (e *Engine) StartDream(ctx context.Context, reason string) error {
 		e.mu.Unlock()
 		return fmt.Errorf("记录做梦状态失败：%w", err)
 	}
-
 	e.addEvent(ctx, model.MainThread, "Corgi 睡一会儿，复盘近期对话与日志、整理记忆（做梦）", "", "info")
 	e.notifyChanged()
-	go e.runAPIDream(d, st)
+	go e.runAPIDream(d)
 	return nil
 }
 
@@ -285,7 +233,6 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 			kvUpdates[nightlyDreamSlotKey] = string(b)
 		}
 	}
-
 	if d.id != "" && e.store != nil {
 		committed, err := e.store.CommitActiveDreamFinish(ctx, d.id, kvUpdates)
 		if err != nil {
@@ -300,38 +247,24 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 			e.mu.Unlock()
 			return
 		}
-	} else {
-		e.mu.Lock()
-		if e.dream != d {
-			e.mu.Unlock()
-			return
-		}
-		e.mu.Unlock()
-		if e.store != nil {
-			for k, v := range kvUpdates {
-				_ = e.store.SetKV(ctx, k, v)
-			}
+	} else if e.store != nil {
+		for k, v := range kvUpdates {
+			_ = e.store.SetKV(ctx, k, v)
 		}
 	}
 
 	summary, skills, fixes := "", "", ""
-	if ok {
-		journal := filepath.Join(e.memory.DreamsDir(), journalName(d.at)+".md")
-		summary = parseDreamSummary(journal)
-		skills = parseDreamPrefixLine(journal, dreamSkillsPrefix)
-		fixes = parseDreamPrefixLine(journal, dreamFixPrefix)
+	if ok && e.memory != nil {
+		if raw, err := e.memory.ReadFile("dreams/" + journalName(d.at) + ".md"); err == nil {
+			summary, skills, fixes = parseDreamJournalText(string(raw))
+		}
 	}
-
 	e.mu.Lock()
 	if e.dream == d {
 		e.dream = nil
 	}
-	apiErr := d.apiErr
-	apiErrIsAuth := d.apiErrIsAuth
-	stepCount := d.step
-	lastTool := d.lastTool
-	recovered := d.recovered
-	runCtx := e.runCtx
+	apiErr, apiErrIsAuth := d.apiErr, d.apiErrIsAuth
+	stepCount, lastTool, recovered, runCtx := d.step, d.lastTool, d.recovered, e.runCtx
 	e.mu.Unlock()
 
 	switch {
@@ -345,29 +278,22 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 		e.addEvent(ctx, model.MainThread, "Corgi 醒了，记忆已整理完毕", "", "info")
 	}
 
-	if !ok && !apiErrIsAuth && (runCtx == nil || runCtx.Err() == nil) {
-		if e.hasConfiguredRouterAPIKey(ctx, e.Settings()) && e.store != nil {
-			errDesc := orStr(apiErr, "未落盘做梦日志")
-			if recovered && apiErr == "" {
-				errDesc = "Hub 重启导致后台做梦中断，未完成落盘"
-			}
-			elapsed := max(time.Since(d.at).Round(time.Second), 0)
-			progress := fmt.Sprintf("第 %d 步", stepCount)
-			if lastTool != "" {
-				progress += "（最后工具：" + lastTool + "）"
-			}
-			report := fmt.Sprintf(
-				"[做梦异常报告] 后台记忆整理（触发=%s，已运行=%s，进度=%s）未能正常完成。\n"+
-					"异常原因：%s\n"+
-					"请你作为大脑综合判断：\n"+
-					"- 若属临时网络/上游波动且无需打扰主人，可自行决定设提醒延后重跑或调用 no_action(reason) 静默忽略；\n"+
-					"- 若需要主人介入（如模型异常、配额/配置问题、记忆文件异常或连续失败），请用 reply_user 简洁向主人说明原因与建议方案。",
-				orStr(d.reason, "auto"), elapsed, progress, errDesc,
-			)
-			_, _ = e.Ingest(ctx, "system", model.MainThread, "dream", report, "", model.RouterName, d.id)
+	if !ok && !apiErrIsAuth && (runCtx == nil || runCtx.Err() == nil) && e.store != nil && e.hasConfiguredRouterAPIKey(ctx, e.Settings()) {
+		errDesc := orStr(apiErr, "未落盘做梦日志")
+		if recovered && apiErr == "" {
+			errDesc = "Hub 重启导致后台做梦中断，未完成落盘"
 		}
+		progress := fmt.Sprintf("第 %d 步", stepCount)
+		if lastTool != "" {
+			progress += "（最后工具：" + lastTool + "）"
+		}
+		report := fmt.Sprintf(
+			"[做梦异常报告] 后台记忆整理（触发=%s，已运行=%s，进度=%s）未能正常完成。\n异常原因：%s\n"+
+				"请作为大脑判断：临时网络波动可设提醒或调用 no_action(reason) 忽略；需主人介入请调用 reply_user 说明。",
+			orStr(d.reason, "auto"), max(time.Since(d.at).Round(time.Second), 0), progress, errDesc,
+		)
+		_, _ = e.Ingest(ctx, "system", model.MainThread, "dream", report, "", model.RouterName, d.id)
 	}
-
 	if skills != "" {
 		_, _, _, _ = e.Reply(ctx, model.MainThread,
 			"整理记忆时发现这些流程已经做熟，可沉淀为 skill 供所有 Agent 复用："+skills+"。要不要做成 skill？",
@@ -381,17 +307,15 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 	e.notifyChanged()
 }
 
-// buildDreamInput builds the in-memory Dream context directly from SQLite (work_items, pending_actions, entries).
+// buildDreamInput builds the in-memory Dream context directly from SQLite.
 func (e *Engine) buildDreamInput(ctx context.Context) string {
 	since := e.LastDream(ctx)
-	var b strings.Builder
 	sinceStr := "never"
 	if !since.IsZero() {
 		sinceStr = since.Format("2006-01-02 15:04")
 	}
-	fmt.Fprintf(&b, "# What happened since the last dream (%s)\n\n", sinceStr)
-
-	b.WriteString("## Authoritative Open Work Items (Hub SQLite)\n\n")
+	var b strings.Builder
+	fmt.Fprintf(&b, "# What happened since the last dream (%s)\n\n## Authoritative Open Work Items (Hub SQLite)\n\n", sinceStr)
 	if openWork, err := e.store.ListWorkItems(ctx, false); err != nil {
 		fmt.Fprintf(&b, "(error reading work_items: %v)\n", err)
 	} else if len(openWork) == 0 {
@@ -421,61 +345,41 @@ func (e *Engine) buildDreamInput(ctx context.Context) string {
 		}
 	}
 	b.WriteString("\n## Chat & event log\n\n")
-
 	entries, _, _ := e.store.ListEntries(ctx, "", 500)
-	var lines []string
 	for _, en := range entries {
 		if !since.IsZero() && en.At.Before(since) {
 			continue
 		}
 		who := en.Role
-		switch en.Role {
-		case "user":
+		if en.Role == "user" {
 			who = "human"
-		case "corgi":
+		} else if en.Role == "corgi" {
 			who = "Corgi"
 		}
-		lines = append(lines, fmt.Sprintf("- %s [%s] %s: %s",
-			en.At.Format("01-02 15:04"), en.Thread, who, oneLineClip(en.Text, 600)))
+		fmt.Fprintf(&b, "- %s [%s] %s: %s\n", en.At.Format("01-02 15:04"), en.Thread, who, oneLineClip(en.Text, 600))
 	}
-	b.WriteString(strings.Join(lines, "\n"))
-	b.WriteByte('\n')
 	return b.String()
 }
 
 func journalName(at time.Time) string { return at.Format("2006-01-02-1504") }
 
-func parseDreamPrefixLine(path, prefix string) string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	for i, l := range strings.Split(string(b), "\n") {
-		if i > 8 {
-			break
+func parseDreamJournalText(text string) (summary, skills, fixes string) {
+	for i, rawLine := range strings.Split(text, "\n") {
+		t := strings.TrimSpace(rawLine)
+		stripped := strings.TrimSpace(strings.TrimLeft(t, ">-* "))
+		if i <= 8 {
+			if s, ok := strings.CutPrefix(stripped, dreamSkillsPrefix); ok && skills == "" {
+				skills = strings.TrimRight(strings.TrimSpace(s), "。.")
+				continue
+			}
+			if s, ok := strings.CutPrefix(stripped, dreamFixPrefix); ok && fixes == "" {
+				fixes = strings.TrimRight(strings.TrimSpace(s), "。.")
+				continue
+			}
 		}
-		l = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(l), ">-* "))
-		if s, ok := strings.CutPrefix(l, prefix); ok {
-			return strings.TrimRight(strings.TrimSpace(s), "。.")
-		}
-	}
-	return ""
-}
-
-func parseDreamSummary(path string) string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	for _, l := range strings.Split(string(b), "\n") {
-		t := strings.TrimSpace(l)
-		if strings.HasPrefix(t, "#") || strings.HasPrefix(t, dreamSkillsPrefix) || strings.HasPrefix(t, dreamFixPrefix) {
-			continue
-		}
-		t = strings.TrimSpace(strings.TrimLeft(t, ">-* "))
-		if t != "" {
-			return oneLineClip(t, 160)
+		if summary == "" && !strings.HasPrefix(t, "#") && !strings.HasPrefix(t, dreamSkillsPrefix) && !strings.HasPrefix(t, dreamFixPrefix) && stripped != "" {
+			summary = oneLineClip(stripped, 160)
 		}
 	}
-	return ""
+	return summary, skills, fixes
 }

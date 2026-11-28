@@ -158,7 +158,7 @@ func TestMainChatQueueSteerAndDrain(t *testing.T) {
 	}
 	// Mark native API Router busy with an active turn.
 	eng.mu.Lock()
-	eng.apiTurn = &apiRouterTurn{thread: model.MainThread, triggerID: "t0", done: make(chan struct{})}
+	eng.router.turn = &apiRouterTurn{thread: model.MainThread, triggerID: "t0", done: make(chan struct{})}
 	eng.mu.Unlock()
 
 	// While Router is working, Web chat submissions queue cleanly without polluting entries.

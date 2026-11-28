@@ -8,6 +8,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,7 +63,34 @@ func (s *recordingAPISink) ends() []struct{ thread, triggerID, reason string } {
 	return append([]struct{ thread, triggerID, reason string }(nil), s.turnEnds...)
 }
 
-func newTestAPIEngine(t *testing.T, baseURL string) (*Engine, *store.Store, *recordingAPISink, string) {
+type llmTestRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f llmTestRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func newTestRewriteTransport(srv *httptest.Server) http.RoundTripper {
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		panic(err)
+	}
+	base := srv.Client().Transport
+	return llmTestRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		cloned := req.Clone(req.Context())
+		cloned.URL.Scheme = u.Scheme
+		cloned.URL.Host = u.Host
+		cloned.Host = u.Host
+		return base.RoundTrip(cloned)
+	})
+}
+
+func newTestLLMClient(srv *httptest.Server) *LLMClient {
+	c := NewLLMClient()
+	if srv != nil {
+		c.SetTransport(newTestRewriteTransport(srv))
+	}
+	return c
+}
+
+func newTestAPIEngine(t *testing.T, srv *httptest.Server) (*Engine, *store.Store, *recordingAPISink, string) {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "corgi.db")
@@ -76,26 +104,28 @@ func newTestAPIEngine(t *testing.T, baseURL string) (*Engine, *store.Store, *rec
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
-	eng.SetAllowPrivateLLMForTest(true)
+	if srv != nil {
+		eng.SetLLMTransportForTest(newTestRewriteTransport(srv))
+	}
 	sink := &recordingAPISink{}
 	eng.SetSink(sink)
 
 	cfg := eng.Settings()
 	cfg.RouterAPIProvider = RouterAPIProviderTokenHub
-	cfg.RouterAPIBaseURL = baseURL
+	cfg.RouterAPIBaseURL = TokenHubDefaultBaseURL
 	cfg.RouterAPIModel = "hy4"
 	cfg.RouterAPIEffort = "no_think"
 	if err := eng.SaveConfig(context.Background(), &cfg, nil); err != nil {
 		t.Fatalf("save api config: %v", err)
 	}
-	if _, err := eng.SetRouterAPIKey(context.Background(), RouterAPIProviderTokenHub, baseURL, "sk-test-tokenhub-9876"); err != nil {
+	if _, err := eng.SetRouterAPIKey(context.Background(), RouterAPIProviderTokenHub, TokenHubDefaultBaseURL, "sk-test-tokenhub-9876"); err != nil {
 		t.Fatalf("set api key: %v", err)
 	}
 	return eng, st, sink, dir
 }
 
 func TestLLMURLPolicyAndOriginBinding(t *testing.T) {
-	// Reject non-HTTPS, localhost, private IP, metadata IP when test bypass is off.
+	// Reject non-HTTPS, localhost, private IP, metadata IP unconditionally.
 	for _, bad := range []string{
 		"http://api.example.com/v1",
 		"https://localhost/v1",
@@ -104,12 +134,12 @@ func TestLLMURLPolicyAndOriginBinding(t *testing.T) {
 		"https://10.0.0.5/v1",
 		"https://user:pass@api.example.com/v1",
 	} {
-		if _, _, err := NormalizeRouterAPIBaseURL(RouterAPIProviderOpenAI, bad, false); err == nil {
+		if _, _, err := NormalizeRouterAPIBaseURL(RouterAPIProviderOpenAI, bad); err == nil {
 			t.Fatalf("expected URL %q to be rejected", bad)
 		}
 	}
 	// TokenHub locks to fixed HTTPS origin.
-	base, origin, err := NormalizeRouterAPIBaseURL(RouterAPIProviderTokenHub, "https://evil.example.com/v1", false)
+	base, origin, err := NormalizeRouterAPIBaseURL(RouterAPIProviderTokenHub, "https://evil.example.com/v1")
 	if err != nil || base != TokenHubDefaultBaseURL || origin != "https://tokenhub.tencentmaas.com" {
 		t.Fatalf("tokenhub lock failed: base=%q origin=%q err=%v", base, origin, err)
 	}
@@ -119,11 +149,10 @@ func TestLLMURLPolicyAndOriginBinding(t *testing.T) {
 		http.Redirect(w, r, "https://example.com/steal", http.StatusFound)
 	}))
 	defer redirSrv.Close()
-	_, err = ChatCompletion(context.Background(), LLMClientConfig{
-		Provider:            RouterAPIProviderOpenAI,
-		BaseURL:             redirSrv.URL + "/v1",
-		APIKey:              "sk-secret",
-		AllowPrivateForTest: true,
+	_, err = newTestLLMClient(redirSrv).ChatCompletion(context.Background(), LLMClientConfig{
+		Provider: RouterAPIProviderOpenAI,
+		BaseURL:  "https://api.example.com/v1",
+		APIKey:   "sk-secret",
 	}, LLMChatRequest{
 		Model:    "hy4",
 		Messages: []LLMMessage{{Role: "user", Content: "hi"}},
@@ -144,14 +173,14 @@ func TestLLMURLPolicyAndOriginBinding(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	eng, _, _, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	eng, _, _, _ := newTestAPIEngine(t, srv)
 	info := eng.RouterAPISecretInfo(context.Background())
 	if !info.HasKey || info.Masked != "••••••••9876" || !info.OriginMatch {
 		t.Fatalf("unexpected secret status: %+v", info)
 	}
 	res := eng.TestRouterAPI(context.Background(), TestRouterAPIRequest{
 		Provider: RouterAPIProviderOpenAI,
-		BaseURL:  "http://127.0.0.1:1/v1",
+		BaseURL:  "https://other.example.com/v1",
 		Model:    "hy4",
 	})
 	if res.OK || !strings.Contains(res.Error, "不一致") {
@@ -159,7 +188,7 @@ func TestLLMURLPolicyAndOriginBinding(t *testing.T) {
 	}
 	okRes := eng.TestRouterAPI(context.Background(), TestRouterAPIRequest{
 		Provider: RouterAPIProviderTokenHub,
-		BaseURL:  srv.URL + "/v1",
+		BaseURL:  TokenHubDefaultBaseURL,
 		Model:    "hy4",
 		Effort:   "no_think",
 	})
@@ -191,7 +220,7 @@ func TestAPIRouterTokenHubWireFormatAndGuardrailSelfCorrection(t *testing.T) {
 		w.Header().Set("X-Request-Id", "req-guardrail")
 		switch n {
 		case 1:
-			// Deliberately violate guardrail: purpose="answer" with choices!
+			// Deliberately violate guardrail: single choice card (< 2 choices)!
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"id": "c1", "model": "hy4",
 				"choices": []map[string]any{{
@@ -202,14 +231,14 @@ func TestAPIRouterTokenHubWireFormatAndGuardrailSelfCorrection(t *testing.T) {
 							"id": "call_1", "type": "function",
 							"function": map[string]any{
 								"name":      "reply_user",
-								"arguments": `{"purpose":"answer","text":"要选哪一个？","choices":["A","B"]}`,
+								"arguments": `{"text":"要选哪一个？","choices":["仅一个选项"]}`,
 							},
 						}},
 					},
 				}},
 			})
 		case 2:
-			// Self-corrected to purpose="attention" -> should succeed and early-exit!
+			// Self-corrected to 2 choices -> should succeed and early-exit!
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"id": "c2", "model": "hy4",
 				"choices": []map[string]any{{
@@ -220,7 +249,7 @@ func TestAPIRouterTokenHubWireFormatAndGuardrailSelfCorrection(t *testing.T) {
 							"id": "call_2", "type": "function",
 							"function": map[string]any{
 								"name":      "reply_user",
-								"arguments": `{"purpose":"attention","text":"请拍板方案","choices":["方案 A","方案 B"]}`,
+								"arguments": `{"text":"请拍板方案","choices":["方案 A","方案 B"]}`,
 							},
 						}},
 					},
@@ -233,7 +262,7 @@ func TestAPIRouterTokenHubWireFormatAndGuardrailSelfCorrection(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	eng, st, _, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	eng, st, _, _ := newTestAPIEngine(t, srv)
 	_, trig, err := eng.Say(context.Background(), SayRequest{
 		Thread:  model.MainThread,
 		Channel: "web",
@@ -282,7 +311,7 @@ func TestAPIRouterTokenHubWireFormatAndGuardrailSelfCorrection(t *testing.T) {
 }
 
 func TestAPIRouterMobileConsentContract(t *testing.T) {
-	eng, st, _, _ := newTestAPIEngine(t, "http://127.0.0.1:9/v1")
+	eng, st, _, _ := newTestAPIEngine(t, nil)
 
 	// Create an open prototype work item.
 	wi, err := eng.SetWorkItem(context.Background(), "new", model.MainThread, "会话直聊身份提醒原型", "确认原型交互", "", "")
@@ -315,11 +344,11 @@ func TestAPIRouterMobileConsentContract(t *testing.T) {
 	}
 	wMeta := eng.resolveTurnConsentMeta(context.Background(), workerTrig)
 	resWorker := eng.toolDispatchWork(context.Background(), &apiRouterTurn{thread: model.MainThread, triggerID: workerTrig.ID}, workerTrig, wMeta, `{"mode":"implement","goal":"修复失败的单测"}`)
-	if !strings.Contains(resWorker, `"ok":false`) || !strings.Contains(resWorker, "非人类直接指令") {
+	if !strings.Contains(resWorker, `"ok":false`) || !strings.Contains(resWorker, "后台事件只能新派 readonly") {
 		t.Fatalf("expected non-human implement block, got: %s", resWorker)
 	}
 	resWorkerRel := eng.toolDispatchWork(context.Background(), &apiRouterTurn{thread: model.MainThread, triggerID: workerTrig.ID}, workerTrig, wMeta, `{"mode":"implement","allow_release":true,"goal":"merge and deploy"}`)
-	if !strings.Contains(resWorkerRel, `"ok":false`) || !strings.Contains(resWorkerRel, "非人类直接指令") {
+	if !strings.Contains(resWorkerRel, `"ok":false`) || !strings.Contains(resWorkerRel, "后台事件只能新派 readonly") {
 		t.Fatalf("expected non-human allow_release block, got: %s", resWorkerRel)
 	}
 
@@ -379,7 +408,7 @@ func TestAPIRouterStopExactStreamSealAndCrashRecovery(t *testing.T) {
 	defer srv.Close()
 	defer close(release)
 
-	eng, st, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	eng, st, sink, _ := newTestAPIEngine(t, srv)
 	_, t1, err := eng.Say(context.Background(), SayRequest{Thread: model.MainThread, Channel: "wecom", From: "owner", Text: "第一条问题"})
 	if err != nil {
 		t.Fatalf("say t1: %v", err)
@@ -410,7 +439,9 @@ func TestAPIRouterStopExactStreamSealAndCrashRecovery(t *testing.T) {
 	}
 
 	// Test crash recovery marker on Hub startup.
-	eng.recordAPIRouterInflight(context.Background(), t2, "dispatch_work", "claude-99")
+	if err := eng.recordAPIRouterInflight(context.Background(), t2, "dispatch_work", "claude-99"); err != nil {
+		t.Fatalf("record inflight: %v", err)
+	}
 	eng.reconcileAPIRouterInflight(context.Background())
 	got2After, _ := st.GetTrigger(context.Background(), t2.ID)
 	if got2After.Status != "delivered" {
@@ -422,7 +453,7 @@ func TestAPIRouterStopExactStreamSealAndCrashRecovery(t *testing.T) {
 }
 
 func TestAPIRouterTrustedImagesAndProtectedPaths(t *testing.T) {
-	eng, st, _, dir := newTestAPIEngine(t, "http://127.0.0.1:9/v1")
+	eng, st, _, dir := newTestAPIEngine(t, nil)
 
 	// Protected DB path checks (including -wal and symlink).
 	dbPath := st.DBPath()
@@ -457,28 +488,24 @@ func TestAPIRouterTrustedImagesAndProtectedPaths(t *testing.T) {
 		t.Fatalf("expected only the 1 trusted upload image to load, got %+v", parts)
 	}
 
-	// Bounded project_file read_detail allows files inside configured project root and blocks traversal.
-	projDir := filepath.Join(dir, "demo-repo")
-	_ = os.MkdirAll(projDir, 0o755)
-	_ = os.WriteFile(filepath.Join(projDir, "README.md"), []byte("hello corgi api"), 0o644)
-	cfg := eng.Settings()
-	cfg.Projects = []model.ProjectWorkspace{{
-		ID:    "demo",
-		Name:  "Demo",
-		Paths: map[string]string{"hub": projDir},
-	}}
-	if err := eng.SaveConfig(context.Background(), &cfg, nil); err != nil {
-		t.Fatalf("save project config: %v", err)
-	}
-
+	// project_file and project_git are removed from read_detail; note reads through os.Root sandbox.
 	turn := &apiRouterTurn{thread: model.MainThread}
-	okRead := eng.toolReadDetail(context.Background(), turn, `{"kind":"project_file","target":"demo:README.md"}`)
-	if !strings.Contains(okRead, "hello corgi api") {
-		t.Fatalf("expected project_file content, got %s", okRead)
+	for _, kind := range []string{"project_file", "project_git"} {
+		out := eng.toolReadDetail(context.Background(), turn, `{"kind":"`+kind+`","target":"demo:README.md"}`)
+		if !strings.Contains(out, `"ok":false`) || !strings.Contains(out, "不支持的 read_detail kind") {
+			t.Fatalf("expected %s rejected as unsupported, got %s", kind, out)
+		}
 	}
-	badRead := eng.toolReadDetail(context.Background(), turn, `{"kind":"project_file","target":"demo:../corgi.db"}`)
+	if err := eng.memory.SaveFile("notes/demo.md", "hello corgi note"); err != nil {
+		t.Fatalf("save note: %v", err)
+	}
+	okRead := eng.toolReadDetail(context.Background(), turn, `{"kind":"note","target":"demo"}`)
+	if !strings.Contains(okRead, "hello corgi note") {
+		t.Fatalf("expected note content, got %s", okRead)
+	}
+	badRead := eng.toolReadDetail(context.Background(), turn, `{"kind":"note","target":"../corgi.db"}`)
 	if !strings.Contains(badRead, `"ok":false`) {
-		t.Fatalf("expected traversal rejection, got %s", badRead)
+		t.Fatalf("expected note traversal rejection, got %s", badRead)
 	}
 }
 
@@ -505,7 +532,7 @@ func TestAPIRouterReviewRegressions(t *testing.T) {
 	}
 
 	// 2. Testing or saving blank custom provider URL must NOT reuse previous saved URL.
-	eng, st, _, _ := newTestAPIEngine(t, "http://127.0.0.1:9/v1")
+	eng, st, _, _ := newTestAPIEngine(t, nil)
 	if _, err := eng.SetRouterAPIKey(context.Background(), RouterAPIProviderOpenAI, "", "sk-new"); err == nil {
 		t.Fatalf("expected error saving key for custom provider with blank base URL")
 	}
@@ -551,7 +578,7 @@ func TestAPIRouterReviewRegressions(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":{"message":"image input not supported"}}`))
 	}))
 	defer badSrv.Close()
-	eng400, st400, _, _ := newTestAPIEngine(t, badSrv.URL+"/v1")
+	eng400, st400, _, _ := newTestAPIEngine(t, badSrv)
 	_, badTrig, err := eng400.Say(context.Background(), SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "看图"})
 	if err != nil {
 		t.Fatalf("say bad400: %v", err)
@@ -569,10 +596,10 @@ func TestAPIRouterReviewRegressions(t *testing.T) {
 		t.Fatalf("expected HTTP 400 trigger to be skipped/delivered instead of wedging queue, got %s", gotBad.Status)
 	}
 	eng400.mu.Lock()
-	paused := eng400.apiAuthPaused
+	paused := eng400.router.authPaused
 	eng400.mu.Unlock()
 	if paused {
-		t.Fatalf("HTTP 400 input error must NOT set apiAuthPaused")
+		t.Fatalf("HTTP 400 input error must NOT set router.authPaused")
 	}
 
 	// 6. TokenHub effort normalization clamps unsupported efforts per model.
@@ -610,8 +637,8 @@ func TestLLMClientSSEStreamingToolsStallAndFallback(t *testing.T) {
 			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"reasoning_content":"深度思考2"}}]}`,
 			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"reasoning_content":"深度思考3"}}]}`,
 			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"reply_user","arguments":""}}]}}]}`,
-			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"purpose\":\"answer\","}}]}}]}`,
-			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"text\":\"好了\"}"}}]}}]}`,
+			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"text\":\"好"}}]}}]}`,
+			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"了\"}"}}]}}]}`,
 			`{"id":"cmpl-s1","model":"hy4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":45,"total_tokens":145,"prompt_tokens_details":{"cached_tokens":64},"completion_tokens_details":{"reasoning_tokens":30}}}`,
 		}
 		for _, c := range chunks {
@@ -629,12 +656,11 @@ func TestLLMClientSSEStreamingToolsStallAndFallback(t *testing.T) {
 	}))
 	defer sseSrv.Close()
 
-	resp, err := ChatCompletion(context.Background(), LLMClientConfig{
-		Provider:            RouterAPIProviderTokenHub,
-		BaseURL:             sseSrv.URL + "/v1",
-		APIKey:              "sk-sse-test",
-		AllowPrivateForTest: true,
-		StreamIdleTimeout:   140 * time.Millisecond,
+	resp, err := newTestLLMClient(sseSrv).ChatCompletion(context.Background(), LLMClientConfig{
+		Provider:          RouterAPIProviderTokenHub,
+		BaseURL:           TokenHubDefaultBaseURL,
+		APIKey:            "sk-sse-test",
+		StreamIdleTimeout: 140 * time.Millisecond,
 	}, LLMChatRequest{
 		Model:           "hy4",
 		ReasoningEffort: "high",
@@ -652,7 +678,7 @@ func TestLLMClientSSEStreamingToolsStallAndFallback(t *testing.T) {
 		t.Fatalf("reasoning_content must NOT leak into Message.Content, got %q", resp.Choices[0].Message.Content)
 	}
 	if len(resp.Choices[0].Message.ToolCalls) != 1 || resp.Choices[0].Message.ToolCalls[0].Function.Name != "reply_user" ||
-		resp.Choices[0].Message.ToolCalls[0].Function.Arguments != `{"purpose":"answer","text":"好了"}` {
+		resp.Choices[0].Message.ToolCalls[0].Function.Arguments != `{"text":"好了"}` {
 		t.Fatalf("unexpected assembled tool calls: %+v", resp.Choices[0].Message.ToolCalls)
 	}
 	if resp.Usage.PromptTokensDetails == nil || resp.Usage.PromptTokensDetails.CachedTokens != 64 ||
@@ -660,44 +686,36 @@ func TestLLMClientSSEStreamingToolsStallAndFallback(t *testing.T) {
 		t.Fatalf("unexpected usage details: %+v", resp.Usage)
 	}
 
-	// 2. Stalled SSE stream (0 chunks for > StreamIdleTimeout) aborts fast and recovers on retry.
+	// 2. Stalled SSE stream (0 chunks for > StreamIdleTimeout) aborts fast on a single attempt (no inner retry loop).
 	var stallAttempts int
 	stallSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		stallAttempts++
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
-		if stallAttempts == 1 {
-			_, _ = w.Write([]byte("data: {\"id\":\"s-stall\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"卡住前\"}}]}\n\n"))
-			if flusher != nil {
-				flusher.Flush()
-			}
-			select {
-			case <-r.Context().Done():
-			case <-time.After(2 * time.Second):
-			}
-			return
+		_, _ = w.Write([]byte("data: {\"id\":\"s-stall\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"卡住前\"}}]}\n\n"))
+		if flusher != nil {
+			flusher.Flush()
 		}
-		_, _ = w.Write([]byte("data: {\"id\":\"s-ok\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"恢复成功\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
 	}))
 	defer stallSrv.Close()
 
 	t0 := time.Now()
-	resp2, err := ChatCompletion(context.Background(), LLMClientConfig{
-		Provider:            RouterAPIProviderTokenHub,
-		BaseURL:             stallSrv.URL + "/v1",
-		APIKey:              "sk-stall-test",
-		AllowPrivateForTest: true,
-		StreamIdleTimeout:   100 * time.Millisecond,
+	_, err = newTestLLMClient(stallSrv).ChatCompletion(context.Background(), LLMClientConfig{
+		Provider:          RouterAPIProviderTokenHub,
+		BaseURL:           TokenHubDefaultBaseURL,
+		APIKey:            "sk-stall-test",
+		StreamIdleTimeout: 100 * time.Millisecond,
 	}, LLMChatRequest{
 		Model:    "hy4",
 		Stream:   true,
 		Messages: []LLMMessage{{Role: "user", Content: "test stall"}},
 	})
-	if err != nil {
-		t.Fatalf("expected stall retry to succeed, got %v", err)
-	}
-	if resp2.Choices[0].Message.Content != "恢复成功" || stallAttempts != 2 || time.Since(t0) > 1800*time.Millisecond {
-		t.Fatalf("unexpected stall recovery: attempts=%d elapsed=%s content=%q", stallAttempts, time.Since(t0), resp2.Choices[0].Message.Content)
+	if err == nil || !strings.Contains(err.Error(), "卡顿") || stallAttempts != 1 || time.Since(t0) > 800*time.Millisecond {
+		t.Fatalf("expected single-attempt fast stall abort, got attempts=%d elapsed=%s err=%v", stallAttempts, time.Since(t0), err)
 	}
 
 	// 3. Custom OpenAI gateway returning HTTP 400 on stream_options falls back cleanly to non-streaming.
@@ -718,11 +736,10 @@ func TestLLMClientSSEStreamingToolsStallAndFallback(t *testing.T) {
 	}))
 	defer fbSrv.Close()
 
-	resp3, err := ChatCompletion(context.Background(), LLMClientConfig{
-		Provider:            RouterAPIProviderOpenAI,
-		BaseURL:             fbSrv.URL + "/v1",
-		APIKey:              "sk-fb",
-		AllowPrivateForTest: true,
+	resp3, err := newTestLLMClient(fbSrv).ChatCompletion(context.Background(), LLMClientConfig{
+		Provider: RouterAPIProviderOpenAI,
+		BaseURL:  "https://api.example.com/v1",
+		APIKey:   "sk-fb",
 	}, LLMChatRequest{
 		Model:         "custom",
 		Stream:        true,
@@ -768,7 +785,7 @@ func TestAPIRouterSameTriggerCircuitBreakerUnblocksQueue(t *testing.T) {
 						"id": "call_next", "type": "function",
 						"function": map[string]any{
 							"name":      "reply_user",
-							"arguments": `{"purpose":"answer","text":"后续消息已正常回复"}`,
+							"arguments": `{"text":"后续消息已正常回复"}`,
 						},
 					}},
 				},
@@ -777,7 +794,7 @@ func TestAPIRouterSameTriggerCircuitBreakerUnblocksQueue(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	eng, st, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	eng, st, sink, _ := newTestAPIEngine(t, srv)
 	ctx := context.Background()
 
 	_, trigBad, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "web", From: "you", Text: "卡死消息"})
@@ -792,7 +809,7 @@ func TestAPIRouterSameTriggerCircuitBreakerUnblocksQueue(t *testing.T) {
 	// Simulate 3 consecutive failures on trigBad (clearing backoff between ticks to keep test fast).
 	for attempt := 1; attempt <= maxSameAPITriggerFails; attempt++ {
 		eng.mu.Lock()
-		eng.apiBackoffUntil = time.Time{}
+		eng.router.backoffUntil = time.Time{}
 		eng.mu.Unlock()
 		eng.tick(ctx)
 		waitUntil(t, 5*time.Second, func() bool {
@@ -839,7 +856,7 @@ func TestAPIModeNoPTYTranscriptLeakAndCleanHistoryAndProgress(t *testing.T) {
 					"tool_calls": []map[string]any{
 						{"id": "c1", "type": "function", "function": map[string]any{
 							"name":      "reply_user",
-							"arguments": `{"purpose":"answer","text":"一切正常"}`,
+							"arguments": `{"text":"一切正常"}`,
 						}},
 					},
 				},
@@ -848,12 +865,11 @@ func TestAPIModeNoPTYTranscriptLeakAndCleanHistoryAndProgress(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	eng, _, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	eng, _, sink, _ := newTestAPIEngine(t, srv)
 	ctx := context.Background()
 
-	// 1. Seed prior assistant reply + routine noise events and verify sliding history preserves
-	// reply content without internal "[eXXXX]" prefixes, filters noise, and emits ZERO bare-text
-	// assistant turns (preventing models like kimi-k3 from few-shot imitating bare text).
+	// 1. Seed prior assistant reply + routine noise events and verify history preserves
+	// reply content without internal "[eXXXX]" prefixes and filters noise.
 	if _, _, _, err := eng.Reply(ctx, model.MainThread, "之前的正常回复内容", "", nil, false); err != nil {
 		t.Fatal(err)
 	}
@@ -863,11 +879,10 @@ func TestAPIModeNoPTYTranscriptLeakAndCleanHistoryAndProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hist := eng.buildThreadSlidingHistory(ctx, model.MainThread, trig)
-	if len(hist) != 1 || hist[0].Role != "user" {
-		t.Fatalf("expected structured user history block with zero bare-text assistant turns, got %+v", hist)
+	histText := eng.buildThreadHistoryText(ctx, model.MainThread, trig)
+	if histText == "" {
+		t.Fatalf("expected non-empty structured thread history block")
 	}
-	histText, _ := hist[0].Content.(string)
 	if strings.Contains(histText, "[e") {
 		t.Fatalf("history must not carry internal [eXXXX] prefix, got %q", histText)
 	}
@@ -927,7 +942,7 @@ func TestAPIRouterMaxStepsExhaustedNeverSilentlySwallows(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	eng, st, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	eng, st, sink, _ := newTestAPIEngine(t, srv)
 	ctx := context.Background()
 	_, trig, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "wecom", From: "owner", Text: "帮我合入部署"})
 	if err != nil {
@@ -1007,7 +1022,7 @@ func TestAPIRouterBareTextNudgeAndExplicitCardTitle(t *testing.T) {
 							"id": "call_ok", "type": "function",
 							"function": map[string]any{
 								"name":      "reply_user",
-								"arguments": `{"purpose":"attention","title":"wi3524 直聊身份 · 合入部署","text":"分支已验收全绿，请确认推进方式。","choices":["合入并部署","只合入构建"]}`,
+								"arguments": `{"title":"wi3524 直聊身份 · 合入部署","text":"分支已验收全绿，请确认推进方式。","choices":["合入并部署","只合入构建"]}`,
 							},
 						}},
 					},
@@ -1017,7 +1032,7 @@ func TestAPIRouterBareTextNudgeAndExplicitCardTitle(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	eng, st, _, _ := newTestAPIEngine(t, srv.URL+"/v1")
+	eng, st, _, _ := newTestAPIEngine(t, srv)
 	ctx := context.Background()
 	trig, err := eng.Ingest(ctx, "worker", model.MainThread, "agy-3713", "worker failed to start", "", model.RouterName, "agy-3713")
 	if err != nil {
@@ -1053,8 +1068,13 @@ func TestAPIRouterSilenceBoundaryZeroBareTextLeakAndNoAction(t *testing.T) {
 		{name: "worker error", trig: &model.Trigger{Source: "worker", Policy: "respond", From: "agy-1", Text: "worker agy-1 stopped on an agent/provider error"}, want: false},
 		{name: "user timer", trig: &model.Trigger{Source: "timer", Policy: "respond", Text: "提醒开会"}, want: false},
 		{name: "worker progress report", trig: &model.Trigger{Source: "worker", Policy: "respond", From: "agy-1", Text: "report from agy-1:\n进度：正在构建"}, want: true},
-		{name: "system morning digest", trig: &model.Trigger{Source: "system", Policy: "respond", Text: "[corgi morning-digest]"}, want: true},
+		{name: "system morning digest", trig: &model.Trigger{Source: "system", Policy: "respond", From: "corgi", Ref: "morning-digest", Text: "[corgi morning-digest]"}, want: true},
+		{name: "system idle patrol", trig: &model.Trigger{Source: "system", Policy: "respond", From: "corgi", Ref: "idle-patrol", Text: "[corgi idle-patrol]"}, want: true},
+		{name: "system dream anomaly", trig: &model.Trigger{Source: "system", Policy: "respond", From: "dream", Ref: "d-1", Text: "dream report"}, want: true},
+		{name: "system dream empty ref rejected", trig: &model.Trigger{Source: "system", Policy: "respond", From: "dream", Ref: "", Text: "dream report"}, want: false},
+		{name: "system unknown ref rejected", trig: &model.Trigger{Source: "system", Policy: "respond", From: "corgi", Ref: "other", Text: "other"}, want: false},
 		{name: "candidate webhook", trig: &model.Trigger{Source: "webhook:ci", Policy: "candidate", Text: "build ping"}, want: true},
+		{name: "candidate non-webhook rejected", trig: &model.Trigger{Source: "chat", Policy: "candidate", Text: "ping"}, want: false},
 	}
 	for _, tc := range policyCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1088,7 +1108,7 @@ func TestAPIRouterSilenceBoundaryZeroBareTextLeakAndNoAction(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		eng, st, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+		eng, st, sink, _ := newTestAPIEngine(t, srv)
 		ctx := context.Background()
 		_, trig, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "wecom", From: "owner", Text: "如何了"})
 		if err != nil {
@@ -1181,7 +1201,7 @@ func TestAPIRouterSilenceBoundaryZeroBareTextLeakAndNoAction(t *testing.T) {
 							"role": "assistant",
 							"tool_calls": []map[string]any{{
 								"id": "call_rep", "type": "function",
-								"function": map[string]any{"name": "reply_user", "arguments": `{"purpose":"answer","text":"物言数据流方案仍在等你审阅。"}`},
+								"function": map[string]any{"name": "reply_user", "arguments": `{"text":"物言数据流方案仍在等你审阅。"}`},
 							}},
 						},
 					}},
@@ -1190,7 +1210,7 @@ func TestAPIRouterSilenceBoundaryZeroBareTextLeakAndNoAction(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		eng, _, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+		eng, _, sink, _ := newTestAPIEngine(t, srv)
 		ctx := context.Background()
 		_, trig, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "wecom", From: "owner", Text: "还在跑，"})
 		if err != nil {
@@ -1226,7 +1246,7 @@ func TestAPIRouterSilenceBoundaryZeroBareTextLeakAndNoAction(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		eng, st, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+		eng, st, sink, _ := newTestAPIEngine(t, srv)
 		ctx := context.Background()
 		trig, err := eng.Ingest(ctx, "system", model.MainThread, "corgi", "[corgi morning-digest] Daily morning review", "", model.RouterName, "morning-digest")
 		if err != nil {
@@ -1253,7 +1273,7 @@ func TestAPIRouterSilenceBoundaryZeroBareTextLeakAndNoAction(t *testing.T) {
 
 	// 5. Tool progress bubbles resolve WorkItem titles instead of raw worker IDs.
 	t.Run("tool progress uses WorkItem title instead of worker slug", func(t *testing.T) {
-		eng, st, _, _ := newTestAPIEngine(t, "http://127.0.0.1:9/v1")
+		eng, st, _, _ := newTestAPIEngine(t, nil)
 		ctx := context.Background()
 		wi, err := eng.SetWorkItem(ctx, "new", model.MainThread, "会话直聊身份提醒", "等待验收", "", "")
 		if err != nil {
@@ -1274,7 +1294,7 @@ func TestAPIRouterSilenceBoundaryZeroBareTextLeakAndNoAction(t *testing.T) {
 }
 
 func TestAPIModeWorkerTurnQuietSettleAndApprovalNoWake(t *testing.T) {
-	eng, st, _, _ := newTestAPIEngine(t, "http://127.0.0.1:9/v1")
+	eng, st, _, _ := newTestAPIEngine(t, nil)
 	eng.mu.Lock()
 	eng.workerTurnSettleDelay = 20 * time.Second
 	eng.mu.Unlock()

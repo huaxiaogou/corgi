@@ -24,6 +24,7 @@ func (e *Engine) Run(ctx context.Context) {
 	e.EmitPendingAutoUpdateNotice(ctx)
 	tick := time.NewTicker(1500 * time.Millisecond)
 	defer tick.Stop()
+	defer e.llm.CloseIdleConnections()
 	for {
 		select {
 		case <-ctx.Done():
@@ -810,12 +811,7 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 func (e *Engine) RestartRouter(ctx context.Context) error {
 	e.cancelAndSettleAPIRouterTurn(ctx, "", true)
 	e.mu.Lock()
-	e.apiBackoffUntil = time.Time{}
-	e.apiFailCount = 0
-	e.apiLastFailTriggerID = ""
-	e.apiSameTriggerFails = 0
-	e.apiAuthPaused = false
-	e.apiLastErr = ""
+	e.router.resetFailuresLocked(false)
 	e.mu.Unlock()
 	e.wake()
 	e.notifyChanged()
