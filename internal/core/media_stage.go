@@ -12,6 +12,29 @@ import (
 	"github.com/kiperjing/corgi/internal/model"
 )
 
+type stageBudget struct {
+	ctx            context.Context
+	cancel         context.CancelFunc
+	remainingFiles int
+	remainingBytes int64
+}
+
+func newStageBudget(parent context.Context) *stageBudget {
+	bctx, cancel := context.WithTimeout(parent, stageBatchTimeout)
+	return &stageBudget{
+		ctx:            bctx,
+		cancel:         cancel,
+		remainingFiles: MaxStageFilesPerDispatch,
+		remainingBytes: MaxStageTotalBytes,
+	}
+}
+
+func (b *stageBudget) close() {
+	if b != nil && b.cancel != nil {
+		b.cancel()
+	}
+}
+
 func (e *Engine) normStageMachine(m string) string {
 	s := strings.TrimSpace(m)
 	if s == "" || strings.EqualFold(s, "hub") || strings.EqualFold(s, "local") {
@@ -30,19 +53,29 @@ func (e *Engine) dbPath() string {
 	return e.store.DBPath()
 }
 
-// collectTurnMedia gathers deduplicated trusted media candidates from trigger, source entry,
-// recent thread user media referenced in text, and explicit Hub uploads paths appearing in text.
+// collectTurnMedia gathers deduplicated trusted media candidates from a verified human turn only.
 func (e *Engine) collectTurnMedia(ctx context.Context, thread string, trig *model.Trigger, meta *turnConsentMeta, texts ...string) []model.MediaRef {
-	var raw []model.MediaRef
-	if trig != nil && !strings.EqualFold(strings.TrimSpace(trig.From), "machine") {
-		raw = append(raw, trig.Media...)
+	if meta == nil || !meta.isHuman {
+		return nil
 	}
-	if meta != nil && meta.sourceEntry != nil && isHumanChannel(meta.sourceEntry.Channel) {
-		raw = append(raw, meta.sourceEntry.Media...)
+	var raw []model.MediaRef
+	structuredPaths := map[string]bool{}
+	addStructured := func(refs []model.MediaRef) {
+		for _, r := range refs {
+			if p := strings.TrimSpace(r.Path); p != "" {
+				structuredPaths[filepath.Clean(p)] = true
+				raw = append(raw, r)
+			}
+		}
+	}
+	if trig != nil {
+		addStructured(trig.Media)
+	}
+	if meta.sourceEntry != nil && isHumanChannel(meta.sourceEntry.Channel) {
+		addStructured(meta.sourceEntry.Media)
 	}
 	combined := strings.Join(texts, "\n")
 	if strings.TrimSpace(combined) != "" {
-		// Match recently uploaded user media referenced in follow-up text.
 		if e.store != nil {
 			if entries, _, err := e.store.ListEntries(ctx, orStr(thread, model.MainThread), 20); err == nil {
 				for _, en := range entries {
@@ -51,15 +84,17 @@ func (e *Engine) collectTurnMedia(ctx context.Context, thread string, trig *mode
 					}
 					for _, ref := range en.Media {
 						if p := strings.TrimSpace(ref.Path); p != "" && strings.Contains(combined, p) {
+							structuredPaths[filepath.Clean(p)] = true
 							raw = append(raw, ref)
 						}
 					}
 				}
 			}
 		}
-		// Extract explicit Hub <corgiDir>/uploads/... paths mentioned in text.
 		for _, p := range extractHubUploadPaths(e.corgiDir, combined) {
-			raw = append(raw, model.MediaRef{Path: p, Name: filepath.Base(p)})
+			if !structuredPaths[filepath.Clean(p)] {
+				raw = append(raw, model.MediaRef{Path: p, Name: filepath.Base(p)})
+			}
 		}
 	}
 	return e.dedupMediaRefs(raw)
@@ -116,8 +151,11 @@ func (e *Engine) dedupMediaRefs(raw []model.MediaRef) []model.MediaRef {
 	return out
 }
 
-// stageTurnMediaForGoal stages eligible media refs onto targetMachine and rewrites goal & origReq.
+// stageTurnMediaForGoal stages eligible media refs onto targetMachine for verified human turns only.
 func (e *Engine) stageTurnMediaForGoal(ctx context.Context, targetMachine, goal, origReq string, trig *model.Trigger, meta *turnConsentMeta) (string, string, []string, error) {
+	if meta == nil || !meta.isHuman {
+		return goal, origReq, nil, nil
+	}
 	thread := model.MainThread
 	if trig != nil && strings.TrimSpace(trig.Thread) != "" {
 		thread = trig.Thread
@@ -126,38 +164,52 @@ func (e *Engine) stageTurnMediaForGoal(ctx context.Context, targetMachine, goal,
 	if len(refs) == 0 {
 		return goal, origReq, nil, nil
 	}
-	texts, warns, err := e.stageMediaForTexts(ctx, targetMachine, []string{goal, origReq}, refs)
+	b := newStageBudget(ctx)
+	defer b.close()
+	texts, warns, err := e.stageMediaForTextsWithBudget(b, targetMachine, []string{goal, origReq}, refs)
 	if err != nil {
 		return goal, origReq, warns, err
 	}
 	return texts[0], texts[1], warns, nil
 }
 
-// stageMediaForDirectText stages explicit media refs (and any referenced Hub upload paths) for direct worker delivery.
+// stageMediaForDirectText stages explicit media refs (and unreferenced Hub upload paths) for direct delivery.
 func (e *Engine) stageMediaForDirectText(ctx context.Context, targetMachine, text string, refs []model.MediaRef) (string, []string, error) {
-	merged := append([]model.MediaRef(nil), refs...)
+	b := newStageBudget(ctx)
+	defer b.close()
+	return e.stageMediaForDirectTextWithBudget(b, targetMachine, text, refs)
+}
+
+func (e *Engine) stageMediaForDirectTextWithBudget(b *stageBudget, targetMachine, text string, refs []model.MediaRef) (string, []string, error) {
+	structuredPaths := map[string]bool{}
+	merged := make([]model.MediaRef, 0, len(refs))
+	for _, r := range refs {
+		if p := strings.TrimSpace(r.Path); p != "" {
+			structuredPaths[filepath.Clean(p)] = true
+			merged = append(merged, r)
+		}
+	}
 	for _, p := range extractHubUploadPaths(e.corgiDir, text) {
-		merged = append(merged, model.MediaRef{Path: p, Name: filepath.Base(p)})
+		if !structuredPaths[filepath.Clean(p)] {
+			merged = append(merged, model.MediaRef{Path: p, Name: filepath.Base(p)})
+		}
 	}
 	dedup := e.dedupMediaRefs(merged)
 	if len(dedup) == 0 {
 		return text, nil, nil
 	}
-	texts, warns, err := e.stageMediaForTexts(ctx, targetMachine, []string{text}, dedup)
+	texts, warns, err := e.stageMediaForTextsWithBudget(b, targetMachine, []string{text}, dedup)
 	if err != nil {
 		return text, warns, err
 	}
 	return texts[0], warns, nil
 }
 
-func (e *Engine) stageMediaForTexts(ctx context.Context, targetMachine string, texts []string, refs []model.MediaRef) ([]string, []string, error) {
+func (e *Engine) stageMediaForTextsWithBudget(b *stageBudget, targetMachine string, texts []string, refs []model.MediaRef) ([]string, []string, error) {
 	if len(refs) == 0 || len(texts) == 0 {
 		return texts, nil, nil
 	}
 	dst := e.normStageMachine(targetMachine)
-	bctx, bcancel := context.WithTimeout(ctx, stageBatchTimeout)
-	defer bcancel()
-
 	var (
 		warnings       []string
 		replPairs      []string
@@ -167,21 +219,21 @@ func (e *Engine) stageMediaForTexts(ctx context.Context, targetMachine string, t
 		crossAttempted int
 		crossSucceeded int
 		sameUsable     int
-		remainingBytes = int64(MaxStageTotalBytes)
 		firstCrossErr  error
 	)
-
 	type replacement struct{ oldPath, newPath string }
 	var repls []replacement
 
-	for idx, ref := range refs {
-		if idx >= MaxStageFilesPerDispatch {
+	for _, ref := range refs {
+		if b.remainingFiles <= 0 {
 			w := fmt.Sprintf("附件 %s 超过单次派发最多 %d 个文件上限，已跳过", ref.Name, MaxStageFilesPerDispatch)
 			warnings = append(warnings, w)
 			failedNotes = append(failedNotes, fmt.Sprintf("- %s：%s", ref.Name, w))
 			repls = append(repls, replacement{oldPath: ref.Path, newPath: "[未同步: " + ref.Name + "]"})
 			continue
 		}
+		b.remainingFiles--
+
 		src := e.normStageMachine(ref.Machine)
 		if src == dst {
 			if err := e.validateSameMachineRef(src, ref.Path); err != nil {
@@ -199,7 +251,7 @@ func (e *Engine) stageMediaForTexts(ctx context.Context, targetMachine string, t
 		}
 
 		crossAttempted++
-		if remainingBytes <= 0 {
+		if b.remainingBytes <= 0 {
 			w := fmt.Sprintf("附件 %s 超过单次派发 %d MB 总限额，已跳过", ref.Name, MaxStageTotalBytes>>20)
 			warnings = append(warnings, w)
 			failedNotes = append(failedNotes, fmt.Sprintf("- %s：%s", ref.Name, w))
@@ -210,9 +262,15 @@ func (e *Engine) stageMediaForTexts(ctx context.Context, targetMachine string, t
 			continue
 		}
 
-		fctx, fcancel := context.WithTimeout(bctx, stageSingleFileTimeout)
-		destPath, transferred, sErr := e.stageOneCrossMachineFile(fctx, src, dst, ref, remainingBytes)
+		fctx, fcancel := context.WithTimeout(b.ctx, stageSingleFileTimeout)
+		destPath, transferred, sErr := e.stageOneCrossMachineFile(fctx, src, dst, ref, b.remainingBytes)
 		fcancel()
+		if transferred > 0 {
+			b.remainingBytes -= transferred
+			if b.remainingBytes < 0 {
+				b.remainingBytes = 0
+			}
+		}
 		if sErr != nil {
 			if firstCrossErr == nil {
 				firstCrossErr = sErr
@@ -224,10 +282,6 @@ func (e *Engine) stageMediaForTexts(ctx context.Context, targetMachine string, t
 			continue
 		}
 		crossSucceeded++
-		remainingBytes -= transferred
-		if remainingBytes < 0 {
-			remainingBytes = 0
-		}
 		repls = append(repls, replacement{oldPath: ref.Path, newPath: destPath})
 		if !strings.Contains(texts[0], ref.Path) {
 			missingCross = append(missingCross, destPath)

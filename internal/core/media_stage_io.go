@@ -11,14 +11,73 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/kiperjing/corgi/internal/model"
 )
 
-var errRemoteUploadReadUnsupported = errors.New("源节点版本较旧，不支持跨机读取上传文件")
+var (
+	errRemoteUploadReadUnsupported = errors.New("源节点版本较旧，不支持跨机读取上传文件")
+	unsafeUploadNameRe             = regexp.MustCompile(`[^\p{L}\p{N}._-]+`)
+	sha256Hex64Re                  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+// IsValidSHA256Hex reports whether s is a canonical 64-char lowercase hex SHA-256 digest.
+func IsValidSHA256Hex(s string) bool {
+	return sha256Hex64Re.MatchString(strings.TrimSpace(s))
+}
+
+// SanitizeUploadName normalizes an uploaded filename into a safe single-segment basename.
+func SanitizeUploadName(name string) string {
+	name = filepath.Base(strings.ReplaceAll(strings.TrimSpace(name), "\\", "/"))
+	ext := unsafeUploadNameRe.ReplaceAllString(filepath.Ext(name), "")
+	stem := strings.Trim(unsafeUploadNameRe.ReplaceAllString(strings.TrimSuffix(name, filepath.Ext(name)), "-"), "-.")
+	if stem == "" {
+		stem = "file"
+	}
+	return stem + ext
+}
+
+func clipStagedFilename(shaHex, safeName string) string {
+	extRunes := []rune(filepath.Ext(safeName))
+	if len(extRunes) > 16 {
+		extRunes = extRunes[:16]
+	}
+	ext := string(extRunes)
+	stem := strings.TrimSuffix(safeName, filepath.Ext(safeName))
+	if stem == "" {
+		stem = "file"
+	}
+	stemRunes := []rune(stem)
+	if len(stemRunes) > 64 {
+		stem = strings.TrimRight(string(stemRunes[:64]), "-.")
+		if stem == "" {
+			stem = "file"
+		}
+	}
+	return shaHex + "-" + stem + ext
+}
+
+// ValidateUploadDestPath validates a destination path returned by a remote Node upload endpoint.
+func ValidateUploadDestPath(p string) error {
+	if hasControlRune(p) {
+		return fmt.Errorf("目标上传路径包含非法控制字符")
+	}
+	p = strings.TrimSpace(p)
+	if p == "" || !strings.HasPrefix(p, "/") {
+		return fmt.Errorf("目标上传路径无效：%q", p)
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(p), "/") {
+		if seg == ".." {
+			return fmt.Errorf("目标上传路径包含穿越段：%q", p)
+		}
+	}
+	return nil
+}
 
 func (e *Engine) validateSameMachineRef(machine, rawPath string) error {
 	if machine == "" {
@@ -52,9 +111,25 @@ func (e *Engine) stageOneCrossMachineFile(ctx context.Context, src, dst string, 
 	}
 	destPath, _, err := e.pushHubUploadToNode(ctx, dst, hubPath, safeName, remainingBytes)
 	if err != nil {
-		return "", 0, err
+		return "", pulled, err
 	}
 	return destPath, pulled, nil
+}
+
+func isPermanentStageError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrUploadTooLarge) || errors.Is(err, errRemoteUploadReadUnsupported) {
+		return true
+	}
+	msg := err.Error()
+	for _, needle := range []string{"符号链接", "受保护", "不在受信任", "文件为空", "非普通文件", "非法", "总限额", "超过单次派发"} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) pushHubUploadToNode(ctx context.Context, dst, hubPath, safeName string, remainingBytes int64) (string, int64, error) {

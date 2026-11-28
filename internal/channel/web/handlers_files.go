@@ -276,6 +276,14 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func isUploadTooLargeErr(err error) bool {
+	if errors.Is(err, core.ErrUploadTooLarge) {
+		return true
+	}
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
+}
+
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	name := core.SanitizeUploadName(r.URL.Query().Get("name"))
 	day := time.Now().Format("20060102")
@@ -289,7 +297,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		dest, actualSHA, n, deduped, err := core.StageLocalFileFromReader(s.CorgiDir, day, shaHex, name, body, maxUploadBytes)
 		if err != nil {
 			code := http.StatusBadRequest
-			if strings.Contains(err.Error(), "限制") {
+			if isUploadTooLargeErr(err) {
 				code = http.StatusRequestEntityTooLarge
 			}
 			writeJSON(w, code, map[string]any{"error": err.Error()})
@@ -300,9 +308,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	dest, n, err := core.WriteRegularUploadAtomic(s.CorgiDir, day, fleet.RandomToken()[:6], name, body, maxUploadBytes)
 	if err != nil {
-		code := http.StatusRequestEntityTooLarge
-		if !strings.Contains(err.Error(), "限制") {
-			code = http.StatusInternalServerError
+		code := http.StatusInternalServerError
+		if isUploadTooLargeErr(err) {
+			code = http.StatusRequestEntityTooLarge
 		}
 		writeJSON(w, code, map[string]any{"error": "上传失败或超过 25 MB 限制"})
 		return

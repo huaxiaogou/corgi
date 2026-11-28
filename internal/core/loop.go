@@ -682,6 +682,9 @@ func (e *Engine) deliverQueuedWithFleet(ctx context.Context, live map[string]liv
 		if !fleetOK {
 			continue
 		}
+		if e.isDeliveringWorker(target) {
+			continue
+		}
 		li, alive := live[target]
 		if !alive {
 			e.rerouteDeadWorkerTriggers(ctx, target, list, scanned)
@@ -700,10 +703,7 @@ func (e *Engine) deliverQueuedWithFleet(ctx context.Context, live map[string]liv
 				continue
 			}
 		}
-		if e.isDeliveringWorker(target) {
-			continue
-		}
-		if triggersHaveHumanMedia(list) {
+		if e.triggersHaveHumanMedia(ctx, list) {
 			if e.tryBeginWorkerDelivery(target) {
 				batchCopy := append([]*model.Trigger(nil), list...)
 				if rootCtx := e.backgroundRunCtx(); rootCtx != nil {
@@ -718,9 +718,29 @@ func (e *Engine) deliverQueuedWithFleet(ctx context.Context, live map[string]liv
 	}
 }
 
-func triggersHaveHumanMedia(list []*model.Trigger) bool {
+func (e *Engine) isTrustedHumanMediaTrigger(ctx context.Context, t *model.Trigger) bool {
+	if t == nil || len(t.Media) == 0 {
+		return false
+	}
+	if (t.Source != "chat" && t.Source != "wecom") || t.Policy != "respond" {
+		return false
+	}
+	fromLow := strings.ToLower(strings.TrimSpace(t.From))
+	if fromLow == "machine" || fromLow == "router" || fromLow == model.RouterName {
+		return false
+	}
+	if t.Ref != "" && e.store != nil {
+		en, err := e.store.GetEntry(ctx, t.Ref)
+		if err != nil || en == nil || (strings.TrimSpace(en.Channel) != "" && !isHumanChannel(en.Channel)) {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *Engine) triggersHaveHumanMedia(ctx context.Context, list []*model.Trigger) bool {
 	for _, t := range list {
-		if t != nil && len(t.Media) > 0 && !strings.EqualFold(strings.TrimSpace(t.From), "machine") {
+		if e.isTrustedHumanMediaTrigger(ctx, t) {
 			return true
 		}
 	}
@@ -797,28 +817,85 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 		return
 	}
 	defer e.endWorkerOp(target)
+	// Re-verify queued triggers after acquiring delivery ownership to avoid re-sending a stale tick snapshot.
+	if e.store != nil {
+		if freshQueued, err := e.store.ListQueuedTriggers(ctx); err == nil {
+			wanted := make(map[string]bool, len(list))
+			for _, t := range list {
+				if t != nil {
+					wanted[t.ID] = true
+				}
+			}
+			var liveList []*model.Trigger
+			for _, ft := range freshQueued {
+				if wanted[ft.ID] && slices.Contains(ft.Targets, target) {
+					liveList = append(liveList, ft)
+				}
+			}
+			list = liveList
+		}
+	}
+	if len(list) == 0 {
+		return
+	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Seq < list[j].Seq })
 	if len(list) > 20 {
 		list = list[:20]
 	}
 
-	var b strings.Builder
 	var targetWorker *model.Worker
 	var workerConstraint string
 	if wk, wErr := e.store.GetWorker(ctx, target); wErr == nil && wk != nil {
 		targetWorker = wk
-		if strings.TrimSpace(wk.Constraint) != "" {
-			workerConstraint = strings.TrimSpace(wk.Constraint)
-			b.WriteString(FormatConstraintHeader(workerConstraint))
-			b.WriteString("\n\n")
-		}
+		workerConstraint = strings.TrimSpace(wk.Constraint)
 	}
-	if len(list) == 1 {
+
+	budget := newStageBudget(ctx)
+	defer budget.close()
+
+	type readyTrigger struct {
+		trig *model.Trigger
+		body string
+	}
+	ready := make([]readyTrigger, 0, len(list))
+	for _, t := range list {
+		body := strings.TrimSpace(t.Text)
+		if r := []rune(body); len(r) > 700 { // Inline & Spill
+			body = string(r[:700]) + fmt.Sprintf(" … [spilled; run `corgi show %s`]", t.ID)
+		}
+		if targetWorker != nil && e.isTrustedHumanMediaTrigger(ctx, t) {
+			stagedBody, _, sErr := e.stageMediaForDirectTextWithBudget(budget, workerMachineID(targetWorker), body, t.Media)
+			if sErr != nil {
+				e.logger.Warn("stage trigger media for worker failed", "target", target, "trigger", t.ID, "err", sErr)
+				if isPermanentStageError(sErr) {
+					e.addEvent(ctx, t.Thread, fmt.Sprintf("发往 #%s 的消息附件无法同步（已跳过）：%v", target, sErr), target, "error")
+					_ = e.store.AckTriggerTarget(ctx, t.ID, target)
+					e.notifyChanged()
+				}
+				continue
+			}
+			body = stagedBody
+		}
+		ready = append(ready, readyTrigger{trig: t, body: body})
+	}
+	if len(ready) == 0 {
+		return
+	}
+
+	var b strings.Builder
+	if workerConstraint != "" {
+		b.WriteString(FormatConstraintHeader(workerConstraint))
+		b.WriteString("\n\n")
+	}
+	if len(ready) == 1 {
 		b.WriteString("[corgi] 1 new event\n")
 	} else {
-		fmt.Fprintf(&b, "[corgi] %d new events (batched)\n", len(list))
+		fmt.Fprintf(&b, "[corgi] %d new events (batched)\n", len(ready))
 	}
-	for _, t := range list {
+	delivered := make([]*model.Trigger, 0, len(ready))
+	for _, rt := range ready {
+		t := rt.trig
+		delivered = append(delivered, t)
 		fmt.Fprintf(&b, "\n#%s · %s · %s", t.ID, t.Thread, t.Source)
 		if t.From != "" {
 			fmt.Fprintf(&b, " · from %s", t.From)
@@ -827,19 +904,7 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 			b.WriteString(" · candidate (act only if a rule or memory covers it)")
 		}
 		fmt.Fprintf(&b, " · %s\n", t.At.Format("15:04"))
-		body := strings.TrimSpace(t.Text)
-		if r := []rune(body); len(r) > 700 { // Inline & Spill
-			body = string(r[:700]) + fmt.Sprintf(" … [spilled; run `corgi show %s`]", t.ID)
-		}
-		if targetWorker != nil && len(t.Media) > 0 && !strings.EqualFold(strings.TrimSpace(t.From), "machine") {
-			stagedBody, _, sErr := e.stageMediaForDirectText(ctx, workerMachineID(targetWorker), body, t.Media)
-			if sErr != nil {
-				e.logger.Warn("stage trigger media for worker failed", "target", target, "trigger", t.ID, "err", sErr)
-				return
-			}
-			body = stagedBody
-		}
-		b.WriteString("  " + strings.ReplaceAll(body, "\n", "\n  ") + "\n")
+		b.WriteString("  " + strings.ReplaceAll(rt.body, "\n", "\n  ") + "\n")
 	}
 
 	promptTarget := target
@@ -867,13 +932,13 @@ func (e *Engine) deliverBatch(ctx context.Context, target, paneID string, list [
 	if workerConstraint != "" && paneID != "" {
 		e.markConstraintDelivered(paneID)
 	}
-	e.recordWorkerDelivered(target, paneID, list)
+	e.recordWorkerDelivered(target, paneID, delivered)
 	e.resetWorkerIdleByName(ctx, target)
 	if targetWorker != nil {
-		e.armWorkerStartupCheck(targetWorker, paneID, list, promptBody, preScreen, preSnap, time.Now())
+		e.armWorkerStartupCheck(targetWorker, paneID, delivered, promptBody, preScreen, preSnap, time.Now())
 	}
 
-	for _, t := range list {
+	for _, t := range delivered {
 		_ = e.store.AckTriggerTarget(ctx, t.ID, target)
 	}
 	e.notifyChanged()

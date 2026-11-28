@@ -45,7 +45,7 @@ func NormalizePublicURL(raw string) (string, error) {
 	}
 	u, err := url.Parse(s)
 	if err != nil {
-		return "", fmt.Errorf("invalid public_url: %w", err)
+		return "", fmt.Errorf("invalid public_url format")
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {

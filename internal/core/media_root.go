@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -26,61 +25,50 @@ const (
 	stageBatchTimeout      = 90 * time.Second
 )
 
-var (
-	unsafeUploadNameRe = regexp.MustCompile(`[^\p{L}\p{N}._-]+`)
-	sha256Hex64Re      = regexp.MustCompile(`^[0-9a-f]{64}$`)
-)
+// ErrUploadTooLarge is wrapped whenever an upload exceeds its byte cap so HTTP handlers reliably return 413.
+var ErrUploadTooLarge = errors.New("上传文件超过大小限制")
 
-// IsValidSHA256Hex reports whether s is a canonical 64-char lowercase hex SHA-256 digest.
-func IsValidSHA256Hex(s string) bool {
-	return sha256Hex64Re.MatchString(strings.TrimSpace(s))
-}
-
-// SanitizeUploadName normalizes an uploaded filename into a safe single-segment basename.
-func SanitizeUploadName(name string) string {
-	name = filepath.Base(strings.ReplaceAll(strings.TrimSpace(name), "\\", "/"))
-	ext := unsafeUploadNameRe.ReplaceAllString(filepath.Ext(name), "")
-	stem := strings.Trim(unsafeUploadNameRe.ReplaceAllString(strings.TrimSuffix(name, filepath.Ext(name)), "-"), "-.")
-	if stem == "" {
-		stem = "file"
-	}
-	return stem + ext
-}
-
-func clipStagedFilename(shaHex, safeName string) string {
-	ext := filepath.Ext(safeName)
-	if len(ext) > 16 {
-		ext = ext[:16]
-	}
-	stem := strings.TrimSuffix(safeName, filepath.Ext(safeName))
-	if stem == "" {
-		stem = "file"
-	}
-	maxStem := 100
-	if len(stem) > maxStem {
-		stem = strings.TrimRight(stem[:maxStem], "-.")
-		if stem == "" {
-			stem = "file"
+// openUploadSubRoot descends one directory segment inside parent without following symlinks and
+// verifies inode identity via os.SameFile after OpenRoot to close directory-swap TOCTOU windows.
+func openUploadSubRoot(parent *os.Root, seg string, create bool) (*os.Root, error) {
+	lfi, err := parent.Lstat(seg)
+	if err != nil {
+		if !os.IsNotExist(err) || !create {
+			return nil, err
+		}
+		if mkErr := parent.Mkdir(seg, 0o700); mkErr != nil && !os.IsExist(mkErr) {
+			return nil, mkErr
+		}
+		lfi, err = parent.Lstat(seg)
+		if err != nil {
+			return nil, err
 		}
 	}
-	return shaHex + "-" + stem + ext
+	if lfi.Mode()&os.ModeSymlink != 0 || !lfi.IsDir() {
+		return nil, fmt.Errorf("目录 %q 为符号链接或非目录，已拒绝", seg)
+	}
+	child, err := parent.OpenRoot(seg)
+	if err != nil {
+		return nil, err
+	}
+	childFi, err := child.Stat(".")
+	if err != nil || !childFi.IsDir() || !os.SameFile(lfi, childFi) {
+		_ = child.Close()
+		return nil, fmt.Errorf("目录 %q 在打开期间发生变化，已拒绝", seg)
+	}
+	return child, nil
 }
 
-// ValidateUploadDestPath validates a destination path returned by a remote Node upload endpoint.
-func ValidateUploadDestPath(p string) error {
-	if hasControlRune(p) {
-		return fmt.Errorf("目标上传路径包含非法控制字符")
+func isSameProtectedDBFile(dbPath string, fi os.FileInfo) bool {
+	if strings.TrimSpace(dbPath) == "" || fi == nil {
+		return false
 	}
-	p = strings.TrimSpace(p)
-	if p == "" || !strings.HasPrefix(p, "/") {
-		return fmt.Errorf("目标上传路径无效：%q", p)
-	}
-	for _, seg := range strings.Split(filepath.ToSlash(p), "/") {
-		if seg == ".." {
-			return fmt.Errorf("目标上传路径包含穿越段：%q", p)
+	for _, cand := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if dbi, err := os.Stat(cand); err == nil && os.SameFile(dbi, fi) {
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 // OpenUploadsSubRoot opens <corgiDir>/uploads/<parts...> via Go 1.25 os.Root without following symlinks.
@@ -99,7 +87,7 @@ func OpenUploadsSubRoot(corgiDir string, create bool, parts ...string) (*os.Root
 	}
 	allParts := append([]string{"uploads"}, parts...)
 	for _, p := range allParts {
-		next, subErr := openSubRoot(cur, p, create)
+		next, subErr := openUploadSubRoot(cur, p, create)
 		_ = cur.Close()
 		if subErr != nil {
 			return nil, subErr
@@ -169,14 +157,12 @@ func openFileInSubdirRoot(corgiDir, dbPath, sub, absPath string, maxBytes int64)
 	if len(segs) == 0 || strings.HasPrefix(segs[len(segs)-1], ".") {
 		return nil, "", 0, fmt.Errorf("非法文件名")
 	}
-
 	cur, err := os.OpenRoot(corgiDir)
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("open corgi root: %w", err)
 	}
-	walkDirs := append([]string{sub}, segs[:len(segs)-1]...)
-	for _, dirSeg := range walkDirs {
-		next, sErr := openSubRoot(cur, dirSeg, false)
+	for _, dirSeg := range append([]string{sub}, segs[:len(segs)-1]...) {
+		next, sErr := openUploadSubRoot(cur, dirSeg, false)
 		_ = cur.Close()
 		if sErr != nil {
 			return nil, "", 0, sErr
@@ -197,16 +183,16 @@ func openFileInSubdirRoot(corgiDir, dbPath, sub, absPath string, maxBytes int64)
 		return nil, "", 0, fmt.Errorf("文件为空")
 	}
 	if maxBytes > 0 && lfi.Size() > maxBytes {
-		return nil, "", 0, fmt.Errorf("文件大小超过 %d MB 限制", maxBytes>>20)
+		return nil, "", 0, fmt.Errorf("%w（上限 %d MB）", ErrUploadTooLarge, maxBytes>>20)
 	}
 	f, err := cur.Open(base)
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("open upload file: %w", err)
 	}
 	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() <= 0 || (maxBytes > 0 && fi.Size() > maxBytes) {
+	if err != nil || !fi.Mode().IsRegular() || !os.SameFile(lfi, fi) || fi.Size() <= 0 || (maxBytes > 0 && fi.Size() > maxBytes) || isSameProtectedDBFile(dbPath, fi) {
 		_ = f.Close()
-		return nil, "", 0, fmt.Errorf("文件校验失败或超过大小上限")
+		return nil, "", 0, fmt.Errorf("文件句柄校验失败或命中受保护文件")
 	}
 	return f, base, fi.Size(), nil
 }
@@ -219,8 +205,7 @@ func OpenUploadsFile(corgiDir, dbPath, absPath string, maxBytes int64) (*os.File
 	return openFileInSubdirRoot(corgiDir, dbPath, "uploads", absPath, maxBytes)
 }
 
-// readLocalTrustedMedia reads a bounded Hub-local media file via os.Root (uploads/wecom-media/wecom),
-// eliminating TOCTOU windows between symlink checks and file reads.
+// readLocalTrustedMedia reads a bounded Hub-local media file via os.Root (uploads/wecom-media/wecom).
 func readLocalTrustedMedia(corgiDir, dbPath, rawPath string, maxBytes int64) ([]byte, bool) {
 	if strings.TrimSpace(corgiDir) == "" {
 		return nil, false
@@ -246,8 +231,8 @@ func randomHexBytes(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// WriteRegularUploadAtomic writes a normal user upload into <corgiDir>/uploads/<day>/<prefix>-<safeName>
-// via a hidden temp file + atomic rename inside os.Root so concurrent GC never deletes active uploads.
+// WriteRegularUploadAtomic writes a normal upload into <corgiDir>/uploads/<day>/<prefix>-<safeName>
+// via hidden temp file + non-overwriting atomic Link inside os.Root so existing uploads are never clobbered.
 func WriteRegularUploadAtomic(corgiDir, day, prefix, safeName string, r io.Reader, maxBytes int64) (string, int64, error) {
 	if maxBytes <= 0 {
 		maxBytes = MaxUploadStageBytes
@@ -259,7 +244,6 @@ func WriteRegularUploadAtomic(corgiDir, day, prefix, safeName string, r io.Reade
 	defer root.Close()
 
 	tmpName := ".tmp-" + randomHexBytes(6)
-	finalName := prefix + "-" + SanitizeUploadName(safeName)
 	f, err := root.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", 0, fmt.Errorf("create upload temp file: %w", err)
@@ -269,22 +253,37 @@ func WriteRegularUploadAtomic(corgiDir, day, prefix, safeName string, r io.Reade
 	if cpErr != nil || cErr != nil || n > maxBytes {
 		_ = root.Remove(tmpName)
 		if n > maxBytes {
-			return "", 0, fmt.Errorf("超过 %d MB 限制", maxBytes>>20)
+			return "", 0, fmt.Errorf("%w（上限 %d MB）", ErrUploadTooLarge, maxBytes>>20)
 		}
 		if cpErr != nil {
 			return "", 0, cpErr
 		}
 		return "", 0, cErr
 	}
-	if err := root.Rename(tmpName, finalName); err != nil {
-		_ = root.Remove(tmpName)
-		return "", 0, fmt.Errorf("commit upload file: %w", err)
+	cleanName := SanitizeUploadName(safeName)
+	candPrefix := prefix
+	for attempt := 0; attempt < 6; attempt++ {
+		if candPrefix == "" {
+			candPrefix = randomHexBytes(3)
+		}
+		finalName := candPrefix + "-" + cleanName
+		if linkErr := root.Link(tmpName, finalName); linkErr == nil {
+			_ = root.Remove(tmpName)
+			return filepath.Join(corgiDir, "uploads", day, finalName), n, nil
+		} else if os.IsExist(linkErr) {
+			candPrefix = randomHexBytes(3)
+			continue
+		} else {
+			_ = root.Remove(tmpName)
+			return "", 0, fmt.Errorf("commit upload file: %w", linkErr)
+		}
 	}
-	return filepath.Join(corgiDir, "uploads", day, finalName), n, nil
+	_ = root.Remove(tmpName)
+	return "", 0, fmt.Errorf("commit upload file: filename collision")
 }
 
-// LookupStagedFile checks whether <corgiDir>/uploads/staged/<day>/<sha64>-<safeName> already exists,
-// refreshing its mtime on hit so LRU GC preserves recently reused files.
+// LookupStagedFile checks whether <corgiDir>/uploads/staged/<day>/<sha64>-<safeName> exists and
+// refreshes its mtime via os.Root; only returns hit when mtime renewal succeeds.
 func LookupStagedFile(corgiDir, day, shaHex, safeName string) (string, int64, bool) {
 	shaHex = strings.ToLower(strings.TrimSpace(shaHex))
 	if !IsValidSHA256Hex(shaHex) {
@@ -301,10 +300,11 @@ func LookupStagedFile(corgiDir, day, shaHex, safeName string) (string, int64, bo
 	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() || fi.Size() <= 0 {
 		return "", 0, false
 	}
-	abs := filepath.Join(corgiDir, "uploads", "staged", day, finalName)
 	now := time.Now()
-	_ = root.Chtimes(finalName, now, now)
-	return abs, fi.Size(), true
+	if err := root.Chtimes(finalName, now, now); err != nil {
+		return "", 0, false
+	}
+	return filepath.Join(corgiDir, "uploads", "staged", day, finalName), fi.Size(), true
 }
 
 // StageLocalFileFromReader streams r into <corgiDir>/uploads/staged/<day>/<sha64>-<safeName>
@@ -334,7 +334,7 @@ func StageLocalFileFromReader(corgiDir, day, expectedSHA, safeName string, r io.
 	if cpErr != nil || cErr != nil || n == 0 || n > maxBytes {
 		_ = root.Remove(tmpName)
 		if n > maxBytes {
-			return "", "", 0, false, fmt.Errorf("文件超过 %d MB 限制", maxBytes>>20)
+			return "", "", 0, false, fmt.Errorf("%w（上限 %d MB）", ErrUploadTooLarge, maxBytes>>20)
 		}
 		if n == 0 {
 			return "", "", 0, false, fmt.Errorf("上传文件内容为空")

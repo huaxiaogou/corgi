@@ -201,7 +201,7 @@ func (s *Server) startFleetUpdateWithTarget(reqCtx context.Context, scope, expec
 // CheckUpdate implements core.FleetUpdater as a strictly read-only version inspection
 // reusing fetchLatestTagErr, collectVersionMachines, and fleetUpdateSnapshot.
 func (s *Server) CheckUpdate(ctx context.Context) (core.UpdateCheckResult, error) {
-	tctx, cancel := context.WithTimeout(ctx, updateLatestAttemptTimeout*2)
+	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	latest, _, err := s.fetchLatestTagErr(tctx)
 	cancel()
 	if err != nil || latest == "" {

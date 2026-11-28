@@ -34,7 +34,7 @@ type deletePolicyPayload struct {
 
 // sendConfigConfirmCard persists an L2 configuration confirmation card + proposal in a single
 // SQLite transaction under Strategy 2B inflight protection, then publishes to Web/WeCom and ends the turn.
-func (e *Engine) sendConfigConfirmCard(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, op, title, summary string, payload any) (string, bool) {
+func (e *Engine) sendConfigConfirmCard(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, beforeHash, op, title, summary string, payload any) (string, bool) {
 	if e.store == nil {
 		return toolErr("store unavailable"), false
 	}
@@ -42,7 +42,9 @@ func (e *Engine) sendConfigConfirmCard(ctx context.Context, turn *apiRouterTurn,
 	if err != nil {
 		return toolErr("序列化确认提案失败：" + err.Error()), false
 	}
-	beforeHash := ConfigSnapshotHash(e.Settings(), e.Policies())
+	if strings.TrimSpace(beforeHash) == "" {
+		_, _, beforeHash = e.configSnapshot()
+	}
 
 	// Strategy 2B: fail-closed inflight guard before creating/pushing an irreversible confirmation card.
 	if err := e.recordAPIRouterInflight(context.Background(), trig, "reply_user", ""); err != nil {
@@ -240,7 +242,11 @@ func (e *Engine) resolveConfigConfirmAction(ctx context.Context, actionID, resol
 			}
 			kvUpdates["policies"] = string(b)
 		}
-		kvUpdates[configAuditRingKVKey] = e.buildAuditRingValue(ctx, resolvedBy, prop.Op, changeSummary)
+		auditVal, aErr := e.buildAuditRingValue(ctx, resolvedBy, prop.Op, changeSummary)
+		if aErr != nil {
+			return aErr
+		}
+		kvUpdates[configAuditRingKVKey] = auditVal
 
 		settled, txErr := e.store.CommitConfigConfirmTx(ctx, store.ConfigConfirmTxRequest{
 			ActionID: actionID, ProposalKey: propKey, NextStatus: model.ActionResolved,

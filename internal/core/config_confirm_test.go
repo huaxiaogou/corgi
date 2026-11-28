@@ -281,29 +281,50 @@ func TestL2ConfigConfirmFullLifecycleGuardsAndAtomicity(t *testing.T) {
 		t.Fatalf("expected ask_permissions unchanged when BeforeHash mismatched")
 	}
 
-	// 5. Offline >7d restart: Snapshot() calls ExpireStalePendingActions (must skip config_confirm) then expireStaleConfigConfirms (deletes KV too).
+	// 5. Real persisted expiry: backdate action in SQLite >15m, verify Snapshot() skips generic expiry and runs expireStaleConfigConfirms.
 	turn3, trig3, meta3 := newHumanConfigTurn(t, eng, "再次关闭权限确认")
 	out3, _ := eng.toolManageConfig(ctx, turn3, trig3, meta3, `{"action":"patch_settings","settings":{"ask_permissions":false}}`)
 	var card3 struct {
 		Action string `json:"action"`
 	}
 	_ = json.Unmarshal([]byte(out3), &card3)
-	// Backdate action & proposal beyond 8 days to simulate >7d offline hub restart.
-	act3, _ := st.GetAction(ctx, card3.Action)
+	// Confirm that deleting the proposal KV prevents cancel ("2") from marking pending card resolved.
+	turn4, trig4, meta4 := newHumanConfigTurn(t, eng, "删除测试策略前检查提案消费")
+	if _, err := eng.UpsertManagedPolicy(ctx, "router", model.Policy{Source: "webhook:missing-prop", Action: "ignore"}); err != nil {
+		t.Fatal(err)
+	}
+	out4, _ := eng.toolManageConfig(ctx, turn4, trig4, meta4, `{"action":"delete_policy","policy_source":"webhook:missing-prop"}`)
+	var card4 struct {
+		Action string `json:"action"`
+	}
+	_ = json.Unmarshal([]byte(out4), &card4)
+	if err := st.DeleteKV(ctx, configProposalKVPrefix+card4.Action); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.ResolveAction(ctx, card4.Action, "web", "2"); err == nil {
+		t.Fatalf("expected cancel with missing proposal KV to fail rather than resolving card")
+	}
+
+	// Persist genuinely backdated (>8d) config_confirm action + proposal KV in SQLite so Snapshot() expires it for real.
 	oldTime := time.Now().Add(-8 * 24 * time.Hour)
-	act3.CreatedAt = oldTime
-	// Update directly via CommitConfigConfirmTx? Better: test ExpireStalePendingActions + ExpirePendingConfigConfirms with future cutoff!
-	if n, err := st.ExpireStalePendingActions(ctx, time.Nanosecond); err != nil || n != 0 {
+	oldEntry := &model.Entry{ID: "e-old-cfg", Seq: 9001, Role: "corgi", Thread: model.MainThread, Channel: "corgi", Text: "old confirm", At: oldTime, ActionID: "a-old-cfg"}
+	oldAct := &model.Action{
+		ID: "a-old-cfg", Kind: model.ActionKindConfigConfirm, Thread: model.MainThread, EntryID: oldEntry.ID,
+		Category: "config", Mode: model.ActionModeSingle, Title: "旧确认卡", Status: model.ActionPending, CreatedAt: oldTime,
+		Choices: []model.ActionChoice{{Key: "1", Label: "确认执行"}, {Key: "2", Label: "取消", Recommended: true}},
+	}
+	if err := st.CommitConfigProposalTx(ctx, oldEntry, oldAct, configProposalKVPrefix+oldAct.ID, `{"action_id":"a-old-cfg"}`); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.ExpireStalePendingActions(ctx, 7*24*time.Hour); err != nil || n != 0 {
 		t.Fatalf("ExpireStalePendingActions must skip config_confirm, got n=%d err=%v", n, err)
 	}
-	if n, err := st.ExpirePendingConfigConfirms(ctx, time.Now().Add(time.Minute), configProposalKVPrefix, "配置确认提案已过期"); err != nil || n != 1 {
-		t.Fatalf("ExpirePendingConfigConfirms failed: n=%d err=%v", n, err)
+	_ = eng.Snapshot(ctx, model.MainThread)
+	if _, exists, _ := st.GetKV(ctx, configProposalKVPrefix+oldAct.ID); exists {
+		t.Fatalf("expected Snapshot() to expire stale config_confirm and delete proposal KV")
 	}
-	if _, exists, _ := st.GetKV(ctx, configProposalKVPrefix+card3.Action); exists {
-		t.Fatalf("expected proposal KV cleaned by ExpirePendingConfigConfirms")
-	}
-	if expAct, _ := st.GetAction(ctx, card3.Action); expAct.Status != model.ActionExpired {
-		t.Fatalf("expected expired config_confirm action, got %+v", expAct)
+	if expAct, _ := st.GetAction(ctx, oldAct.ID); expAct.Status != model.ActionExpired {
+		t.Fatalf("expected expired config_confirm action after Snapshot(), got %+v", expAct)
 	}
 }
 

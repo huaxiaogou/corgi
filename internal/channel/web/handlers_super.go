@@ -886,9 +886,6 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.Settings != nil && body.Settings.WeComSecret == "••••••••" {
-		body.Settings.WeComSecret = s.Engine.Settings().WeComSecret
-	}
 	if err := s.Engine.SaveConfig(r.Context(), body.Settings, body.Policies); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return

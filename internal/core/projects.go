@@ -52,7 +52,7 @@ type UpsertProjectResult struct {
 	Warnings []string               `json:"warnings,omitempty"`
 }
 
-func (e *Engine) resolveMachineKeyForConfig(raw string) (machineKey, targetID string) {
+func (e *Engine) resolveMachineKeyForConfig(ctx context.Context, raw string) (machineKey, targetID string) {
 	m := strings.TrimSpace(raw)
 	if m == "" || strings.EqualFold(m, "hub") || strings.EqualFold(m, "local") {
 		return hubMachineKey, ""
@@ -62,7 +62,19 @@ func (e *Engine) resolveMachineKeyForConfig(raw string) (machineKey, targetID st
 		if resolved == "" {
 			return hubMachineKey, ""
 		}
-		return resolved, resolved
+		if _, ok := e.fleet.Machine(resolved); ok {
+			return resolved, resolved
+		}
+	}
+	// Resolve offline paired machines by display name or ID from persisted device records.
+	if e.store != nil {
+		if devs, err := e.store.ListDevices(ctx); err == nil {
+			for _, d := range devs {
+				if d != nil && d.Kind == "machine" && (d.ID == m || strings.EqualFold(strings.TrimSpace(d.Name), m)) {
+					return d.ID, d.ID
+				}
+			}
+		}
 	}
 	return m, m
 }
@@ -70,7 +82,7 @@ func (e *Engine) resolveMachineKeyForConfig(raw string) (machineKey, targetID st
 // InspectMachinePath statically validates rawPath and probes its existence on Hub or a connected Node.
 // Offline nodes and older Nodes without POST /api/path/inspect (HTTP 404) degrade gracefully with warnings.
 func (e *Engine) InspectMachinePath(ctx context.Context, machine, rawPath string) (PathInspectOutcome, error) {
-	mk, targetID := e.resolveMachineKeyForConfig(machine)
+	mk, targetID := e.resolveMachineKeyForConfig(ctx, machine)
 	protCorgi := ""
 	if targetID == "" {
 		protCorgi = effectiveProtectedCorgiDir(e.corgiDir, e.home)

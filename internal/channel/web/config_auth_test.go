@@ -8,8 +8,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/kiperjing/corgi/internal/core"
 	"github.com/kiperjing/corgi/internal/model"
 )
 
@@ -125,14 +127,65 @@ func TestFleetUpdaterCheckReadOnlyExpectedTargetAndBusyGuard(t *testing.T) {
 		t.Fatalf("expected TriggerFleetUpdate to reject drifted target v0.1.79 vs v0.1.80")
 	}
 
-	// 3. Empty-plan check must never overwrite an already-busy fleetUpdate state.
+	// 3. Empty-plan race: synchronize inside fetchLatestTagErr so fleetUpdate becomes busy mid-flight
+	// before empty-plan branch acquires fleetUpdateMu, proving the empty-plan busy recheck preserves busy state.
+	enteredFetch := make(chan struct{})
+	releaseFetch := make(chan struct{})
+	raceSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/releases/latest" {
+			close(enteredFetch)
+			<-releaseFetch
+			http.Redirect(w, r, "/releases/tag/v0.1.78", http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer raceSrv.Close()
+	srv.ReleaseRepoURL = raceSrv.URL
+
+	type triggerOut struct {
+		res core.UpdateTriggerResult
+		err error
+	}
+	doneCh := make(chan triggerOut, 1)
+	go func() {
+		r, e := srv.TriggerFleetUpdate(context.Background(), "v0.1.78")
+		doneCh <- triggerOut{res: r, err: e}
+	}()
+	<-enteredFetch
 	srv.fleetUpdateMu.Lock()
 	srv.fleetUpdate = &fleetUpdateState{
 		view: FleetUpdateView{Busy: true, Phase: "updating", Target: "v0.1.80"},
 	}
 	srv.fleetUpdateMu.Unlock()
-	res, err := srv.TriggerFleetUpdate(context.Background(), "v0.1.80")
-	if err != nil || !res.Busy || res.Started {
-		t.Fatalf("expected busy status preserved without starting duplicate run, got res=%+v err=%v", res, err)
+	close(releaseFetch)
+
+	got := <-doneCh
+	if got.err != nil || !got.res.Busy || got.res.Started || got.res.Target != "v0.1.80" {
+		t.Fatalf("expected empty-plan busy recheck to preserve active v0.1.80 run, got res=%+v err=%v", got.res, got.err)
+	}
+}
+
+func TestHandleUploadOversizedReturns413(t *testing.T) {
+	srv, master := newTestServer(t)
+	h := srv.Routes()
+	tooBig := bytes.Repeat([]byte("a"), maxUploadBytes+16)
+
+	// Regular upload >25 MiB must return 413 (not 500).
+	req := httptest.NewRequest(http.MethodPost, "/api/uploads?name=huge.bin", bytes.NewReader(tooBig))
+	req.Header.Set("Authorization", "Bearer "+master)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected regular upload >25MB to return 413, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Staged upload >25 MiB must return 413 (not 400).
+	req2 := httptest.NewRequest(http.MethodPost, "/api/uploads?scope=staged&sha256="+strings.Repeat("a", 64)+"&name=huge.bin", bytes.NewReader(tooBig))
+	req2.Header.Set("Authorization", "Bearer "+master)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected staged upload >25MB to return 413, got %d body=%s", rec2.Code, rec2.Body.String())
 	}
 }

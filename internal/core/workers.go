@@ -169,12 +169,14 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	if cwd == "" && (mc.ID == st.WorkerMachine || (mc.Local && st.WorkerMachine == "")) {
 		cwd = st.WorkerCwd
 	}
-	protCorgi := ""
-	if mc.Local {
-		protCorgi = effectiveProtectedCorgiDir(e.corgiDir, e.home)
-	}
 	if sessionID == "" && cwd != "" && !isManagedWorktreePath(cwd, e.corgiDir) {
-		if _, vErr := ValidateWorkerCwd(cwd, protCorgi); vErr != nil {
+		var vErr error
+		if mc.Local {
+			_, vErr = ValidateLocalWorkerCwd(e.home, e.corgiDir, e.dbPath(), cwd)
+		} else {
+			_, vErr = ValidateWorkerCwd(cwd, "")
+		}
+		if vErr != nil {
 			return nil, fmt.Errorf("invalid worker cwd: %w", vErr)
 		}
 	}
@@ -185,7 +187,13 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	cwd = expandInHome(targetHome, cwd)
 	if sessionID == "" && cwd != "" && !isManagedWorktreePath(cwd, e.corgiDir) &&
 		(targetHome == "" || filepath.Clean(cwd) != filepath.Clean(targetHome)) {
-		if _, vErr := ValidateWorkerCwd(cwd, protCorgi); vErr != nil {
+		var vErr error
+		if mc.Local {
+			_, vErr = ValidateLocalWorkerCwd(targetHome, e.corgiDir, e.dbPath(), cwd)
+		} else {
+			_, vErr = ValidateWorkerCwd(cwd, "")
+		}
+		if vErr != nil {
 			return nil, fmt.Errorf("invalid resolved worker cwd: %w", vErr)
 		}
 	}
@@ -1426,7 +1434,11 @@ func (e *Engine) DismissAction(ctx context.Context, actionID string) (*model.Act
 
 // DismissActionBy atomically dismisses a pending action and records the originating channel.
 func (e *Engine) DismissActionBy(ctx context.Context, actionID, channel string) (*model.Action, error) {
-	if existing, err := e.store.GetAction(ctx, actionID); err == nil && existing != nil && existing.Kind == model.ActionKindConfigConfirm {
+	existing, err := e.store.GetAction(ctx, actionID)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil && existing.Kind == model.ActionKindConfigConfirm {
 		return e.dismissConfigConfirmAction(ctx, actionID, channel)
 	}
 	act, err := e.store.DismissActionBy(ctx, actionID, channel)

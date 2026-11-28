@@ -61,22 +61,6 @@ func CloneSettings(st model.Settings) model.Settings {
 	return cp
 }
 
-// ClonePolicies returns a deep copy of Policies including each entry's Allow slice.
-func ClonePolicies(pols []model.Policy) []model.Policy {
-	if pols == nil {
-		return nil
-	}
-	out := make([]model.Policy, len(pols))
-	for i, p := range pols {
-		cp := p
-		if p.Allow != nil {
-			cp.Allow = append([]string(nil), p.Allow...)
-		}
-		out[i] = cp
-	}
-	return out
-}
-
 // SetOnSettingsApplied registers a sequential post-commit hook (e.g. WeCom live config reload)
 // invoked strictly in commit order after SQLite persistence and memory publication.
 func (e *Engine) SetOnSettingsApplied(fn func(model.Settings)) {
@@ -198,8 +182,19 @@ func sanitizePoliciesForSave(pols []model.Policy) []model.Policy {
 	return valid
 }
 
-func (e *Engine) buildAuditRingValue(ctx context.Context, actor, action, summary string) string {
-	ring := e.ListConfigHistory(ctx, maxConfigAuditRing)
+func (e *Engine) buildAuditRingValue(ctx context.Context, actor, action, summary string) (string, error) {
+	var ring []model.ConfigAuditEntry
+	if e.store != nil {
+		raw, ok, err := e.store.GetKV(ctx, configAuditRingKVKey)
+		if err != nil {
+			return "", fmt.Errorf("读取配置审计历史失败：%w", err)
+		}
+		if ok && strings.TrimSpace(raw) != "" {
+			if err := json.Unmarshal([]byte(raw), &ring); err != nil {
+				return "", fmt.Errorf("解析配置审计历史失败，已中止覆盖：%w", err)
+			}
+		}
+	}
 	ring = append(ring, model.ConfigAuditEntry{
 		At:      time.Now(),
 		Actor:   orStr(strings.TrimSpace(actor), "owner"),
@@ -209,8 +204,11 @@ func (e *Engine) buildAuditRingValue(ctx context.Context, actor, action, summary
 	if len(ring) > maxConfigAuditRing {
 		ring = ring[len(ring)-maxConfigAuditRing:]
 	}
-	b, _ := json.Marshal(ring)
-	return string(b)
+	b, err := json.Marshal(ring)
+	if err != nil {
+		return "", fmt.Errorf("编码配置审计历史失败：%w", err)
+	}
+	return string(b), nil
 }
 
 // ListConfigHistory returns up to limit recent redacted configuration audit entries (newest last).
@@ -265,7 +263,11 @@ func (e *Engine) commitConfigUnlocked(ctx context.Context, st *model.Settings, p
 		return prevSt, prevPols, nil
 	}
 	if summary != "" {
-		kvUpdates[configAuditRingKVKey] = e.buildAuditRingValue(ctx, actor, action, summary)
+		auditVal, err := e.buildAuditRingValue(ctx, actor, action, summary)
+		if err != nil {
+			return prevSt, prevPols, err
+		}
+		kvUpdates[configAuditRingKVKey] = auditVal
 	}
 	if err := e.store.CommitKVTx(ctx, kvUpdates); err != nil {
 		return prevSt, prevPols, fmt.Errorf("persist config tx: %w", err)

@@ -37,6 +37,7 @@ type uploadFileEntry struct {
 	rel   string
 	size  int64
 	mtime time.Time
+	fi    os.FileInfo
 }
 
 // SweepUploads enforces retention TTLs (14d original/wecom, 7d staged) and the 500MiB→400MiB LRU
@@ -111,7 +112,7 @@ func sweepUploadsWithLimits(ctx context.Context, corgiDir string, now time.Time,
 			}
 		}
 		totalSize += fi.Size()
-		survivors = append(survivors, uploadFileEntry{rel: rel, size: fi.Size(), mtime: fi.ModTime()})
+		survivors = append(survivors, uploadFileEntry{rel: rel, size: fi.Size(), mtime: fi.ModTime(), fi: fi})
 		return nil
 	})
 
@@ -120,6 +121,14 @@ func sweepUploadsWithLimits(ctx context.Context, corgiDir string, now time.Time,
 		for _, item := range survivors {
 			if totalSize <= targetQuota || (ctx != nil && ctx.Err() != nil) {
 				break
+			}
+			// Re-verify identity & mtime right before eviction so concurrently HEAD-renewed files are never deleted.
+			curFi, lErr := root.Lstat(item.rel)
+			if lErr != nil || curFi.Mode()&os.ModeSymlink != 0 || !curFi.Mode().IsRegular() || !os.SameFile(item.fi, curFi) {
+				continue
+			}
+			if curFi.ModTime().After(item.mtime) || now.Sub(curFi.ModTime()) < uploadsActiveGrace {
+				continue
 			}
 			if root.Remove(item.rel) == nil {
 				stats.RemovedFiles++

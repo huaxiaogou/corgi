@@ -671,7 +671,11 @@ func (e *Engine) SnoozeAction(ctx context.Context, actionID string, until time.T
 
 // SnoozeActionBy atomically snoozes a pending action and records the originating channel.
 func (e *Engine) SnoozeActionBy(ctx context.Context, actionID, channel string, until time.Time) (*model.Action, error) {
-	if existing, err := e.store.GetAction(ctx, actionID); err == nil && existing != nil && existing.Kind == model.ActionKindConfigConfirm {
+	existing, err := e.store.GetAction(ctx, actionID)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil && existing.Kind == model.ActionKindConfigConfirm {
 		return nil, fmt.Errorf("配置确认卡有效期为 15 分钟，不支持暂缓提醒，请直接确认或取消")
 	}
 	if until.IsZero() {

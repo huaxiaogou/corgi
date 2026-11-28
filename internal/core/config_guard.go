@@ -61,22 +61,22 @@ func isManagedWorktreePath(p, corgiDir string) bool {
 	}
 	wtRoot := filepath.Join(filepath.Clean(corgiDir), "worktrees")
 	cleanP := filepath.Clean(p)
-	if strings.HasPrefix(strings.ToLower(filepath.ToSlash(cleanP)), strings.ToLower(filepath.ToSlash(wtRoot))+"/") {
-		return true
+	underRoot := func(cand, root string) bool {
+		return strings.HasPrefix(strings.ToLower(filepath.ToSlash(cand)), strings.ToLower(filepath.ToSlash(root))+"/")
 	}
-	if realWT, err := filepath.EvalSymlinks(wtRoot); err == nil {
-		realWT = filepath.Clean(realWT)
-		if strings.HasPrefix(strings.ToLower(filepath.ToSlash(cleanP)), strings.ToLower(filepath.ToSlash(realWT))+"/") {
-			return true
-		}
-		if realP, pErr := filepath.EvalSymlinks(cleanP); pErr == nil {
-			realP = filepath.Clean(realP)
-			if strings.HasPrefix(strings.ToLower(filepath.ToSlash(realP)), strings.ToLower(filepath.ToSlash(realWT))+"/") {
-				return true
-			}
-		}
+	realWT := wtRoot
+	if resolved, err := filepath.EvalSymlinks(wtRoot); err == nil {
+		realWT = filepath.Clean(resolved)
 	}
-	return false
+	if realP, pErr := filepath.EvalSymlinks(cleanP); pErr == nil {
+		realP = filepath.Clean(realP)
+		return underRoot(realP, wtRoot) || underRoot(realP, realWT)
+	}
+	if _, lErr := os.Lstat(cleanP); lErr == nil {
+		// Path exists (e.g. broken symlink) yet EvalSymlinks failed: never treat as managed worktree.
+		return false
+	}
+	return underRoot(cleanP, wtRoot) || underRoot(cleanP, realWT)
 }
 
 // ValidateProjectDir validates that raw is a clean absolute or ~/... project directory outside
@@ -140,6 +140,75 @@ func ValidateWorkerCwd(raw, corgiDir string) (string, error) {
 		return p, nil
 	}
 	return ValidateProjectDir(p, corgiDir)
+}
+
+// ValidateLocalWorkerCwd validates a local worker_cwd including symlink resolution when the target exists,
+// and blocks Corgi state subdirs even when CORGI_HOME equals HOME.
+func ValidateLocalWorkerCwd(home, corgiDir, dbPath, raw string) (string, error) {
+	protCorgi := effectiveProtectedCorgiDir(corgiDir, home)
+	clean, err := ValidateWorkerCwd(raw, protCorgi)
+	if err != nil || clean == "" || clean == "~" {
+		return clean, err
+	}
+	expanded := expandInHome(home, clean)
+	if err := checkProtectedCorgiStateSubpath(expanded, corgiDir, dbPath); err != nil {
+		return "", err
+	}
+	if realPath, evalErr := filepath.EvalSymlinks(expanded); evalErr == nil {
+		realPath = filepath.Clean(realPath)
+		if err := checkSensitiveAbsolutePath(filepath.ToSlash(realPath), protCorgi); err != nil {
+			return "", fmt.Errorf("工作目录符号链接目标越权：%w", err)
+		}
+		if err := checkProtectedCorgiStateSubpath(realPath, corgiDir, dbPath); err != nil {
+			return "", err
+		}
+	}
+	return clean, nil
+}
+
+func checkProtectedCorgiStateSubpath(absPath, corgiDir, dbPath string) error {
+	if dbPath != "" && IsProtectedHubDBPath(dbPath, absPath) {
+		return fmt.Errorf("工作目录不允许指向受保护数据库路径")
+	}
+	cd := strings.TrimSpace(corgiDir)
+	if cd == "" {
+		return nil
+	}
+	for _, sub := range []string{"uploads", "memory", "wecom", "wecom-media"} {
+		dir := filepath.Join(cd, sub)
+		if pathEqualOrUnder(absPath, dir) {
+			return fmt.Errorf("工作目录不允许指向 Corgi 内部状态目录（%s）", sub)
+		}
+		if realSub, err := filepath.EvalSymlinks(dir); err == nil && pathEqualOrUnder(absPath, realSub) {
+			return fmt.Errorf("工作目录不允许指向 Corgi 内部状态目录（%s）", sub)
+		}
+	}
+	return nil
+}
+
+// ClonePolicies returns a deep copy of Policies including each entry's Allow slice.
+func ClonePolicies(pols []model.Policy) []model.Policy {
+	if pols == nil {
+		return nil
+	}
+	out := make([]model.Policy, len(pols))
+	for i, p := range pols {
+		cp := p
+		if p.Allow != nil {
+			cp.Allow = append([]string(nil), p.Allow...)
+		}
+		out[i] = cp
+	}
+	return out
+}
+
+// configSnapshot atomically captures consistent copies of Settings, Policies, and their optimistic-lock hash.
+func (e *Engine) configSnapshot() (model.Settings, []model.Policy, string) {
+	e.mu.Lock()
+	st := CloneSettings(e.settings)
+	pols := ClonePolicies(e.policies)
+	e.mu.Unlock()
+	return st, pols, ConfigSnapshotHash(st, pols)
 }
 
 func checkSensitiveSegments(sl string) error {

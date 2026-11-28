@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -70,7 +71,7 @@ func (s *Server) handleReadUpload(w http.ResponseWriter, r *http.Request) {
 	f, name, _, err := core.OpenUploadsFile(s.CorgiDir, dbPath, body.Path, core.MaxUploadStageBytes)
 	if err != nil {
 		code := http.StatusBadRequest
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			code = http.StatusNotFound
 		}
 		writeJSON(w, code, map[string]any{"error": err.Error()})

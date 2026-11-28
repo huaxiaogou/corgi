@@ -166,8 +166,14 @@ func (s *Store) CommitConfigConfirmTx(ctx context.Context, req ConfigConfirmTxRe
 	}
 
 	if strings.TrimSpace(req.ProposalKey) != "" {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM kv WHERE k = ?`, req.ProposalKey); err != nil {
+		delRes, err := tx.ExecContext(ctx, `DELETE FROM kv WHERE k = ?`, req.ProposalKey)
+		if err != nil {
 			return nil, fmt.Errorf("delete config proposal %s: %w", req.ProposalKey, err)
+		}
+		if req.NextStatus == model.ActionResolved {
+			if n, _ := delRes.RowsAffected(); n != 1 {
+				return nil, ErrActionAlreadyResolved
+			}
 		}
 	}
 	for k, v := range req.KVUpdates {

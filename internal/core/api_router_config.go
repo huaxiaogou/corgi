@@ -129,13 +129,13 @@ func (e *Engine) toolManageConfig(ctx context.Context, turn *apiRouterTurn, trig
 		if msg := requireHumanConfigTurn(turn, trig, meta); msg != "" {
 			return toolErr(msg), false
 		}
-		st := e.Settings()
+		st, _, beforeHash := e.configSnapshot()
 		idx := findProjectIndex(st.Projects, args.Project)
 		if idx < 0 {
 			return toolErr("未找到已配置的项目：" + strings.TrimSpace(args.Project)), false
 		}
 		p := st.Projects[idx]
-		return e.sendConfigConfirmCard(ctx, turn, trig, configOpDeleteProject,
+		return e.sendConfigConfirmCard(ctx, turn, trig, beforeHash, configOpDeleteProject,
 			"确认删除项目："+p.Name,
 			fmt.Sprintf("即将删除项目工作区「%s」（ID: %s，含 %d 条机器路径映射）。", p.Name, p.ID, len(p.Paths)),
 			deleteProjectPayload{Project: p.ID})
@@ -143,18 +143,18 @@ func (e *Engine) toolManageConfig(ctx context.Context, turn *apiRouterTurn, trig
 		if msg := requireHumanConfigTurn(turn, trig, meta); msg != "" {
 			return toolErr(msg), false
 		}
-		st := e.Settings()
+		st, _, beforeHash := e.configSnapshot()
 		idx := findProjectIndex(st.Projects, args.Project)
 		if idx < 0 {
 			return toolErr("未找到已配置的项目：" + strings.TrimSpace(args.Project)), false
 		}
-		mk, _ := e.resolveMachineKeyForConfig(args.Machine)
+		mk, _ := e.resolveMachineKeyForConfig(ctx, args.Machine)
 		p := st.Projects[idx]
 		oldPath, ok := p.Paths[mk]
 		if !ok {
 			return toolErr(fmt.Sprintf("项目 %s 未配置机器 %s 的路径", p.Name, mk)), false
 		}
-		return e.sendConfigConfirmCard(ctx, turn, trig, configOpRemoveProjectPath,
+		return e.sendConfigConfirmCard(ctx, turn, trig, beforeHash, configOpRemoveProjectPath,
 			fmt.Sprintf("确认移除 %s 在 %s 的路径", p.Name, mk),
 			fmt.Sprintf("即将移除项目「%s」在机器 %s 上的路径映射：%s。", p.Name, mk, oldPath),
 			removeProjectPathPayload{Project: p.ID, Machine: mk})
@@ -167,7 +167,7 @@ func (e *Engine) toolManageConfig(ctx context.Context, turn *apiRouterTurn, trig
 			return toolErr(err.Error()), false
 		}
 		if res.NeedsConfirm {
-			return e.sendConfigConfirmCard(ctx, turn, trig, configOpDisableAskPermissions,
+			return e.sendConfigConfirmCard(ctx, turn, trig, res.BeforeHash, configOpDisableAskPermissions,
 				"确认关闭权限确认（ask_permissions）",
 				"即将将全站 ask_permissions 从 true 调整为 false（允许 Coding CLI 自动执行操作而不再弹窗确认）。",
 				map[string]any{"ask_permissions": false})
@@ -202,8 +202,9 @@ func (e *Engine) toolManageConfig(ctx context.Context, turn *apiRouterTurn, trig
 		if IsProtectedPolicySource(src) {
 			return toolErr(fmt.Sprintf("内置来源 %q 受保护，禁止删除", src)), false
 		}
+		_, pols, beforeHash := e.configSnapshot()
 		found := false
-		for _, p := range e.Policies() {
+		for _, p := range pols {
 			if p.Source == src {
 				found = true
 				break
@@ -212,7 +213,7 @@ func (e *Engine) toolManageConfig(ctx context.Context, turn *apiRouterTurn, trig
 		if !found {
 			return toolErr("未找到过滤策略：" + src), false
 		}
-		return e.sendConfigConfirmCard(ctx, turn, trig, configOpDeletePolicy,
+		return e.sendConfigConfirmCard(ctx, turn, trig, beforeHash, configOpDeletePolicy,
 			"确认删除过滤策略："+src,
 			fmt.Sprintf("即将删除外部来源过滤策略「%s」（删除后该来源将回退为默认 candidate 处理）。", src),
 			deletePolicyPayload{Source: src})
@@ -230,6 +231,7 @@ func (e *Engine) toolManageConfig(ctx context.Context, turn *apiRouterTurn, trig
 		if msg := requireHumanConfigTurn(turn, trig, meta); msg != "" {
 			return toolErr(msg), false
 		}
+		_, _, beforeHash := e.configSnapshot()
 		checkRes, err := e.CheckFleetUpdate(ctx)
 		if err != nil {
 			return toolErr(err.Error()), false
@@ -244,10 +246,10 @@ func (e *Engine) toolManageConfig(ctx context.Context, turn *apiRouterTurn, trig
 		for _, m := range checkRes.Outdated {
 			names = append(names, fmt.Sprintf("%s(%s)", orStr(m.Name, m.ID), orStr(m.Version, "unknown")))
 		}
-		return e.sendConfigConfirmCard(ctx, turn, trig, configOpTriggerUpdate,
+		return e.sendConfigConfirmCard(ctx, turn, trig, beforeHash, configOpTriggerUpdate,
 			"确认一键升级至 "+checkRes.LatestVersion,
 			fmt.Sprintf("即将把 %d 台在线设备从当前版本升级至 %s：%s（先逐台升级远端节点，最后 Hub 自动重启）。", len(checkRes.Outdated), checkRes.LatestVersion, strings.Join(names, "、")),
-			triggerUpdatePayload{TargetVersion: checkRes.LatestVersion, CurrentVersion: checkRes.CurrentVersion})
+			triggerUpdatePayload{TargetVersion: checkRes.LatestVersion, CurrentVersion: checkRes.CurrentVersion, OutdatedNames: names})
 	default:
 		return toolErr("不支持的 manage_config action：" + args.Action), false
 	}

@@ -47,8 +47,9 @@ type FleetUpdater interface {
 }
 
 type triggerUpdatePayload struct {
-	TargetVersion  string `json:"target_version"`
-	CurrentVersion string `json:"current_version,omitempty"`
+	TargetVersion  string   `json:"target_version"`
+	CurrentVersion string   `json:"current_version,omitempty"`
+	OutdatedNames  []string `json:"outdated_names,omitempty"`
 }
 
 func (e *Engine) fleetUpdater() (FleetUpdater, error) {

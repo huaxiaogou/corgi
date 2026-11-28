@@ -143,7 +143,7 @@ func NormalizeRouterAPIBaseURL(provider, raw string) (string, string, error) {
 	}
 	u, err := url.Parse(trimmed)
 	if err != nil || u.Host == "" {
-		return "", "", fmt.Errorf("无效的 API Base URL：%q", trimmed)
+		return "", "", fmt.Errorf("无效的 API Base URL，请检查协议与域名格式")
 	}
 	if strings.ToLower(u.Scheme) != "https" || u.User != nil {
 		return "", "", fmt.Errorf("API Base URL 必须使用 https:// 协议且不允许包含嵌入凭据")

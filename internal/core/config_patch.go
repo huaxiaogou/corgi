@@ -15,6 +15,7 @@ import (
 // PatchSettingsResult captures the outcome of a validated manage_config(patch_settings) call.
 type PatchSettingsResult struct {
 	NeedsConfirm  bool           `json:"needs_confirm,omitempty"`
+	BeforeHash    string         `json:"-"`
 	NoOp          bool           `json:"no_op,omitempty"`
 	Summary       string         `json:"summary,omitempty"`
 	AppliedFields map[string]any `json:"applied_fields,omitempty"`
@@ -54,47 +55,40 @@ func (e *Engine) PatchManagedSettings(ctx context.Context, actor string, rawPatc
 		if len(rawPatch) > 1 {
 			return PatchSettingsResult{}, fmt.Errorf("关闭权限确认（ask_permissions=false）属高危变更，必须单独提交以触发确认卡片，禁止与其他字段混传")
 		}
-		if !e.Settings().AskPermissions {
+		stSnap, _, beforeHash := e.configSnapshot()
+		if !stSnap.AskPermissions {
 			return PatchSettingsResult{
 				NoOp:          true,
 				Summary:       "ask_permissions 当前已为 false，无需重复修改",
 				AppliedFields: map[string]any{"ask_permissions": false},
 			}, nil
 		}
-		return PatchSettingsResult{NeedsConfirm: true}, nil
+		return PatchSettingsResult{NeedsConfirm: true, BeforeHash: beforeHash}, nil
 	}
 
-	protCorgi := effectiveProtectedCorgiDir(e.corgiDir, e.home)
 	var res PatchSettingsResult
 	_, _, err := e.updateManagedConfig(ctx, actor, "patch_settings", true, func(st *model.Settings, _ *[]model.Policy) (bool, bool, string, error) {
 		appliedKeys := make([]string, 0, len(rawPatch))
-		hasKindDefaults := false
-		for k := range rawPatch {
-			if strings.ToLower(strings.TrimSpace(k)) == "kind_defaults" {
-				hasKindDefaults = true
-				break
-			}
-		}
-		// Apply worker_kind before worker_model/worker_effort so sync targets the effective kind.
+		// Apply worker_kind and worker_machine before worker_cwd/worker_model/worker_effort.
 		orderedKeys := slices.Sorted(maps.Keys(rawPatch))
-		orderedKeys = prioritizeKey(orderedKeys, "worker_kind")
 		orderedKeys = prioritizeKey(orderedKeys, "kind_defaults")
+		orderedKeys = prioritizeKey(orderedKeys, "worker_kind")
+		orderedKeys = prioritizeKey(orderedKeys, "worker_machine")
 
 		var (
 			patchedModel  *string
 			patchedEffort *string
+			explicitKD    = map[string][2]bool{}
 		)
 		for _, origKey := range orderedKeys {
 			key := strings.ToLower(strings.TrimSpace(origKey))
 			raw := rawPatch[origKey]
-			if err := e.applyOneManagedSetting(st, key, raw, protCorgi, &patchedModel, &patchedEffort); err != nil {
+			if err := e.applyOneManagedSetting(ctx, st, key, raw, &patchedModel, &patchedEffort, explicitKD); err != nil {
 				return false, false, "", err
 			}
 			appliedKeys = append(appliedKeys, key)
 		}
-		// Sync worker_model / worker_effort into KindDefaults[effKind] so NormalizeDispatchConfig
-		// does not overwrite them back with the stale KindDefaults entry.
-		if (patchedModel != nil || patchedEffort != nil) && !hasKindDefaults {
+		if patchedModel != nil || patchedEffort != nil {
 			effKind := agent.NormalizeKind(st.WorkerKind)
 			if effKind != "" {
 				if st.KindDefaults == nil {
@@ -102,9 +96,15 @@ func (e *Engine) PatchManagedSettings(ctx context.Context, actor string, rawPatc
 				}
 				spec := st.KindDefaults[effKind]
 				if patchedModel != nil {
+					if explicitKD[effKind][0] && spec.Model != *patchedModel {
+						return false, false, "", fmt.Errorf("同时修改了 worker_model 与 kind_defaults[%s].model 且值不一致", effKind)
+					}
 					spec.Model = *patchedModel
 				}
 				if patchedEffort != nil {
+					if explicitKD[effKind][1] && spec.Effort != *patchedEffort {
+						return false, false, "", fmt.Errorf("同时修改了 worker_effort 与 kind_defaults[%s].effort 且值不一致", effKind)
+					}
 					spec.Effort = *patchedEffort
 				}
 				if spec.Model == "" && spec.Effort == "" {
@@ -178,7 +178,7 @@ func decodeOptionalString(raw json.RawMessage) (string, error) {
 	return strings.TrimSpace(s), nil
 }
 
-func (e *Engine) applyOneManagedSetting(st *model.Settings, key string, raw json.RawMessage, protCorgi string, patchedModel, patchedEffort **string) error {
+func (e *Engine) applyOneManagedSetting(ctx context.Context, st *model.Settings, key string, raw json.RawMessage, patchedModel, patchedEffort **string, explicitKD map[string][2]bool) error {
 	switch key {
 	case "worker_machine":
 		v, err := decodeOptionalString(raw)
@@ -188,7 +188,7 @@ func (e *Engine) applyOneManagedSetting(st *model.Settings, key string, raw json
 		if v == "" || strings.EqualFold(v, "hub") || strings.EqualFold(v, "local") {
 			st.WorkerMachine = ""
 		} else {
-			_, targetID := e.resolveMachineKeyForConfig(v)
+			_, targetID := e.resolveMachineKeyForConfig(ctx, v)
 			st.WorkerMachine = targetID
 		}
 	case "worker_kind":
@@ -226,7 +226,15 @@ func (e *Engine) applyOneManagedSetting(st *model.Settings, key string, raw json
 		if err != nil {
 			return fmt.Errorf("worker_cwd 无效：%w", err)
 		}
-		clean, vErr := ValidateWorkerCwd(v, protCorgi)
+		var (
+			clean string
+			vErr  error
+		)
+		if st.WorkerMachine == "" {
+			clean, vErr = ValidateLocalWorkerCwd(e.home, e.corgiDir, e.dbPath(), v)
+		} else {
+			clean, vErr = ValidateWorkerCwd(v, "")
+		}
 		if vErr != nil {
 			return vErr
 		}
@@ -251,6 +259,7 @@ func (e *Engine) applyOneManagedSetting(st *model.Settings, key string, raw json
 			if ef != "" && !agent.ModelNameRe.MatchString(ef) {
 				return fmt.Errorf("kind_defaults[%s].effort 格式无效：%s", nk, ef)
 			}
+			explicitKD[nk] = [2]bool{true, true}
 			if m == "" && ef == "" {
 				delete(st.KindDefaults, nk)
 			} else {
@@ -266,7 +275,7 @@ func (e *Engine) applyOneManagedSetting(st *model.Settings, key string, raw json
 			st.MachineKindOverrides = map[string]map[string]model.ModelEffortSpec{}
 		}
 		for rm, byKind := range patch {
-			mk, _ := e.resolveMachineKeyForConfig(rm)
+			mk, _ := e.resolveMachineKeyForConfig(ctx, rm)
 			if st.MachineKindOverrides[mk] == nil {
 				st.MachineKindOverrides[mk] = map[string]model.ModelEffortSpec{}
 			}
