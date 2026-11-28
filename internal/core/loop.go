@@ -70,6 +70,9 @@ func (e *Engine) tick(parent context.Context) {
 			e.notifyChanged()
 		}
 	}
+	if e.expireStaleConfigConfirms(ctx) > 0 {
+		e.notifyChanged()
+	}
 	if timers, err := e.store.ListTimers(ctx); err == nil {
 		for _, tm := range timers {
 			if tm.Enabled && !tm.NextRun.After(now) {

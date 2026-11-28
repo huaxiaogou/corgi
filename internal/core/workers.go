@@ -1315,6 +1315,9 @@ func (e *Engine) resolveAction(ctx context.Context, actionID, resolvedBy, choice
 	if act.Status != model.ActionPending {
 		return nil, store.ErrActionAlreadyResolved
 	}
+	if act.Kind == model.ActionKindConfigConfirm {
+		return e.resolveConfigConfirmAction(ctx, actionID, resolvedBy, choiceInput, custom)
+	}
 	var (
 		chosenKey    string
 		chosenLabel  string
@@ -1423,6 +1426,9 @@ func (e *Engine) DismissAction(ctx context.Context, actionID string) (*model.Act
 
 // DismissActionBy atomically dismisses a pending action and records the originating channel.
 func (e *Engine) DismissActionBy(ctx context.Context, actionID, channel string) (*model.Action, error) {
+	if existing, err := e.store.GetAction(ctx, actionID); err == nil && existing != nil && existing.Kind == model.ActionKindConfigConfirm {
+		return e.dismissConfigConfirmAction(ctx, actionID, channel)
+	}
 	act, err := e.store.DismissActionBy(ctx, actionID, channel)
 	if err != nil {
 		return nil, err

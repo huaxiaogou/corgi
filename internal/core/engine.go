@@ -443,7 +443,7 @@ func (e *Engine) autoResolvePendingOnUserReply(ctx context.Context, thread, reEn
 	}
 	var candidates []*model.Action
 	for _, a := range pending {
-		if a.Thread != thread || a.Kind == model.ActionKindWorkerDialog || strings.TrimSpace(a.EntryID) == "" {
+		if a.Thread != thread || a.Kind == model.ActionKindWorkerDialog || a.Kind == model.ActionKindConfigConfirm || strings.TrimSpace(a.EntryID) == "" {
 			continue
 		}
 		candidates = append(candidates, a)

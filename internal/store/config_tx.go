@@ -93,14 +93,15 @@ func (s *Store) CommitConfigProposalTx(ctx context.Context, entry *model.Entry, 
 
 // ConfigConfirmTxRequest describes an atomic L2 confirmation settlement transaction.
 type ConfigConfirmTxRequest struct {
-	ActionID      string
-	ProposalKey   string
-	NextStatus    string // resolved | expired
-	ResolvedBy    string
-	ChosenKey     string
-	ChosenLabel   string
-	ExpiredReason string
-	KVUpdates     map[string]string
+	ActionID        string
+	ProposalKey     string
+	NextStatus      string // resolved | expired
+	ResolvedBy      string
+	ResolvedChannel string
+	ChosenKey       string
+	ChosenLabel     string
+	ExpiredReason   string
+	KVUpdates       map[string]string
 }
 
 // CommitConfigConfirmTx atomically verifies the Action is still pending, updates its terminal
@@ -134,7 +135,11 @@ func (s *Store) CommitConfigConfirmTx(ctx context.Context, req ConfigConfirmTxRe
 	now := time.Now()
 	a.Status = req.NextStatus
 	a.ResolvedBy = req.ResolvedBy
-	a.ResolvedChannel = strings.TrimSpace(req.ResolvedBy)
+	ch := strings.TrimSpace(req.ResolvedChannel)
+	if ch == "" {
+		ch = strings.TrimSpace(req.ResolvedBy)
+	}
+	a.ResolvedChannel = ch
 	a.ChosenKey = req.ChosenKey
 	if k := strings.TrimSpace(req.ChosenKey); k != "" {
 		a.ChosenKeys = []string{k}

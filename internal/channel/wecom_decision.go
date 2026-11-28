@@ -68,7 +68,7 @@ func (b *Bus) decisionCardOptions(ctx context.Context, a *model.Action, taskID s
 		QueuePos:       pos,
 		QueueTotal:     total,
 		ConsoleURL:     consoleURL,
-		AllowSnooze:    a != nil && a.Kind != model.ActionKindWorkerDialog,
+		AllowSnooze:    a != nil && a.Kind != model.ActionKindWorkerDialog && a.Kind != model.ActionKindConfigConfirm,
 		RemainingAfter: remainingAfter,
 	}
 	if st != nil {

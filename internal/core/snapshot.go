@@ -117,6 +117,7 @@ func (e *Engine) ResolvedActionsForEntries(ctx context.Context, entries []*model
 // Snapshot builds the SuperView pushed to Web/PWA clients.
 func (e *Engine) Snapshot(ctx context.Context, thread string) model.SuperView {
 	_, _ = e.store.ExpireStalePendingActions(ctx, model.PendingActionMaxAge)
+	_ = e.expireStaleConfigConfirms(ctx)
 	entries, earlier, _ := e.store.ListEntries(ctx, thread, 200)
 	e.HydrateEntriesArtifacts(ctx, entries)
 	actions, _ := e.store.ListPendingActions(ctx)
