@@ -4,12 +4,19 @@ import { CorgiButtMark, CorgiMark, StatusDot } from "../../components/CorgiMark"
 import { DecisionCard, type DecisionResolvePayload } from "../../components/DecisionCard";
 import { isFastSingleAction } from "../../lib/decisionCard";
 import { DecisionReceiptCard } from "../../components/DecisionReceiptCard";
-import { MarkdownText } from "../../components/MarkdownText";
+import { ImageGallery } from "../../components/ImageGallery";
+import { ImageLightbox } from "../../components/ImageLightbox";
+import { MarkdownText, type MarkdownImagePayload } from "../../components/MarkdownText";
 import { PromptQueueTray } from "../../components/PromptQueueTray";
 import { QuoteBlock } from "../../components/QuoteBlock";
 import { useAutoScroll } from "../../hooks/useAutoScroll";
 import { formatWeComFocusBanner } from "../../lib/agentIdentity";
 import { api } from "../../lib/api";
+import {
+  partitionEntryArtifacts,
+  partitionEntryFiles,
+  type GalleryImageItem,
+} from "../../lib/imageGallery";
 import {
   isDecisionAction,
   isInlineBubbleAction,
@@ -34,7 +41,7 @@ import {
   type DerivedWorkStatus,
   type NotebookMode,
 } from "../../lib/workItems";
-import type { Action, ArtifactSummary, ChatMessage, EndedSession, Entry, EntryWorkerRef, FileDrawerTarget, Machine, QueuedPrompt, Settings, SuperView, WorkItem } from "../../types/api";
+import type { Action, ChatMessage, EndedSession, Entry, EntryWorkerRef, FileDrawerTarget, Machine, QueuedPrompt, Settings, SuperView, WorkItem } from "../../types/api";
 import { ChatHeader } from "./ChatHeader";
 import { ComposerBar } from "./ComposerBar";
 import { WorkNotebook } from "./WorkNotebook";
@@ -115,6 +122,7 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
   const [stopping, setStopping] = useState(false);
   const [busyActionId, setBusyActionId] = useState("");
   const [historyPreview, setHistoryPreview] = useState<{ sess: EndedSession; msgs: ChatMessage[] } | null>(null);
+  const [lightboxState, setLightboxState] = useState<{ items: GalleryImageItem[]; index: number } | null>(null);
   const [isDesktop, setIsDesktop] = useState(() =>
     typeof window !== "undefined" ? window.matchMedia("(min-width: 1024px)").matches : true
   );
@@ -884,6 +892,21 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
                         defaultMachine={entry.file_machine}
                         entryArtifacts={entry.artifacts}
                         onOpenFile={onOpenFile}
+                        onOpenImage={(img: MarkdownImagePayload) =>
+                          setLightboxState({
+                            items: [
+                              {
+                                id: `md:${img.src}`,
+                                dedupKey: img.src,
+                                src: img.src,
+                                downloadUrl: img.downloadUrl,
+                                name: img.name,
+                                subtitle: img.subtitle,
+                              },
+                            ],
+                            index: 0,
+                          })
+                        }
                         onOpenArtifact={(art) =>
                           onOpenArtifact({
                             artifactId: art.id,
@@ -894,9 +917,28 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
                         }
                       />
                     </div>
-                    {entry.artifacts && entry.artifacts.length > 0 ? (
+                    {entry.artifacts && entry.artifacts.length > 0 ? (() => {
+                      const { images: galleryImages, cards: artifactCards } = partitionEntryArtifacts(
+                        entry.artifacts,
+                        entry.worker_ref
+                      );
+                      return (
                       <div className="space-y-2 pt-1">
-                        {entry.artifacts.map((art: ArtifactSummary, artIdx: number) => {
+                        {galleryImages.length > 0 && (
+                          <ImageGallery
+                            items={galleryImages}
+                            onOpenLightbox={(items, index) => setLightboxState({ items, index })}
+                            onFallbackArtifact={(art) =>
+                              onOpenArtifact({
+                                artifactId: art.id,
+                                name: art.name,
+                                kind: art.kind,
+                                shareToken: art.share_token,
+                              })
+                            }
+                          />
+                        )}
+                        {artifactCards.map(({ art, isWorkerReport }) => {
                           if (art.expired) {
                             return (
                               <div
@@ -910,7 +952,7 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
                               </div>
                             );
                           }
-                          const workerRef = artIdx === 0 ? entry.worker_ref : undefined;
+                          const workerRef = isWorkerReport ? entry.worker_ref : undefined;
                           const liveBoundWorker = workerRef ? matchLiveWorkerForRef(workerRef, data?.workers) : null;
                           const openTarget: FileDrawerTarget = {
                             artifactId: art.id,
@@ -1120,9 +1162,19 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
                           );
                         })}
                       </div>
-                    ) : entry.files && entry.files.length > 0 ? (
+                      );
+                    })() : entry.files && entry.files.length > 0 ? (() => {
+                      const { images: fileImages, nonImageFiles } = partitionEntryFiles(entry.files, entry.file_machine);
+                      return (
                       <div className="space-y-1.5 pt-1">
-                        {entry.files.map((fp) => (
+                        {fileImages.length > 0 && (
+                          <ImageGallery
+                            items={fileImages}
+                            onOpenLightbox={(items, index) => setLightboxState({ items, index })}
+                            onFallbackFile={onOpenFile}
+                          />
+                        )}
+                        {nonImageFiles.map((fp) => (
                           <div
                             key={fp}
                             className="rounded-xl px-3 py-2 border border-hairline surface-rail flex items-center justify-between gap-2.5 text-xs"
@@ -1152,7 +1204,8 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
                           </div>
                         ))}
                       </div>
-                    ) : null}
+                      );
+                    })() : null}
                     {inlineAction && (
                       <div className="pt-1 flex flex-wrap items-center gap-1.5">
                         {inlineAction.kind === "router_check" || !inlineAction.choices?.length ? (
@@ -1492,6 +1545,13 @@ export function CorgiChatView({ data, superReady = true, machines, thread, focus
             </div>
           </div>
         </div>
+      )}
+      {lightboxState && lightboxState.items.length > 0 && (
+        <ImageLightbox
+          items={lightboxState.items}
+          initialIndex={lightboxState.index}
+          onClose={() => setLightboxState(null)}
+        />
       )}
     </div>
   );

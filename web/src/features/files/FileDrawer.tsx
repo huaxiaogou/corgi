@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Download, ExternalLink, Maximize2, Minimize2, RotateCw, X } from "lucide-react";
-import { MarkdownText } from "../../components/MarkdownText";
+import { ImageLightbox } from "../../components/ImageLightbox";
+import { MarkdownText, type MarkdownImagePayload } from "../../components/MarkdownText";
 import { api } from "../../lib/api";
+import type { GalleryImageItem } from "../../lib/imageGallery";
 import { clampSplitWidth, computeSplitBounds } from "../../lib/previewLayout";
 import {
   buildArtifactAPIURL,
@@ -38,7 +40,7 @@ export function FileDrawer({ target, onClose, onJumpWorker }: Props) {
   const [file, setFile] = useState<FileResponse | null>(null);
   const [err, setErr] = useState("");
   const [rawView, setRawView] = useState(false);
-  const [lightbox, setLightbox] = useState(false);
+  const [lightboxItems, setLightboxItems] = useState<GalleryImageItem[] | null>(null);
   const [reloadSeq, setReloadSeq] = useState(0);
   const [resizing, setResizing] = useState(false);
   const [isDesktop, setIsDesktop] = useState(() =>
@@ -93,7 +95,7 @@ export function FileDrawer({ target, onClose, onJumpWorker }: Props) {
     setFile(null);
     setErr("");
     setRawView(false);
-    setLightbox(false);
+    setLightboxItems(null);
     setReloadSeq(0);
 
     if (kind === "image" || kind === "html") return;
@@ -112,15 +114,14 @@ export function FileDrawer({ target, onClose, onJumpWorker }: Props) {
   }, [target, kind]);
 
   useEffect(() => {
-    if (!target) return;
+    if (!target || lightboxItems) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (lightbox) setLightbox(false);
-      else onClose();
+      onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [target, lightbox, onClose]);
+  }, [target, lightboxItems, onClose]);
 
   const bounds = computeSplitBounds(containerWidth, isHTML);
   const savedForKind = isHTML ? customWidths.html : customWidths.file;
@@ -158,6 +159,32 @@ export function FileDrawer({ target, onClose, onJumpWorker }: Props) {
     "artifactId" in target
       ? buildArtifactAPIURL(target.artifactId, "download")
       : buildFileAPIURL(target, { download: "1" });
+
+  const openPrimaryLightbox = () => {
+    setLightboxItems([
+      {
+        id: "artifactId" in target ? `artifact:${target.artifactId}` : `file:${target.machine ?? ""}:${target.path}`,
+        dedupKey: imgSrc,
+        src: imgSrc,
+        downloadUrl: downloadSrc,
+        name: displayName,
+        subtitle,
+      },
+    ]);
+  };
+
+  const openInlineImage = (img: MarkdownImagePayload) => {
+    setLightboxItems([
+      {
+        id: `md:${img.src}`,
+        dedupKey: img.src,
+        src: img.src,
+        downloadUrl: img.downloadUrl,
+        name: img.name,
+        subtitle: img.subtitle,
+      },
+    ]);
+  };
 
   return (
     <>
@@ -257,7 +284,7 @@ export function FileDrawer({ target, onClose, onJumpWorker }: Props) {
             {isImage && (
               <button
                 type="button"
-                onClick={() => setLightbox(true)}
+                onClick={openPrimaryLightbox}
                 className="w-7 h-7 rounded-lg flex items-center justify-center text-secondary surface-hover cursor-pointer"
                 title="全屏灯箱查看"
               >
@@ -296,14 +323,14 @@ export function FileDrawer({ target, onClose, onJumpWorker }: Props) {
           <div className="flex-1 overflow-y-auto p-4 text-xs">
             {err && <div style={{ color: "var(--attn)" }}>{err}</div>}
             {isImage && (
-              <button type="button" onClick={() => setLightbox(true)} className="block cursor-zoom-in">
+              <button type="button" onClick={openPrimaryLightbox} className="block cursor-zoom-in">
                 <img src={imgSrc} alt={displayName} className="max-w-full rounded-lg border border-hairline" />
               </button>
             )}
             {file && file.kind === "text" &&
               (isMarkdown && !rawView ? (
                 <div className="text-[13px] text-primary">
-                  <MarkdownText text={file.content} />
+                  <MarkdownText text={file.content} onOpenImage={openInlineImage} />
                 </div>
               ) : (
                 <pre className="font-mono-code leading-relaxed whitespace-pre-wrap text-secondary">{file.content}</pre>
@@ -336,14 +363,12 @@ export function FileDrawer({ target, onClose, onJumpWorker }: Props) {
         )}
       </aside>
 
-      {lightbox && isImage && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-6 cursor-zoom-out"
-          style={{ background: "rgba(0,0,0,0.78)" }}
-          onClick={() => setLightbox(false)}
-        >
-          <img src={imgSrc} alt={displayName} className="max-w-[92vw] max-h-[90vh] rounded-xl shadow-2xl" />
-        </div>
+      {lightboxItems && lightboxItems.length > 0 && (
+        <ImageLightbox
+          items={lightboxItems}
+          initialIndex={0}
+          onClose={() => setLightboxItems(null)}
+        />
       )}
     </>
   );
