@@ -62,32 +62,24 @@ type Engine struct {
 	binPath  string
 	version  string
 
-	mu                      sync.Mutex
-	settings                model.Settings
-	policies                []model.Policy
-	flagPublicURLs          []string
-	artifactHMACSecret      []byte
-	routerDispatching       bool
-	hubUpdating             bool
-	autoUpdater             AutoUpdater
-	lastAutoUpdateCheck     time.Time
-	dream                   *dreamRun
-	lastScreen              map[string]screenMark
-	lastAnswer              map[string]time.Time
-	lastTrust               map[string]time.Time
-	idleCheckAt             map[string]time.Time
-	lastPatrolScan          time.Time
-	lastPendingExpire       time.Time
-	runCtx                  context.Context
-	noAgent                 map[string]time.Time
-	healingBypass           map[string]string
-	bypassCheckedAt         map[string]time.Time
-	bypassHealFailAt        map[string]time.Time
-	bypassHealedPID         map[string]uint32
-	bypassCheckInterval     time.Duration
-	bypassExitPoll          time.Duration
-	bypassExitTimeout       time.Duration
-	bypassStartRetryTimeout time.Duration
+	mu                  sync.Mutex
+	settings            model.Settings
+	policies            []model.Policy
+	flagPublicURLs      []string
+	artifactHMACSecret  []byte
+	routerDispatching   bool
+	hubUpdating         bool
+	autoUpdater         AutoUpdater
+	lastAutoUpdateCheck time.Time
+	dream               *dreamRun
+	lastScreen          map[string]screenMark
+	lastAnswer          map[string]time.Time
+	lastTrust           map[string]time.Time
+	idleCheckAt         map[string]time.Time
+	lastPatrolScan      time.Time
+	lastPendingExpire   time.Time
+	runCtx              context.Context
+	noAgent             map[string]time.Time
 
 	// In-process native API Router runtime state (protected by mu).
 	router routerState
@@ -110,19 +102,9 @@ type Engine struct {
 	workerStartupCheckWindow   time.Duration
 	workerTurnSettleDelay      time.Duration
 
-	// Universal Worker Process Hibernation GC runtime state (protected by mu).
-	startedAt                time.Time
-	lastGCScan               time.Time
-	gcRunning                bool
-	gcClosing                map[string]bool
-	gcClosingPane            map[string]string
-	workerOps                map[string]int
-	workerActivity           map[string]time.Time
-	gcFailBackoff            map[string]time.Time
-	recentlyClosedPanes      map[string]time.Time
-	workerGCInterval         time.Duration
-	workerGCGracePeriod      time.Duration
-	workerGCActivityCooldown time.Duration
+	// Dedicated sub-states with independent mutexes (never nested with e.mu).
+	bypass bypassHealState
+	gc     workerGCState
 }
 
 // NewEngine constructs a Super-Agent Engine initialized from SQLite.
@@ -144,43 +126,34 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		logger = slog.Default()
 	}
 	eng := &Engine{
-		store:               st,
-		fleet:               fl,
-		agents:              reg,
-		memory:              mem,
-		llm:                 NewLLMClient(),
-		sink:                NopSink{},
-		logger:              logger,
-		corgiDir:            corgiDir,
-		home:                home,
-		binPath:             binPath,
-		settings:            settings,
-		policies:            policies,
-		lastScreen:          map[string]screenMark{},
-		lastAnswer:          map[string]time.Time{},
-		lastTrust:           map[string]time.Time{},
-		idleCheckAt:         map[string]time.Time{},
-		noAgent:             map[string]time.Time{},
-		healingBypass:       map[string]string{},
-		bypassCheckedAt:     map[string]time.Time{},
-		bypassHealFailAt:    map[string]time.Time{},
-		bypassHealedPID:     map[string]uint32{},
-		wakeCh:              make(chan struct{}, 1),
-		configWriteSem:      make(chan struct{}, 1),
-		pausedQueues:        map[string]bool{},
-		drainCooldown:       map[string]time.Time{},
-		directTurns:         map[string][]*pendingDirectTurn{},
-		deliveringWorkers:   map[string]bool{},
-		watchdogMarks:       map[string]*watchdogMark{},
-		constraintRemindAt:  map[string]time.Time{},
-		workerTurns:         map[string]*workerTurnWatermark{},
-		startedAt:           time.Now(),
-		gcClosing:           map[string]bool{},
-		gcClosingPane:       map[string]string{},
-		workerOps:           map[string]int{},
-		workerActivity:      map[string]time.Time{},
-		gcFailBackoff:       map[string]time.Time{},
-		recentlyClosedPanes: map[string]time.Time{},
+		store:              st,
+		fleet:              fl,
+		agents:             reg,
+		memory:             mem,
+		llm:                NewLLMClient(),
+		sink:               NopSink{},
+		logger:             logger,
+		corgiDir:           corgiDir,
+		home:               home,
+		binPath:            binPath,
+		settings:           settings,
+		policies:           policies,
+		lastScreen:         map[string]screenMark{},
+		lastAnswer:         map[string]time.Time{},
+		lastTrust:          map[string]time.Time{},
+		idleCheckAt:        map[string]time.Time{},
+		noAgent:            map[string]time.Time{},
+		wakeCh:             make(chan struct{}, 1),
+		configWriteSem:     make(chan struct{}, 1),
+		pausedQueues:       map[string]bool{},
+		drainCooldown:      map[string]time.Time{},
+		directTurns:        map[string][]*pendingDirectTurn{},
+		deliveringWorkers:  map[string]bool{},
+		watchdogMarks:      map[string]*watchdogMark{},
+		constraintRemindAt: map[string]time.Time{},
+		workerTurns:        map[string]*workerTurnWatermark{},
+		bypass:             newBypassHealState(),
+		gc:                 newWorkerGCState(time.Now()),
 	}
 	eng.loadActiveDreamMarker(ctx)
 	return eng, nil

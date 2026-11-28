@@ -55,8 +55,8 @@ func TestWorkerGC_RulesP1P2P3P4AndKillSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.workerGCGracePeriod = -1
-	eng.workerGCActivityCooldown = -1
+	eng.gc.gracePeriod = -1
+	eng.gc.activityCooldown = -1
 
 	ctx := context.Background()
 	now := time.Now()
@@ -228,8 +228,8 @@ func TestWorkerGC_SafetyVetoes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.workerGCGracePeriod = -1
-	eng.workerGCActivityCooldown = -1
+	eng.gc.gracePeriod = -1
+	eng.gc.activityCooldown = -1
 
 	ctx := context.Background()
 	now := time.Now()
@@ -451,8 +451,8 @@ func TestWorkerGC_LosslessHibernateAndResumeMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.workerGCGracePeriod = -1
-	eng.workerGCActivityCooldown = -1
+	eng.gc.gracePeriod = -1
+	eng.gc.activityCooldown = -1
 
 	ctx := context.Background()
 	now := time.Now()

@@ -4,10 +4,41 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kiperjing/corgi/internal/model"
 )
+
+// workerGCState encapsulates worker operation reservations, activity timestamps,
+// and background hibernation GC state behind its own mutex (never nested with Engine.mu).
+type workerGCState struct {
+	mu                  sync.Mutex
+	startedAt           time.Time
+	lastScan            time.Time
+	running             bool
+	closing             map[string]bool
+	closingPane         map[string]string
+	workerOps           map[string]int
+	workerActivity      map[string]time.Time
+	failBackoff         map[string]time.Time
+	recentlyClosedPanes map[string]time.Time
+	interval            time.Duration
+	gracePeriod         time.Duration
+	activityCooldown    time.Duration
+}
+
+func newWorkerGCState(startedAt time.Time) workerGCState {
+	return workerGCState{
+		startedAt:           startedAt,
+		closing:             map[string]bool{},
+		closingPane:         map[string]string{},
+		workerOps:           map[string]int{},
+		workerActivity:      map[string]time.Time{},
+		failBackoff:         map[string]time.Time{},
+		recentlyClosedPanes: map[string]time.Time{},
+	}
+}
 
 // isCorgiOwnedWorker reports whether w was explicitly dispatched by Corgi/Router.
 // Manually opened ("you"), adopted ("adopted"), legacy empty (""), and unknown origins are exempt.
@@ -19,9 +50,9 @@ func isCorgiOwnedWorker(w *model.Worker) bool {
 }
 
 func (e *Engine) getWorkerGCInterval() time.Duration {
-	e.mu.Lock()
-	d := e.workerGCInterval
-	e.mu.Unlock()
+	e.gc.mu.Lock()
+	d := e.gc.interval
+	e.gc.mu.Unlock()
 	if d > 0 {
 		return d
 	}
@@ -29,9 +60,9 @@ func (e *Engine) getWorkerGCInterval() time.Duration {
 }
 
 func (e *Engine) getWorkerGCGracePeriod() time.Duration {
-	e.mu.Lock()
-	d := e.workerGCGracePeriod
-	e.mu.Unlock()
+	e.gc.mu.Lock()
+	d := e.gc.gracePeriod
+	e.gc.mu.Unlock()
 	if d != 0 {
 		if d < 0 {
 			return 0
@@ -42,9 +73,9 @@ func (e *Engine) getWorkerGCGracePeriod() time.Duration {
 }
 
 func (e *Engine) getWorkerGCActivityCooldown() time.Duration {
-	e.mu.Lock()
-	d := e.workerGCActivityCooldown
-	e.mu.Unlock()
+	e.gc.mu.Lock()
+	d := e.gc.activityCooldown
+	e.gc.mu.Unlock()
 	if d != 0 {
 		if d < 0 {
 			return 0
@@ -62,19 +93,19 @@ func (e *Engine) beginWorkerOp(workerName string) bool {
 	if workerName == "" {
 		return true
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.gcClosing[workerName] {
+	e.gc.mu.Lock()
+	defer e.gc.mu.Unlock()
+	if e.gc.closing[workerName] {
 		return false
 	}
-	if e.workerOps == nil {
-		e.workerOps = map[string]int{}
+	if e.gc.workerOps == nil {
+		e.gc.workerOps = map[string]int{}
 	}
-	if e.workerActivity == nil {
-		e.workerActivity = map[string]time.Time{}
+	if e.gc.workerActivity == nil {
+		e.gc.workerActivity = map[string]time.Time{}
 	}
-	e.workerOps[workerName]++
-	e.workerActivity[workerName] = time.Now()
+	e.gc.workerOps[workerName]++
+	e.gc.workerActivity[workerName] = time.Now()
 	return true
 }
 
@@ -84,17 +115,17 @@ func (e *Engine) endWorkerOp(workerName string) {
 	if workerName == "" {
 		return
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if n := e.workerOps[workerName]; n <= 1 {
-		delete(e.workerOps, workerName)
+	e.gc.mu.Lock()
+	defer e.gc.mu.Unlock()
+	if n := e.gc.workerOps[workerName]; n <= 1 {
+		delete(e.gc.workerOps, workerName)
 	} else {
-		e.workerOps[workerName] = n - 1
+		e.gc.workerOps[workerName] = n - 1
 	}
-	if e.workerActivity == nil {
-		e.workerActivity = map[string]time.Time{}
+	if e.gc.workerActivity == nil {
+		e.gc.workerActivity = map[string]time.Time{}
 	}
-	e.workerActivity[workerName] = time.Now()
+	e.gc.workerActivity[workerName] = time.Now()
 }
 
 // beginWorkerOpWithoutActivity registers an internal read/sync guard (such as syncWorkers)
@@ -104,15 +135,15 @@ func (e *Engine) beginWorkerOpWithoutActivity(workerName string) bool {
 	if workerName == "" {
 		return true
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.gcClosing[workerName] {
+	e.gc.mu.Lock()
+	defer e.gc.mu.Unlock()
+	if e.gc.closing[workerName] {
 		return false
 	}
-	if e.workerOps == nil {
-		e.workerOps = map[string]int{}
+	if e.gc.workerOps == nil {
+		e.gc.workerOps = map[string]int{}
 	}
-	e.workerOps[workerName]++
+	e.gc.workerOps[workerName]++
 	return true
 }
 
@@ -121,12 +152,12 @@ func (e *Engine) endWorkerOpWithoutActivity(workerName string) {
 	if workerName == "" {
 		return
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if n := e.workerOps[workerName]; n <= 1 {
-		delete(e.workerOps, workerName)
+	e.gc.mu.Lock()
+	defer e.gc.mu.Unlock()
+	if n := e.gc.workerOps[workerName]; n <= 1 {
+		delete(e.gc.workerOps, workerName)
 	} else {
-		e.workerOps[workerName] = n - 1
+		e.gc.workerOps[workerName] = n - 1
 	}
 }
 
@@ -135,33 +166,33 @@ func (e *Engine) touchWorkerActivity(workerName string) {
 	if workerName == "" {
 		return
 	}
-	e.mu.Lock()
-	if e.workerActivity == nil {
-		e.workerActivity = map[string]time.Time{}
+	e.gc.mu.Lock()
+	if e.gc.workerActivity == nil {
+		e.gc.workerActivity = map[string]time.Time{}
 	}
-	e.workerActivity[workerName] = time.Now()
-	e.mu.Unlock()
+	e.gc.workerActivity[workerName] = time.Now()
+	e.gc.mu.Unlock()
 }
 
 func (e *Engine) lastWorkerActivity(workerName string) time.Time {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.workerActivity[workerName]
+	e.gc.mu.Lock()
+	defer e.gc.mu.Unlock()
+	return e.gc.workerActivity[workerName]
 }
 
 func (e *Engine) isWorkerGCClosing(workerName string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.gcClosing[workerName]
+	e.gc.mu.Lock()
+	defer e.gc.mu.Unlock()
+	return e.gc.closing[workerName]
 }
 
 func (e *Engine) isPaneGCClosing(paneID string) bool {
 	if paneID == "" {
 		return false
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.gcClosingPane[paneID] != ""
+	e.gc.mu.Lock()
+	defer e.gc.mu.Unlock()
+	return e.gc.closingPane[paneID] != ""
 }
 
 func (e *Engine) waitWorkerGCIdle(ctx context.Context, workerName string, maxWait time.Duration) bool {
@@ -192,31 +223,31 @@ func (e *Engine) recordRecentlyClosedPane(paneID string, now time.Time) {
 	if paneID == "" {
 		return
 	}
-	e.mu.Lock()
-	if e.recentlyClosedPanes == nil {
-		e.recentlyClosedPanes = map[string]time.Time{}
+	e.gc.mu.Lock()
+	if e.gc.recentlyClosedPanes == nil {
+		e.gc.recentlyClosedPanes = map[string]time.Time{}
 	}
-	for pid, at := range e.recentlyClosedPanes {
+	for pid, at := range e.gc.recentlyClosedPanes {
 		if now.Sub(at) > defaultWorkerGCRecentCloseWindow {
-			delete(e.recentlyClosedPanes, pid)
+			delete(e.gc.recentlyClosedPanes, pid)
 		}
 	}
-	e.recentlyClosedPanes[paneID] = now
-	e.mu.Unlock()
+	e.gc.recentlyClosedPanes[paneID] = now
+	e.gc.mu.Unlock()
 }
 
 func (e *Engine) isRecentlyClosedPane(paneID string, now time.Time) bool {
 	if paneID == "" {
 		return false
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	at, ok := e.recentlyClosedPanes[paneID]
+	e.gc.mu.Lock()
+	defer e.gc.mu.Unlock()
+	at, ok := e.gc.recentlyClosedPanes[paneID]
 	if !ok {
 		return false
 	}
 	if now.Sub(at) > defaultWorkerGCRecentCloseWindow {
-		delete(e.recentlyClosedPanes, paneID)
+		delete(e.gc.recentlyClosedPanes, paneID)
 		return false
 	}
 	return true

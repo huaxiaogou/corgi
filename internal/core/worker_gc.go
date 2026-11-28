@@ -51,18 +51,18 @@ func (e *Engine) recordWorkerGCFailBackoff(workerName string, now time.Time) {
 	if workerName == "" {
 		return
 	}
-	e.mu.Lock()
-	if e.gcFailBackoff == nil {
-		e.gcFailBackoff = map[string]time.Time{}
+	e.gc.mu.Lock()
+	if e.gc.failBackoff == nil {
+		e.gc.failBackoff = map[string]time.Time{}
 	}
-	e.gcFailBackoff[workerName] = now
-	e.mu.Unlock()
+	e.gc.failBackoff[workerName] = now
+	e.gc.mu.Unlock()
 }
 
 func (e *Engine) inWorkerGCFailBackoff(workerName string, now time.Time) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	at, ok := e.gcFailBackoff[workerName]
+	e.gc.mu.Lock()
+	defer e.gc.mu.Unlock()
+	at, ok := e.gc.failBackoff[workerName]
 	return ok && now.Sub(at) < defaultWorkerGCFailBackoff
 }
 
@@ -80,18 +80,18 @@ func (e *Engine) checkWorkerGC(ctx context.Context, rawAgents []model.Agent, liv
 		return
 	}
 	grace := e.getWorkerGCGracePeriod()
-	if grace > 0 && !e.startedAt.IsZero() && now.Sub(e.startedAt) < grace {
+	if grace > 0 && !e.gc.startedAt.IsZero() && now.Sub(e.gc.startedAt) < grace {
 		return
 	}
 
 	interval := e.getWorkerGCInterval()
-	e.mu.Lock()
-	if e.gcRunning || (!e.lastGCScan.IsZero() && now.Sub(e.lastGCScan) < interval) {
-		e.mu.Unlock()
+	e.gc.mu.Lock()
+	if e.gc.running || (!e.gc.lastScan.IsZero() && now.Sub(e.gc.lastScan) < interval) {
+		e.gc.mu.Unlock()
 		return
 	}
-	e.lastGCScan = now
-	e.mu.Unlock()
+	e.gc.lastScan = now
+	e.gc.mu.Unlock()
 
 	cands := e.selectWorkerGCCandidates(ctx, st, rawAgents, live, scanned, now)
 	if len(cands) == 0 {
@@ -101,23 +101,24 @@ func (e *Engine) checkWorkerGC(ctx context.Context, rawAgents []model.Agent, liv
 		cands = cands[:workerGCMaxPerCycle]
 	}
 
-	e.mu.Lock()
-	if e.gcRunning {
-		e.mu.Unlock()
-		return
-	}
-	e.gcRunning = true
-	parent := e.runCtx
+	parent := e.backgroundRunCtx()
 	if parent == nil {
 		parent = context.Background()
 	}
-	e.mu.Unlock()
+
+	e.gc.mu.Lock()
+	if e.gc.running {
+		e.gc.mu.Unlock()
+		return
+	}
+	e.gc.running = true
+	e.gc.mu.Unlock()
 
 	go func() {
 		defer func() {
-			e.mu.Lock()
-			e.gcRunning = false
-			e.mu.Unlock()
+			e.gc.mu.Lock()
+			e.gc.running = false
+			e.gc.mu.Unlock()
 		}()
 		for _, cand := range cands {
 			if parent.Err() != nil {
@@ -281,10 +282,10 @@ func (e *Engine) selectWorkerGCCandidates(
 		if focusedWorkers[w.Name] {
 			continue
 		}
-		e.mu.Lock()
-		busyOp := e.workerOps[w.Name] > 0
-		lastAct := e.workerActivity[w.Name]
-		e.mu.Unlock()
+		e.gc.mu.Lock()
+		busyOp := e.gc.workerOps[w.Name] > 0
+		lastAct := e.gc.workerActivity[w.Name]
+		e.gc.mu.Unlock()
 		if busyOp {
 			continue
 		}

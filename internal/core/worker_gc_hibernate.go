@@ -73,30 +73,30 @@ func (e *Engine) hibernateWorker(ctx context.Context, cand workerGCCandidate) {
 	}
 
 	// Atomically claim exclusive GC closing slot when zero active workerOps exist.
-	e.mu.Lock()
-	if e.gcClosing[cand.name] || e.workerOps[cand.name] > 0 {
-		e.mu.Unlock()
+	e.gc.mu.Lock()
+	if e.gc.closing[cand.name] || e.gc.workerOps[cand.name] > 0 {
+		e.gc.mu.Unlock()
 		return
 	}
-	if e.gcClosing == nil {
-		e.gcClosing = map[string]bool{}
+	if e.gc.closing == nil {
+		e.gc.closing = map[string]bool{}
 	}
-	if e.gcClosingPane == nil {
-		e.gcClosingPane = map[string]string{}
+	if e.gc.closingPane == nil {
+		e.gc.closingPane = map[string]string{}
 	}
-	e.gcClosing[cand.name] = true
+	e.gc.closing[cand.name] = true
 	if cand.paneID != "" {
-		e.gcClosingPane[cand.paneID] = cand.name
+		e.gc.closingPane[cand.paneID] = cand.name
 	}
-	e.mu.Unlock()
+	e.gc.mu.Unlock()
 
 	defer func() {
-		e.mu.Lock()
-		delete(e.gcClosing, cand.name)
-		if cand.paneID != "" && e.gcClosingPane[cand.paneID] == cand.name {
-			delete(e.gcClosingPane, cand.paneID)
+		e.gc.mu.Lock()
+		delete(e.gc.closing, cand.name)
+		if cand.paneID != "" && e.gc.closingPane[cand.paneID] == cand.name {
+			delete(e.gc.closingPane, cand.paneID)
 		}
-		e.mu.Unlock()
+		e.gc.mu.Unlock()
 	}()
 
 	now := time.Now()

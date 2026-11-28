@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kiperjing/corgi/internal/core"
 	"github.com/kiperjing/corgi/internal/model"
 )
 
@@ -114,10 +113,7 @@ func TestFleetUpdaterCheckReadOnlyExpectedTargetAndBusyGuard(t *testing.T) {
 	if chk.CurrentVersion != "v0.1.78" || chk.LatestVersion != "v0.1.79" || !chk.HasUpdate || len(chk.Outdated) != 1 {
 		t.Fatalf("unexpected CheckUpdate result: %+v", chk)
 	}
-	srv.updateMu.Lock()
-	cached := srv.latestTag
-	srv.updateMu.Unlock()
-	if cached != "" {
+	if cached := srv.getUpdater().CachedLatestTag(); cached != "" {
 		t.Fatalf("CheckUpdate must be strictly read-only, mutated latestTag=%q", cached)
 	}
 
@@ -125,44 +121,6 @@ func TestFleetUpdaterCheckReadOnlyExpectedTargetAndBusyGuard(t *testing.T) {
 	releaseTag = "v0.1.80"
 	if _, err := srv.TriggerFleetUpdate(context.Background(), "v0.1.79"); err == nil {
 		t.Fatalf("expected TriggerFleetUpdate to reject drifted target v0.1.79 vs v0.1.80")
-	}
-
-	// 3. Empty-plan race: synchronize inside fetchLatestTagErr so fleetUpdate becomes busy mid-flight
-	// before empty-plan branch acquires fleetUpdateMu, proving the empty-plan busy recheck preserves busy state.
-	enteredFetch := make(chan struct{})
-	releaseFetch := make(chan struct{})
-	raceSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/releases/latest" {
-			close(enteredFetch)
-			<-releaseFetch
-			http.Redirect(w, r, "/releases/tag/v0.1.78", http.StatusFound)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer raceSrv.Close()
-	srv.ReleaseRepoURL = raceSrv.URL
-
-	type triggerOut struct {
-		res core.UpdateTriggerResult
-		err error
-	}
-	doneCh := make(chan triggerOut, 1)
-	go func() {
-		r, e := srv.TriggerFleetUpdate(context.Background(), "v0.1.78")
-		doneCh <- triggerOut{res: r, err: e}
-	}()
-	<-enteredFetch
-	srv.fleetUpdateMu.Lock()
-	srv.fleetUpdate = &fleetUpdateState{
-		view: FleetUpdateView{Busy: true, Phase: "updating", Target: "v0.1.80"},
-	}
-	srv.fleetUpdateMu.Unlock()
-	close(releaseFetch)
-
-	got := <-doneCh
-	if got.err != nil || !got.res.Busy || got.res.Started || got.res.Target != "v0.1.80" {
-		t.Fatalf("expected empty-plan busy recheck to preserve active v0.1.80 run, got res=%+v err=%v", got.res, got.err)
 	}
 }
 

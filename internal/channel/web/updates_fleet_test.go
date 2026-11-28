@@ -19,6 +19,7 @@ import (
 
 	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
+	"github.com/kiperjing/corgi/internal/updater"
 )
 
 func TestUpdateRouteSeparationAndExactMachineIDLookup(t *testing.T) {
@@ -132,8 +133,8 @@ func TestHubRelayedNodeUpdateAndTamperProtection(t *testing.T) {
 	_ = os.WriteFile(tamperExe, []byte("intact"), 0o755)
 	nodeSrv2 := &Server{Version: "v0.1.40", NodeOnly: true, ExecutablePath: tamperExe}
 	badReq := httptest.NewRequest(http.MethodPost, "/api/update/relay", strings.NewReader("corrupted-bytes"))
-	badReq.Header.Set(relayUpdateTagHeader, "v0.1.41")
-	badReq.Header.Set(relayUpdateSHAHeader, sumHex)
+	badReq.Header.Set(updater.RelayUpdateTagHeader, "v0.1.41")
+	badReq.Header.Set(updater.RelayUpdateSHAHeader, sumHex)
 	badRec := httptest.NewRecorder()
 	nodeSrv2.NodeRoutes().ServeHTTP(badRec, badReq)
 	if badRec.Code != http.StatusBadGateway {
@@ -231,7 +232,7 @@ func TestFleetUpdateNodesFirstPartialFailureAndRetry(t *testing.T) {
 	}
 
 	waitFleetIdle(t, srv, 2*time.Second)
-	snap := srv.fleetUpdateSnapshot()
+	snap := srv.getUpdater().FleetSnapshot()
 	if snap.Phase != "failed" || snap.FailedID != "mac-1" {
 		t.Fatalf("expected fleet run failed on mac-1 before Hub, got %+v", snap)
 	}
@@ -256,7 +257,7 @@ func TestFleetUpdateNodesFirstPartialFailureAndRetry(t *testing.T) {
 			t.Fatalf("hub ExecFn got %q want %q", gotExe, hubExe)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatalf("expected Hub ExecFn after Node confirmed reconnect; snap=%+v", srv.fleetUpdateSnapshot())
+		t.Fatalf("expected Hub ExecFn after Node confirmed reconnect; snap=%+v", srv.getUpdater().FleetSnapshot())
 	}
 	if b, _ := os.ReadFile(hubExe); !bytes.Equal(b, fakeBin) {
 		t.Fatalf("hub binary was not replaced")
@@ -291,28 +292,26 @@ func TestTryAutoUpdateEnforces24HourAttemptCap(t *testing.T) {
 	srv.TryAutoUpdate(ctx)
 	waitFleetIdle(t, srv, 2*time.Second)
 
-	attempts := srv.loadAutoUpdateAttempts(ctx)
+	attempts := srv.getUpdater().LoadAutoUpdateAttempts(ctx)
 	if _, ok := attempts["hub@v0.1.41"]; !ok {
 		t.Fatalf("expected hub@v0.1.41 attempt recorded in KV, got %+v", attempts)
 	}
 
 	// Second call within 24h must NOT start another fleet run.
-	srv.fleetUpdateMu.Lock()
-	srv.fleetUpdate = nil
-	srv.fleetUpdateMu.Unlock()
+	srv.getUpdater().ResetFleetState()
 	srv.TryAutoUpdate(ctx)
 	time.Sleep(50 * time.Millisecond)
-	if snap := srv.fleetUpdateSnapshot(); snap.Phase != "idle" {
+	if snap := srv.getUpdater().FleetSnapshot(); snap.Phase != "idle" {
 		t.Fatalf("expected second TryAutoUpdate skipped by 24h cap, got %+v", snap)
 	}
 }
 
 func TestSanitizeNodeExecArgsStripsPairingCode(t *testing.T) {
 	in := []string{"/usr/local/bin/corgi", "node", "--hub", "http://10.0.0.1:7788", "--code", "abc-123", "--name", "mac", "--code=xyz", "--pair-only"}
-	got := sanitizeNodeExecArgs(in)
+	got := updater.SanitizeNodeExecArgs(in)
 	want := []string{"/usr/local/bin/corgi", "node", "--hub", "http://10.0.0.1:7788", "--name", "mac"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("sanitizeNodeExecArgs=%v want=%v", got, want)
+		t.Fatalf("SanitizeNodeExecArgs=%v want=%v", got, want)
 	}
 }
 
@@ -352,11 +351,11 @@ func waitFleetIdle(t *testing.T, srv *Server, maxWait time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(maxWait)
 	for time.Now().Before(deadline) {
-		if !srv.isFleetUpdateBusy() {
+		if !srv.getUpdater().IsFleetBusy() {
 			return
 		}
 		time.Sleep(15 * time.Millisecond)
 	}
-	b, _ := json.Marshal(srv.fleetUpdateSnapshot())
+	b, _ := json.Marshal(srv.getUpdater().FleetSnapshot())
 	t.Fatalf("fleet update still busy after %s: %s", maxWait, string(b))
 }

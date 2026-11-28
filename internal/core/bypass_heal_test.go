@@ -128,10 +128,10 @@ func TestIdleRestoredWorkerHealsBypassInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.bypassCheckInterval = 10 * time.Millisecond
-	eng.bypassExitPoll = 5 * time.Millisecond
-	eng.bypassExitTimeout = 500 * time.Millisecond
-	eng.bypassStartRetryTimeout = 500 * time.Millisecond
+	eng.bypass.checkInterval = 10 * time.Millisecond
+	eng.bypass.exitPoll = 5 * time.Millisecond
+	eng.bypass.exitTimeout = 500 * time.Millisecond
+	eng.bypass.startRetryTimeout = 500 * time.Millisecond
 
 	ctx := context.Background()
 	wk := &model.Worker{
@@ -230,7 +230,7 @@ func TestWorkingAndAskPermissionsWorkersAreNotInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.bypassCheckInterval = 5 * time.Millisecond
+	eng.bypass.checkInterval = 5 * time.Millisecond
 
 	ctx := context.Background()
 	wk := &model.Worker{
@@ -306,7 +306,7 @@ func TestAnswerRestoredAgyEditDialog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.bypassCheckInterval = 5 * time.Millisecond
+	eng.bypass.checkInterval = 5 * time.Millisecond
 
 	ctx := context.Background()
 	wk := &model.Worker{

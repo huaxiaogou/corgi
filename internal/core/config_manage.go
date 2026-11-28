@@ -273,13 +273,10 @@ func (e *Engine) commitConfigUnlocked(ctx context.Context, st *model.Settings, p
 		return prevSt, prevPols, fmt.Errorf("persist config tx: %w", err)
 	}
 
+	var resetBypass bool
 	e.mu.Lock()
 	if st != nil {
-		if e.settings.AskPermissions && !nextSt.AskPermissions {
-			clear(e.bypassCheckedAt)
-			clear(e.bypassHealedPID)
-			clear(e.bypassHealFailAt)
-		}
+		resetBypass = e.settings.AskPermissions && !nextSt.AskPermissions
 		e.settings = CloneSettings(nextSt)
 		if apiChanged {
 			e.router.resetFailuresLocked(true)
@@ -291,6 +288,9 @@ func (e *Engine) commitConfigUnlocked(ctx context.Context, st *model.Settings, p
 	sink := e.sink
 	onApplied := e.onSettingsApplied
 	e.mu.Unlock()
+	if resetBypass {
+		e.bypass.resetCaches()
+	}
 
 	if st != nil && onApplied != nil {
 		onApplied(CloneSettings(nextSt))

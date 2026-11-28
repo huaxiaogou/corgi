@@ -256,13 +256,10 @@ func (e *Engine) resolveConfigConfirmAction(ctx context.Context, actionID, resol
 			return txErr
 		}
 
+		var resetBypass bool
 		e.mu.Lock()
 		if stChanged {
-			if e.settings.AskPermissions && !nextSt.AskPermissions {
-				clear(e.bypassCheckedAt)
-				clear(e.bypassHealedPID)
-				clear(e.bypassHealFailAt)
-			}
+			resetBypass = e.settings.AskPermissions && !nextSt.AskPermissions
 			e.settings = CloneSettings(nextSt)
 			cp := CloneSettings(nextSt)
 			appliedSt = &cp
@@ -272,6 +269,9 @@ func (e *Engine) resolveConfigConfirmAction(ctx context.Context, actionID, resol
 		}
 		onApplied := e.onSettingsApplied
 		e.mu.Unlock()
+		if resetBypass {
+			e.bypass.resetCaches()
+		}
 
 		if appliedSt != nil && onApplied != nil {
 			onApplied(CloneSettings(*appliedSt))

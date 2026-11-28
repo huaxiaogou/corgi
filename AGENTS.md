@@ -11,7 +11,8 @@ Corgi 采用 **「进程内原生 API 大脑（Hub 控制面）+ 多机 PTY Work
 ```text
 cmd/corgi
   ├── internal/cli
-  └── internal/channel/web          (HTTP/SSE/PWA 接入层与静态资源，含 fleet 升级编排)
+  └── internal/channel/web          (HTTP/SSE/PWA 接入层与静态资源)
+        ├── internal/updater        (多机滚动升级、版本校验、中转分发与原地重启)
         └── internal/channel        (Bus：多通道投递、企微流式与焦点路由)
               ├── internal/channel/wecom  (企微 WSS 协议、加解密与卡片拼装)
               └── internal/core           (仅通过 ChannelSink 接口回调，严禁 import channel/*)
@@ -29,7 +30,7 @@ cmd/corgi
 - **依赖克制**：保持零 CGO、单二进制极简依赖（当前 `go.mod` 仅 4 个直接依赖），**禁止引入重型 Agent 框架或非必要第三方 LLM SDK**。
 - **文件粒度与存量棘轮**：
   - 新文件目标 **≤ 400 行**（核心状态机不超过 600 行），按单一职责拆分。
-  - **存量巨文件棘轮**：修改已显著超标的文件（如 `core/workers.go`、`core/worker_gc.go`、`core/engine.go`、`core/loop.go`、`channel/bus.go`、`web/handlers_updates.go`、`web/handlers_super.go`）时，禁止继续塞入新职责——先按子职责拆出独立文件再落地变更。
+  - **存量巨文件棘轮**：修改已显著超标的文件（如 `web/handlers_super.go`）时，禁止继续塞入新职责——先按子职责拆出独立文件再落地变更。
 - **零可变全局状态**：
   - 禁止包级可变全局变量与包级可变测试 hook（缓存、连接、配置、Adapter 会话认领表如 `AgyAdapter` 的 `claimed` 一律挂在结构体实例上），保证 `t.Parallel()` 并发隔离与优雅停机。
   - 仅允许只读包级变量（编译期正则 `regexp.MustCompile`、哨兵错误 `errors.New`、只读常量映射）。

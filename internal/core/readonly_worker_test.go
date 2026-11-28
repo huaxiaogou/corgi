@@ -203,10 +203,10 @@ func TestReadonlyWorkerTieredSandboxLaunchResumeAndBypassGuard(t *testing.T) {
 func TestBypassHealPreservesReadonlyCodexSandbox(t *testing.T) {
 	ctx := context.Background()
 	eng, st, _, dir := newTestAPIEngine(t, nil)
-	eng.bypassCheckInterval = 5 * time.Millisecond
-	eng.bypassExitPoll = 5 * time.Millisecond
-	eng.bypassExitTimeout = 500 * time.Millisecond
-	eng.bypassStartRetryTimeout = 500 * time.Millisecond
+	eng.bypass.checkInterval = 5 * time.Millisecond
+	eng.bypass.exitPoll = 5 * time.Millisecond
+	eng.bypass.exitTimeout = 500 * time.Millisecond
+	eng.bypass.startRetryTimeout = 500 * time.Millisecond
 
 	var (
 		mu          sync.Mutex

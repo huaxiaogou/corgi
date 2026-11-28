@@ -25,6 +25,7 @@ import (
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
 	"github.com/kiperjing/corgi/internal/store"
+	"github.com/kiperjing/corgi/internal/updater"
 )
 
 const cookieName = "corgi_token"
@@ -65,14 +66,8 @@ type Server struct {
 	titleMu sync.Mutex
 	titles  map[string]*machineTitleCache
 
-	updateOnce    sync.Once
-	updateMu      sync.Mutex
-	latestTag     string
-	latestChecked time.Time
-	latestBusy    bool
-	selfUpdateMu  sync.Mutex
-	fleetUpdateMu sync.Mutex
-	fleetUpdate   *fleetUpdateState
+	updaterOnce sync.Once
+	updater     *updater.Manager
 }
 
 // Routes returns the full Hub HTTP handler.

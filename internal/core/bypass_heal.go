@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kiperjing/corgi/internal/model"
@@ -20,30 +21,61 @@ const (
 	defaultBypassStartRetryTimeout = 12 * time.Second
 )
 
+// bypassHealState isolates bypass-permission self-heal tracking behind its own mutex
+// (never nested with Engine.mu).
+type bypassHealState struct {
+	mu                sync.Mutex
+	healing           map[string]string
+	checkedAt         map[string]time.Time
+	healFailAt        map[string]time.Time
+	healedPID         map[string]uint32
+	checkInterval     time.Duration
+	exitPoll          time.Duration
+	exitTimeout       time.Duration
+	startRetryTimeout time.Duration
+}
+
+func newBypassHealState() bypassHealState {
+	return bypassHealState{
+		healing:    map[string]string{},
+		checkedAt:  map[string]time.Time{},
+		healFailAt: map[string]time.Time{},
+		healedPID:  map[string]uint32{},
+	}
+}
+
+func (b *bypassHealState) resetCaches() {
+	b.mu.Lock()
+	clear(b.checkedAt)
+	clear(b.healedPID)
+	clear(b.healFailAt)
+	b.mu.Unlock()
+}
+
 func (e *Engine) getBypassCheckInterval() time.Duration {
-	if e.bypassCheckInterval > 0 {
-		return e.bypassCheckInterval
+	if e.bypass.checkInterval > 0 {
+		return e.bypass.checkInterval
 	}
 	return defaultBypassCheckInterval
 }
 
 func (e *Engine) getBypassExitPoll() time.Duration {
-	if e.bypassExitPoll > 0 {
-		return e.bypassExitPoll
+	if e.bypass.exitPoll > 0 {
+		return e.bypass.exitPoll
 	}
 	return defaultBypassExitPoll
 }
 
 func (e *Engine) getBypassExitTimeout() time.Duration {
-	if e.bypassExitTimeout > 0 {
-		return e.bypassExitTimeout
+	if e.bypass.exitTimeout > 0 {
+		return e.bypass.exitTimeout
 	}
 	return defaultBypassExitTimeout
 }
 
 func (e *Engine) getBypassStartRetryTimeout() time.Duration {
-	if e.bypassStartRetryTimeout > 0 {
-		return e.bypassStartRetryTimeout
+	if e.bypass.startRetryTimeout > 0 {
+		return e.bypass.startRetryTimeout
 	}
 	return defaultBypassStartRetryTimeout
 }
@@ -52,22 +84,22 @@ func (e *Engine) isHealingBypassPane(paneID string) bool {
 	if paneID == "" {
 		return false
 	}
-	e.mu.Lock()
-	_, ok := e.healingBypass[paneID]
-	e.mu.Unlock()
+	e.bypass.mu.Lock()
+	_, ok := e.bypass.healing[paneID]
+	e.bypass.mu.Unlock()
 	return ok
 }
 
 func (e *Engine) isHealingBypassWorker(workerName, paneID string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.bypass.mu.Lock()
+	defer e.bypass.mu.Unlock()
 	if paneID != "" {
-		if _, ok := e.healingBypass[paneID]; ok {
+		if _, ok := e.bypass.healing[paneID]; ok {
 			return true
 		}
 	}
 	if workerName != "" {
-		for _, name := range e.healingBypass {
+		for _, name := range e.bypass.healing {
 			if name == workerName {
 				return true
 			}
@@ -80,10 +112,10 @@ func (e *Engine) invalidateBypassCheck(paneID string) {
 	if paneID == "" {
 		return
 	}
-	e.mu.Lock()
-	delete(e.bypassCheckedAt, paneID)
-	delete(e.bypassHealedPID, paneID)
-	e.mu.Unlock()
+	e.bypass.mu.Lock()
+	delete(e.bypass.checkedAt, paneID)
+	delete(e.bypass.healedPID, paneID)
+	e.bypass.mu.Unlock()
 }
 
 // maybeHealWorkerBypass detects when herdr restored a managed worker pane without its
@@ -113,21 +145,21 @@ func (e *Engine) maybeHealWorkerBypass(ctx context.Context, w *model.Worker, li 
 	}
 	checkEvery := e.getBypassCheckInterval()
 
-	e.mu.Lock()
-	if _, active := e.healingBypass[paneID]; active {
-		e.mu.Unlock()
+	e.bypass.mu.Lock()
+	if _, active := e.bypass.healing[paneID]; active {
+		e.bypass.mu.Unlock()
 		return
 	}
-	if lastFail := e.bypassHealFailAt[paneID]; !lastFail.IsZero() && now.Sub(lastFail) < defaultBypassHealFailBackoff {
-		e.mu.Unlock()
+	if lastFail := e.bypass.healFailAt[paneID]; !lastFail.IsZero() && now.Sub(lastFail) < defaultBypassHealFailBackoff {
+		e.bypass.mu.Unlock()
 		return
 	}
-	if lastCheck := e.bypassCheckedAt[paneID]; !lastCheck.IsZero() && now.Sub(lastCheck) < checkEvery {
-		e.mu.Unlock()
+	if lastCheck := e.bypass.checkedAt[paneID]; !lastCheck.IsZero() && now.Sub(lastCheck) < checkEvery {
+		e.bypass.mu.Unlock()
 		return
 	}
-	e.bypassCheckedAt[paneID] = now
-	e.mu.Unlock()
+	e.bypass.checkedAt[paneID] = now
+	e.bypass.mu.Unlock()
 
 	info, err := e.fleet.ProcessInfo(ctx, paneID)
 	if err != nil {
@@ -147,20 +179,20 @@ func (e *Engine) maybeHealWorkerBypass(ctx context.Context, w *model.Worker, li 
 		}
 	}
 
-	e.mu.Lock()
-	if _, active := e.healingBypass[paneID]; active {
-		e.mu.Unlock()
+	e.bypass.mu.Lock()
+	if _, active := e.bypass.healing[paneID]; active {
+		e.bypass.mu.Unlock()
 		return
 	}
-	if pid != 0 && e.bypassHealedPID[paneID] == pid {
-		e.mu.Unlock()
+	if pid != 0 && e.bypass.healedPID[paneID] == pid {
+		e.bypass.mu.Unlock()
 		return
 	}
-	e.healingBypass[paneID] = w.Name
+	e.bypass.healing[paneID] = w.Name
 	if pid != 0 {
-		e.bypassHealedPID[paneID] = pid
+		e.bypass.healedPID[paneID] = pid
 	}
-	e.mu.Unlock()
+	e.bypass.mu.Unlock()
 
 	wkCopy := *w
 	wkCopy.PaneID = paneID
@@ -170,9 +202,9 @@ func (e *Engine) maybeHealWorkerBypass(ctx context.Context, w *model.Worker, li 
 
 func (e *Engine) healWorkerBypassInPlace(w model.Worker, targetPID uint32) {
 	defer func() {
-		e.mu.Lock()
-		delete(e.healingBypass, w.PaneID)
-		e.mu.Unlock()
+		e.bypass.mu.Lock()
+		delete(e.bypass.healing, w.PaneID)
+		e.bypass.mu.Unlock()
 		e.wake()
 	}()
 
@@ -280,10 +312,10 @@ func (e *Engine) healWorkerBypassInPlace(w model.Worker, targetPID uint32) {
 	e.fleet.RememberName(w.PaneID, w.Name)
 	e.fleet.RememberRun(w.PaneID, modelName, effort)
 
-	e.mu.Lock()
-	e.bypassCheckedAt[w.PaneID] = time.Now()
-	delete(e.bypassHealFailAt, w.PaneID)
-	e.mu.Unlock()
+	e.bypass.mu.Lock()
+	e.bypass.checkedAt[w.PaneID] = time.Now()
+	delete(e.bypass.healFailAt, w.PaneID)
+	e.bypass.mu.Unlock()
 
 	e.logger.Info("healed worker bypass permissions in-place", "worker", w.Name, "kind", w.Kind, "pane", w.PaneID, "session", w.Session)
 	e.addEvent(hctx, w.Thread, fmt.Sprintf("已自动为 %s 恢复免审批模式（herdr 重启后自愈）", w.Name), w.Name, "info")
@@ -336,9 +368,9 @@ func (e *Engine) waitForPaneShell(ctx context.Context, paneID string, timeout ti
 }
 
 func (e *Engine) recordBypassHealFailure(paneID string) {
-	e.mu.Lock()
-	e.bypassHealFailAt[paneID] = time.Now()
-	e.mu.Unlock()
+	e.bypass.mu.Lock()
+	e.bypass.healFailAt[paneID] = time.Now()
+	e.bypass.mu.Unlock()
 }
 
 func isRetryableInPlaceStartErr(err error) bool {
@@ -382,8 +414,10 @@ func (e *Engine) answerRestoredAgyEditDialog(ctx context.Context, w *model.Worke
 
 	e.mu.Lock()
 	e.lastAnswer[w.PaneID] = time.Now()
-	delete(e.bypassCheckedAt, w.PaneID)
 	e.mu.Unlock()
+	e.bypass.mu.Lock()
+	delete(e.bypass.checkedAt, w.PaneID)
+	e.bypass.mu.Unlock()
 
 	key := ap.Choices[0].Key
 	cursor := 1
