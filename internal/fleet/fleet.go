@@ -36,7 +36,7 @@ type Fleet struct {
 	runs     map[string][2]string // pane ID -> [model, effort]
 	seenAt   map[string]time.Time
 	doneAt   map[string]time.Time
-	herdrOK  map[string]bool      // machine ID -> whether last herdr list succeeded
+	herdrOK  map[string]bool // machine ID -> whether last herdr list succeeded
 	onChange func()
 	subs     map[chan struct{}]struct{}
 }

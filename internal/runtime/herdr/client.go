@@ -39,6 +39,7 @@ type Client struct {
 	dial               DialFunc
 	home               string
 	seq                atomic.Uint64
+	readRetryDelay     time.Duration
 	startRetryInterval time.Duration
 	startRetryTimeout  time.Duration
 	customMu           sync.Mutex
@@ -49,66 +50,75 @@ type Client struct {
 
 // NewClient wraps an arbitrary dialer (used for remote yamux tunnel streams).
 func NewClient(dial DialFunc) *Client {
-	return &Client{dial: dial}
+	return &Client{dial: dial, readRetryDelay: defaultHerdrReadRetryDelay}
 }
 
-var (
-	herdrBootWait          = 10 * time.Second
-	herdrReconnectWait     = 4 * time.Second
-	herdrStartCooldown     = 30 * time.Second
-	herdrPollInterval      = 150 * time.Millisecond
-	herdrReadRetryDelay    = 150 * time.Millisecond
-	herdrStartDaemonFn     = startHerdrDaemon
-	unixSocketStatesMu     sync.Mutex
-	unixSocketStates       = map[string]*unixSocketState{}
+const (
+	defaultHerdrBootWait       = 10 * time.Second
+	defaultHerdrReconnectWait  = 4 * time.Second
+	defaultHerdrStartCooldown  = 30 * time.Second
+	defaultHerdrPollInterval   = 150 * time.Millisecond
+	defaultHerdrReadRetryDelay = 150 * time.Millisecond
 )
 
-type unixSocketState struct {
+// UnixDialer coordinates local herdr Unix socket connections, shared boot-wait windows,
+// daemon restart grace periods, and auto-start fallback without package-level mutable state.
+type UnixDialer struct {
+	socketPath    string
+	home          string
+	logger        *slog.Logger
+	bootWait      time.Duration
+	reconnectWait time.Duration
+	startCooldown time.Duration
+	pollInterval  time.Duration
+	startDaemonFn func(home string, logger *slog.Logger) bool
+
 	mu            sync.Mutex
 	everConnected bool
 	bootUntil     time.Time
 	lastStartAt   time.Time
 }
 
-func getUnixSocketState(socketPath string) *unixSocketState {
-	key := filepath.Clean(socketPath)
-	unixSocketStatesMu.Lock()
-	defer unixSocketStatesMu.Unlock()
-	st, ok := unixSocketStates[key]
-	if !ok {
-		st = &unixSocketState{}
-		unixSocketStates[key] = st
+// NewUnixDialer creates an isolated local Unix socket dialer for one Hub/Node instance.
+func NewUnixDialer(socketPath, home string, logger *slog.Logger) *UnixDialer {
+	return &UnixDialer{
+		socketPath:    filepath.Clean(socketPath),
+		home:          home,
+		logger:        logger,
+		bootWait:      defaultHerdrBootWait,
+		reconnectWait: defaultHerdrReconnectWait,
+		startCooldown: defaultHerdrStartCooldown,
+		pollInterval:  defaultHerdrPollInterval,
+		startDaemonFn: startHerdrDaemon,
 	}
-	return st
 }
 
 // NewUnixClient connects to a local herdr Unix socket and automatically starts
 // `herdr server` in the background if the socket is unavailable.
 func NewUnixClient(socketPath, home string, logger *slog.Logger) *Client {
+	ud := NewUnixDialer(socketPath, home, logger)
 	return &Client{
-		home: home,
-		dial: func(ctx context.Context) (net.Conn, error) {
-			return DialUnix(ctx, socketPath, home, logger)
-		},
+		home:           home,
+		readRetryDelay: defaultHerdrReadRetryDelay,
+		dial:           ud.Dial,
 	}
 }
 
-// DialUnix connects to a local herdr Unix socket with shared per-socket boot-wait
+// Dial connects to the configured local herdr Unix socket with shared boot-wait
 // coordination, brief reconnect waiting across daemon restarts, and auto-start fallback.
-func DialUnix(ctx context.Context, socketPath, home string, logger *slog.Logger) (net.Conn, error) {
-	st := getUnixSocketState(socketPath)
+func (u *UnixDialer) Dial(ctx context.Context) (net.Conn, error) {
 	var d net.Dialer
 
-	if c, err := d.DialContext(ctx, "unix", socketPath); err == nil {
-		st.markConnected()
+	if c, err := d.DialContext(ctx, "unix", u.socketPath); err == nil {
+		u.markConnected()
 		return c, nil
 	} else {
 		firstErr := err
 		// If this socket was previously connected, allow a short grace window for an in-flight
 		// daemon restart before attempting to spawn a new herdr server.
-		if st.wasConnected() {
-			if c2, ok := pollUnixDial(ctx, &d, socketPath, time.Now().Add(herdrReconnectWait)); ok {
-				st.markConnected()
+		if u.wasConnected() {
+			if c2, ok := u.pollUnixDial(ctx, &d, time.Now().Add(u.effectiveReconnectWait())); ok {
+				u.markConnected()
 				return c2, nil
 			}
 			if ctx.Err() != nil {
@@ -117,30 +127,51 @@ func DialUnix(ctx context.Context, socketPath, home string, logger *slog.Logger)
 		}
 
 		// Share any active boot-wait window across concurrent callers, or initiate a fresh start.
-		bootUntil, started := st.ensureBootWindow(home, logger)
+		bootUntil, started := u.ensureBootWindow()
 		if !bootUntil.IsZero() && time.Now().Before(bootUntil) {
-			if c2, ok := pollUnixDial(ctx, &d, socketPath, bootUntil); ok {
-				st.markConnected()
+			if c2, ok := u.pollUnixDial(ctx, &d, bootUntil); ok {
+				u.markConnected()
 				return c2, nil
 			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			if started {
-				return nil, fmt.Errorf("herdr server did not become ready at %s: %w", socketPath, firstErr)
+				return nil, fmt.Errorf("herdr server did not become ready at %s: %w", u.socketPath, firstErr)
 			}
 		}
-		return nil, fmt.Errorf("herdr socket unavailable (%s): %w", socketPath, firstErr)
+		return nil, fmt.Errorf("herdr socket unavailable (%s): %w", u.socketPath, firstErr)
 	}
 }
 
-func pollUnixDial(ctx context.Context, d *net.Dialer, socketPath string, until time.Time) (net.Conn, bool) {
-	poll := herdrPollInterval
+func (u *UnixDialer) effectiveBootWait() time.Duration {
+	if u.bootWait > 0 {
+		return u.bootWait
+	}
+	return defaultHerdrBootWait
+}
+
+func (u *UnixDialer) effectiveReconnectWait() time.Duration {
+	if u.reconnectWait > 0 {
+		return u.reconnectWait
+	}
+	return defaultHerdrReconnectWait
+}
+
+func (u *UnixDialer) effectiveStartCooldown() time.Duration {
+	if u.startCooldown > 0 {
+		return u.startCooldown
+	}
+	return defaultHerdrStartCooldown
+}
+
+func (u *UnixDialer) pollUnixDial(ctx context.Context, d *net.Dialer, until time.Time) (net.Conn, bool) {
+	poll := u.pollInterval
 	if poll <= 0 {
 		poll = 50 * time.Millisecond
 	}
 	for {
-		if c, err := d.DialContext(ctx, "unix", socketPath); err == nil {
+		if c, err := d.DialContext(ctx, "unix", u.socketPath); err == nil {
 			return c, true
 		}
 		rem := time.Until(until)
@@ -161,47 +192,51 @@ func pollUnixDial(ctx context.Context, d *net.Dialer, socketPath string, until t
 	}
 }
 
-func (s *unixSocketState) markConnected() {
-	s.mu.Lock()
-	s.everConnected = true
-	s.bootUntil = time.Time{}
-	s.lastStartAt = time.Time{} // reset cooldown once healthy so a later restart recovers immediately
-	s.mu.Unlock()
+func (u *UnixDialer) markConnected() {
+	u.mu.Lock()
+	u.everConnected = true
+	u.bootUntil = time.Time{}
+	u.lastStartAt = time.Time{} // reset cooldown once healthy so a later restart recovers immediately
+	u.mu.Unlock()
 }
 
-func (s *unixSocketState) wasConnected() bool {
-	s.mu.Lock()
-	ok := s.everConnected
-	s.mu.Unlock()
+func (u *UnixDialer) wasConnected() bool {
+	u.mu.Lock()
+	ok := u.everConnected
+	u.mu.Unlock()
 	return ok
 }
 
-func (s *unixSocketState) ensureBootWindow(home string, logger *slog.Logger) (bootUntil time.Time, started bool) {
+func (u *UnixDialer) ensureBootWindow() (bootUntil time.Time, started bool) {
 	now := time.Now()
-	s.mu.Lock()
-	if !s.bootUntil.IsZero() && now.Before(s.bootUntil) {
-		u := s.bootUntil
-		s.mu.Unlock()
-		return u, false
+	u.mu.Lock()
+	if !u.bootUntil.IsZero() && now.Before(u.bootUntil) {
+		until := u.bootUntil
+		u.mu.Unlock()
+		return until, false
 	}
-	if !s.lastStartAt.IsZero() && now.Sub(s.lastStartAt) < herdrStartCooldown {
-		s.mu.Unlock()
+	if !u.lastStartAt.IsZero() && now.Sub(u.lastStartAt) < u.effectiveStartCooldown() {
+		u.mu.Unlock()
 		return time.Time{}, false
 	}
-	s.lastStartAt = now
-	s.bootUntil = now.Add(herdrBootWait)
-	u := s.bootUntil
-	s.mu.Unlock()
+	u.lastStartAt = now
+	u.bootUntil = now.Add(u.effectiveBootWait())
+	until := u.bootUntil
+	startFn := u.startDaemonFn
+	u.mu.Unlock()
 
-	if !herdrStartDaemonFn(home, logger) {
-		s.mu.Lock()
-		if s.bootUntil.Equal(u) {
-			s.bootUntil = time.Time{}
+	if startFn == nil {
+		startFn = startHerdrDaemon
+	}
+	if !startFn(u.home, u.logger) {
+		u.mu.Lock()
+		if u.bootUntil.Equal(until) {
+			u.bootUntil = time.Time{}
 		}
-		s.mu.Unlock()
+		u.mu.Unlock()
 		return time.Time{}, false
 	}
-	return u, true
+	return until, true
 }
 
 func startHerdrDaemon(home string, logger *slog.Logger) bool {
@@ -287,7 +322,7 @@ func (c *Client) CallRaw(ctx context.Context, method string, params any) (json.R
 	if err == nil || !isIdempotentReadMethod(method) || !isRetryableTransportErr(err) || ctx.Err() != nil {
 		return raw, err
 	}
-	delay := herdrReadRetryDelay
+	delay := c.readRetryDelay
 	if delay > 0 {
 		timer := time.NewTimer(delay)
 		select {

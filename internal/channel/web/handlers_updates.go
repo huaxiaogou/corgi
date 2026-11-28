@@ -24,12 +24,9 @@ import (
 )
 
 const (
-	defaultReleaseRepoURL = "https://github.com/huaxiaogou/corgi"
-	relayUpdateTagHeader  = "X-Corgi-Update-Tag"
-	relayUpdateSHAHeader  = "X-Corgi-Update-SHA256"
-)
-
-var (
+	defaultReleaseRepoURL      = "https://github.com/huaxiaogou/corgi"
+	relayUpdateTagHeader       = "X-Corgi-Update-Tag"
+	relayUpdateSHAHeader       = "X-Corgi-Update-SHA256"
 	selfUpdateTimeout          = 2*time.Minute + 30*time.Second
 	remoteUpdateForwardTimeout = 2*time.Minute + 50*time.Second
 	updateLatestAttemptTimeout = 20 * time.Second
@@ -37,7 +34,7 @@ var (
 	updateBinAttemptTimeout    = 2 * time.Minute
 	updateIdleReadTimeout      = 25 * time.Second
 	updateMaxAttempts          = 3
-	updateRetryBaseDelay       = time.Second
+	defaultUpdateRetryBase     = time.Second
 	maxUpdateBinarySize        = int64(128 << 20)
 )
 
@@ -671,8 +668,12 @@ func (r *idleTimeoutReader) Close() error {
 	return r.rc.Close()
 }
 
-func sleepBackoff(ctx context.Context, attempt int) error {
-	delay := updateRetryBaseDelay << attempt
+func (s *Server) sleepBackoff(ctx context.Context, attempt int) error {
+	base := s.UpdateRetryBaseDelay
+	if base <= 0 {
+		base = defaultUpdateRetryBase
+	}
+	delay := base << attempt
 	if delay <= 0 {
 		return nil
 	}
@@ -713,7 +714,7 @@ func (s *Server) fetchLatestTagErr(parentCtx context.Context) (string, bool, err
 		if !forceIPv4 && !usedProxy {
 			forceIPv4 = true
 		}
-		if berr := sleepBackoff(parentCtx, attempt); berr != nil {
+		if berr := s.sleepBackoff(parentCtx, attempt); berr != nil {
 			lastErr = berr
 			break
 		}
@@ -806,7 +807,7 @@ func (s *Server) downloadChecksums(parentCtx context.Context, tag, asset string,
 		if !forceIPv4 && !usedProxy {
 			forceIPv4 = true
 		}
-		if berr := sleepBackoff(parentCtx, attempt); berr != nil {
+		if berr := s.sleepBackoff(parentCtx, attempt); berr != nil {
 			lastErr = berr
 			break
 		}
@@ -880,7 +881,7 @@ func (s *Server) downloadAssetToDir(parentCtx context.Context, tag, asset, dir, 
 		if !forceIPv4 && !usedProxy {
 			forceIPv4 = true
 		}
-		if berr := sleepBackoff(parentCtx, attempt); berr != nil {
+		if berr := s.sleepBackoff(parentCtx, attempt); berr != nil {
 			lastErr = berr
 			break
 		}

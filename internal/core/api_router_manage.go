@@ -179,3 +179,73 @@ func (e *Engine) toolManageTimer(ctx context.Context, turn *apiRouterTurn, trig 
 		return toolErr("manage_timer action 必须是 list、add 或 remove")
 	}
 }
+
+func (e *Engine) pushToolProgress(ctx, bg context.Context, turn *apiRouterTurn, tc LLMToolCall, lines *[]string) {
+	line := strings.TrimSpace(e.formatAPIToolProgress(ctx, turn.thread, tc))
+	if line == "" {
+		return
+	}
+	if len(*lines) == 0 || (*lines)[len(*lines)-1] != "• "+line {
+		*lines = append(*lines, "• "+line)
+		if len(*lines) > 6 {
+			*lines = (*lines)[len(*lines)-6:]
+		}
+	}
+	e.mu.Lock()
+	sink := e.sink
+	e.mu.Unlock()
+	sink.OnAPIRouterProgress(bg, turn.thread, turn.triggerID, strings.Join(*lines, "\n"))
+}
+
+func (e *Engine) formatAPIToolProgress(ctx context.Context, thread string, tc LLMToolCall) string {
+	staticLabels := map[string]string{
+		"reply_user": "正在整理回复…", "no_action": "正在完成核对…", "manage_config": "正在处理配置…",
+		"manage_timer": "正在更新定时提醒…", "save_memory": "正在更新记忆笔记…",
+	}
+	if label, ok := staticLabels[tc.Function.Name]; ok {
+		return label
+	}
+	var raw map[string]any
+	_ = json.Unmarshal([]byte(tc.Function.Arguments), &raw)
+	s := func(k string) string { v, _ := raw[k].(string); return strings.TrimSpace(v) }
+	lbl := func(wiID, wkName string) string {
+		if _, errMsg := e.requireThreadWorkItem(ctx, wiID, thread); wiID != "" && errMsg != "" {
+			wiID = ""
+		}
+		if _, errMsg := e.requireThreadWorker(ctx, wkName, thread); wkName != "" && errMsg != "" {
+			wkName = ""
+		}
+		t := e.workItemTitleFor(ctx, wiID, wkName)
+		return condStr(t != "", "「"+oneLineClip(t, 28)+"」", "")
+	}
+	switch tc.Function.Name {
+	case "read_detail":
+		switch s("kind") {
+		case "worker":
+			return "正在查看" + lbl("", s("target")) + "最新进展…"
+		case "work_item":
+			return "正在查阅" + lbl(s("target"), "") + "事项详情…"
+		case "note":
+			return "正在查阅记忆笔记…"
+		case "artifact":
+			return "正在查阅交付快照全文…"
+		case "history":
+			return "正在检索历史对话记录…"
+		}
+		return "正在查阅任务详情…"
+	case "dispatch_work":
+		m := orStr(lbl(s("work_id"), s("resume")), condStr(s("title") != "", "「"+oneLineClip(s("title"), 28)+"」", ""))
+		return condStr(s("resume") != "", "正在续接推进", "正在安排推进") + orStr(m, "执行任务") + "…"
+	case "steer_worker":
+		return "正在向" + orStr(lbl(s("work_id"), s("worker")), "任务") + "发送跟进指令…"
+	case "manage_work":
+		switch s("action") {
+		case "stop_worker":
+			return "正在停止" + lbl("", s("target")) + "的执行进程…"
+		case "close_work":
+			return "正在关闭事项" + lbl(s("target"), "") + "…"
+		}
+		return "正在更新事项状态…"
+	}
+	return "正在处理中…"
+}

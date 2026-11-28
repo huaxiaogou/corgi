@@ -114,7 +114,7 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 		return
 	}
 	// Never interrupt Router while it is actively working or already handling queued events.
-	if li, ok := live[model.RouterName]; ok && li.status == "working" {
+	if e.isRouterWorking(ctx) {
 		return
 	}
 	if queued, err := e.store.ListQueuedTriggers(ctx); err == nil {

@@ -422,3 +422,61 @@ func TestMorningDigestWorkItemCenteredAndHibernatedWorkers(t *testing.T) {
 		t.Fatalf("expected same-day patrol to skip closed WorkItem workers, got %+v", trs2)
 	}
 }
+
+func TestIdlePatrolSkipsWhenNativeAPIRouterWorking(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"codex"})
+	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	loc := time.FixedZone("CST", 8*3600)
+	day := time.Date(2026, 11, 25, 17, 0, 0, 0, loc)
+	_ = st.SetKV(ctx, kvLastMorningDigestDay, day.Format("2006-01-02"))
+
+	idleAt := day
+	_ = st.UpsertWorker(ctx, &model.Worker{
+		Name:       "codex-idle",
+		Kind:       "codex",
+		Cwd:        "/root",
+		Thread:     model.MainThread,
+		PaneID:     "wM:p1",
+		CreatedBy:  "corgi",
+		CreatedAt:  day.Add(-10 * time.Minute),
+		Status:     "idle",
+		IdleSince:  &idleAt,
+		LastReport: "等待确认",
+	})
+	// Note: live map has NO model.RouterName pane in native API mode!
+	live := map[string]liveInfo{
+		"codex-idle": {pane: "wM:p1", status: "idle", ready: true, kind: "codex"},
+	}
+
+	// Simulate an active in-process native API Router turn (trigger already acked by mutating tool).
+	eng.mu.Lock()
+	eng.router.turn = &apiRouterTurn{thread: model.MainThread, triggerID: "t_active"}
+	eng.mu.Unlock()
+
+	eng.runIdlePatrol(ctx, live, day.Add(45*time.Minute))
+	if trs, _ := st.ListQueuedTriggers(ctx); len(trs) != 0 {
+		t.Fatalf("expected idle patrol skipped while native API router turn is active, got %d", len(trs))
+	}
+
+	// Once turn completes, patrol fires normally.
+	eng.mu.Lock()
+	eng.router.turn = nil
+	eng.mu.Unlock()
+
+	eng.runIdlePatrol(ctx, live, day.Add(46*time.Minute))
+	if trs, _ := st.ListQueuedTriggers(ctx); len(trs) != 1 {
+		t.Fatalf("expected idle patrol to fire once native API router is idle, got %d", len(trs))
+	}
+}

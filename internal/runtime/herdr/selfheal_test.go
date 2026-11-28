@@ -16,10 +16,7 @@ import (
 )
 
 func TestCallRawRetriesOnlyIdempotentReads(t *testing.T) {
-	origDelay := herdrReadRetryDelay
-	herdrReadRetryDelay = 5 * time.Millisecond
-	defer func() { herdrReadRetryDelay = origDelay }()
-
+	t.Parallel()
 	// 1. Idempotent read (agent.list) drops EOF on first attempt, succeeds on retry.
 	var readCalls atomic.Int32
 	readClient := NewClient(func(ctx context.Context) (net.Conn, error) {
@@ -45,6 +42,7 @@ func TestCallRawRetriesOnlyIdempotentReads(t *testing.T) {
 		}()
 		return c1, nil
 	})
+	readClient.readRetryDelay = 5 * time.Millisecond
 	if _, err := readClient.Agents(context.Background()); err != nil {
 		t.Fatalf("expected idempotent agent.list to recover on retry, got %v", err)
 	}
@@ -63,6 +61,7 @@ func TestCallRawRetriesOnlyIdempotentReads(t *testing.T) {
 		}()
 		return c1, nil
 	})
+	writeClient.readRetryDelay = 5 * time.Millisecond
 	if err := writeClient.SendKeys(context.Background(), "w1:p1", "enter"); err == nil {
 		t.Fatal("expected mutating pane.send_keys EOF to return error without retry")
 	}
@@ -72,24 +71,7 @@ func TestCallRawRetriesOnlyIdempotentReads(t *testing.T) {
 }
 
 func TestDialUnixSharesBootWindowAndReconnectGrace(t *testing.T) {
-	origBoot := herdrBootWait
-	origReconn := herdrReconnectWait
-	origCooldown := herdrStartCooldown
-	origPoll := herdrPollInterval
-	origStart := herdrStartDaemonFn
-	defer func() {
-		herdrBootWait = origBoot
-		herdrReconnectWait = origReconn
-		herdrStartCooldown = origCooldown
-		herdrPollInterval = origPoll
-		herdrStartDaemonFn = origStart
-	}()
-
-	herdrBootWait = 800 * time.Millisecond
-	herdrReconnectWait = 500 * time.Millisecond
-	herdrStartCooldown = 30 * time.Second
-	herdrPollInterval = 15 * time.Millisecond
-
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("/tmp", "corgi-herdr-test-")
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +102,12 @@ func TestDialUnixSharesBootWindowAndReconnectGrace(t *testing.T) {
 		}()
 	}
 
-	herdrStartDaemonFn = func(_ string, _ *slog.Logger) bool {
+	ud := NewUnixDialer(sock, tmpDir, nil)
+	ud.bootWait = 800 * time.Millisecond
+	ud.reconnectWait = 500 * time.Millisecond
+	ud.startCooldown = 30 * time.Second
+	ud.pollInterval = 15 * time.Millisecond
+	ud.startDaemonFn = func(_ string, _ *slog.Logger) bool {
 		starts.Add(1)
 		startListenerAfter(70 * time.Millisecond)
 		return true
@@ -133,7 +120,7 @@ func TestDialUnixSharesBootWindowAndReconnectGrace(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c, err := DialUnix(context.Background(), sock, tmpDir, nil)
+			c, err := ud.Dial(context.Background())
 			if err != nil {
 				errs <- err
 				return
@@ -144,7 +131,7 @@ func TestDialUnixSharesBootWindowAndReconnectGrace(t *testing.T) {
 	wg.Wait()
 	close(errs)
 	for err := range errs {
-		t.Fatalf("concurrent DialUnix failed: %v", err)
+		t.Fatalf("concurrent Dial failed: %v", err)
 	}
 	if got := starts.Load(); got != 1 {
 		t.Fatalf("expected exactly 1 shared daemon start, got %d", got)
@@ -159,7 +146,7 @@ func TestDialUnixSharesBootWindowAndReconnectGrace(t *testing.T) {
 	_ = os.Remove(sock)
 	startListenerAfter(60 * time.Millisecond)
 
-	c2, err := DialUnix(context.Background(), sock, tmpDir, nil)
+	c2, err := ud.Dial(context.Background())
 	if err != nil {
 		t.Fatalf("expected reconnect within grace window, got %v", err)
 	}

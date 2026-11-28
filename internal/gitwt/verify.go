@@ -19,15 +19,19 @@ const (
 	maxReviewOutRunes    = 4000
 )
 
+// ReviewExecFunc runs a read-only cross-model diff review (injectable in tests).
+type ReviewExecFunc func(ctx context.Context, home, dir, preferred, brief string, res VerifyResult, diffText string) (reviewer string, passed bool, summary string, err error)
+
 // VerifyRequest configures a stateless workspace check + optional read-only cross-model review.
 type VerifyRequest struct {
-	Dir         string `json:"dir"`
-	Cmd         string `json:"cmd,omitempty"`
-	Review      bool   `json:"review,omitempty"`
-	Reviewer    string `json:"reviewer,omitempty"` // codex | claude (default: auto)
-	Brief       string `json:"brief,omitempty"`
-	BaseCommit  string `json:"base_commit,omitempty"`
-	SkipIfClean bool   `json:"skip_if_clean,omitempty"`
+	Dir         string         `json:"dir"`
+	Cmd         string         `json:"cmd,omitempty"`
+	Review      bool           `json:"review,omitempty"`
+	Reviewer    string         `json:"reviewer,omitempty"` // codex | claude (default: auto)
+	Brief       string         `json:"brief,omitempty"`
+	BaseCommit  string         `json:"base_commit,omitempty"`
+	SkipIfClean bool           `json:"skip_if_clean,omitempty"`
+	ReviewExec  ReviewExecFunc `json:"-"`
 }
 
 // VerifyCheck records one executed build/test/lint command.
@@ -58,8 +62,6 @@ type VerifyResult struct {
 	ReviewPassed  bool          `json:"review_passed,omitempty"`
 	ReviewSummary string        `json:"review_summary,omitempty"`
 }
-
-var reviewExecFn = runReadOnlyReview
 
 // Verify runs git inspection, auto-detected (or explicit) repo checks, and an optional
 // read-only cross-model diff review inside dir.
@@ -141,7 +143,11 @@ func Verify(ctx context.Context, home string, req VerifyRequest) (VerifyResult, 
 		if res.IsGit {
 			diffText = collectReviewDiff(ctx, workRoot)
 		}
-		reviewer, passed, summary, rErr := reviewExecFn(ctx, home, workRoot, req.Reviewer, req.Brief, res, diffText)
+		execReview := req.ReviewExec
+		if execReview == nil {
+			execReview = runReadOnlyReview
+		}
+		reviewer, passed, summary, rErr := execReview(ctx, home, workRoot, req.Reviewer, req.Brief, res, diffText)
 		res.ReviewRun = true
 		res.Reviewer = reviewer
 		if rErr != nil {

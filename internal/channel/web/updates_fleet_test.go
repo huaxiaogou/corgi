@@ -46,12 +46,9 @@ func TestUpdateRouteSeparationAndExactMachineIDLookup(t *testing.T) {
 }
 
 func TestHubRelayedNodeUpdateAndTamperProtection(t *testing.T) {
-	oldBase := updateRetryBaseDelay
-	updateRetryBaseDelay = time.Millisecond
-	defer func() { updateRetryBaseDelay = oldBase }()
-
 	srv, master := newTestServer(t)
 	srv.Version = "v0.1.40"
+	srv.UpdateRetryBaseDelay = time.Millisecond
 
 	assetName := "corgi-" + runtime.GOOS + "-" + runtime.GOARCH
 	fakeBin := []byte("#!/bin/sh\necho \"corgi v0.1.41\"\n")
@@ -167,17 +164,10 @@ func TestHubRelayedNodeUpdateAndTamperProtection(t *testing.T) {
 }
 
 func TestFleetUpdateNodesFirstPartialFailureAndRetry(t *testing.T) {
-	oldWait := nodeReconnectTimeout
-	oldDelay := updateRetryBaseDelay
-	nodeReconnectTimeout = 2 * time.Second
-	updateRetryBaseDelay = time.Millisecond
-	defer func() {
-		nodeReconnectTimeout = oldWait
-		updateRetryBaseDelay = oldDelay
-	}()
-
 	srv, master := newTestServer(t)
 	srv.Version = "v0.1.40"
+	srv.NodeReconnectTimeout = 2 * time.Second
+	srv.UpdateRetryBaseDelay = time.Millisecond
 
 	assetName := "corgi-" + runtime.GOOS + "-" + runtime.GOARCH
 	fakeBin := []byte("#!/bin/sh\necho \"corgi v0.1.41\"\n")
@@ -294,11 +284,8 @@ func TestTryAutoUpdateEnforces24HourAttemptCap(t *testing.T) {
 	defer ghSrv.Close()
 	srv.ReleaseRepoURL = ghSrv.URL
 	srv.ExecutablePath = filepath.Join(t.TempDir(), "corgi")
+	srv.UpdateRetryBaseDelay = time.Millisecond
 	_ = os.WriteFile(srv.ExecutablePath, []byte("old"), 0o755)
-
-	oldDelay := updateRetryBaseDelay
-	updateRetryBaseDelay = time.Millisecond
-	defer func() { updateRetryBaseDelay = oldDelay }()
 
 	// First call records attempt and fails (404 on SHA256SUMS.txt).
 	srv.TryAutoUpdate(ctx)

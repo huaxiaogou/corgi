@@ -285,16 +285,17 @@ func RunNodeSession(ctx context.Context, opts NodeSessionOpts) error {
 	if opts.Logger != nil {
 		opts.Logger.Info("connected to hub", "hub", opts.Config.Hub, "name", opts.Name)
 	}
+	herdrDialer := herdr.NewUnixDialer(opts.HerdrSocket, opts.Home, opts.Logger)
 	for {
 		st, err := sess.Accept()
 		if err != nil {
 			return err
 		}
-		go handleNodeStream(ctx, st, opts.HerdrSocket, opts.Home, opts.Logger, httpCh)
+		go handleNodeStream(ctx, st, herdrDialer, httpCh)
 	}
 }
 
-func handleNodeStream(ctx context.Context, st net.Conn, herdrSocket, home string, logger *slog.Logger, httpCh chan<- net.Conn) {
+func handleNodeStream(ctx context.Context, st net.Conn, herdrDialer *herdr.UnixDialer, httpCh chan<- net.Conn) {
 	br := bufio.NewReader(st)
 	kind, err := br.ReadString('\n')
 	if err != nil {
@@ -312,7 +313,7 @@ func handleNodeStream(ctx context.Context, st net.Conn, herdrSocket, home string
 	case "herdr":
 		defer wrapped.Close()
 		dialCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-		uconn, err := herdr.DialUnix(dialCtx, herdrSocket, home, logger)
+		uconn, err := herdrDialer.Dial(dialCtx)
 		cancel()
 		if err != nil {
 			return

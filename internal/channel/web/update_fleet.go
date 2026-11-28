@@ -16,12 +16,18 @@ import (
 	"github.com/kiperjing/corgi/internal/model"
 )
 
-const autoUpdateAttemptsKVKey = "auto_update_attempts"
-
-var (
-	nodeReconnectTimeout = 25 * time.Second
-	autoUpdateRetryCap   = 24 * time.Hour
+const (
+	autoUpdateAttemptsKVKey     = "auto_update_attempts"
+	defaultNodeReconnectTimeout = 25 * time.Second
+	autoUpdateRetryCap          = 24 * time.Hour
 )
+
+func (s *Server) effectiveNodeReconnectTimeout() time.Duration {
+	if s.NodeReconnectTimeout > 0 {
+		return s.NodeReconnectTimeout
+	}
+	return defaultNodeReconnectTimeout
+}
 
 type updateTarget struct {
 	ID    string
@@ -392,11 +398,12 @@ func (s *Server) runFleetRemoteStep(ctx context.Context, st *fleetUpdateState, t
 	res, status, err := s.updateRemoteNode(stepCtx, m, hc, target, cache)
 	cancel()
 
+	reconnectWait := s.effectiveNodeReconnectTimeout()
 	if err != nil {
 		// On transport EOF/timeout/connection drop (status == 0), the Node may already have
 		// restarted onto target before replying; reconcile briefly before declaring failure.
 		if status == 0 {
-			reconcileWait := min(8*time.Second, nodeReconnectTimeout)
+			reconcileWait := min(8*time.Second, reconnectWait)
 			if confirmed := s.waitNodeConfirmVersion(ctx, tgt.ID, target, ch, reconcileWait); confirmed {
 				return nil
 			}
@@ -414,9 +421,9 @@ func (s *Server) runFleetRemoteStep(ctx context.Context, st *fleetUpdateState, t
 	s.fleetUpdateMu.Unlock()
 	s.notifyFleetUpdateChanged()
 
-	if !s.waitNodeConfirmVersion(ctx, tgt.ID, target, ch, nodeReconnectTimeout) {
+	if !s.waitNodeConfirmVersion(ctx, tgt.ID, target, ch, reconnectWait) {
 		return fmt.Errorf("节点 %s 已下发升级，但在 %ds 内未以 %s 重新上线，已暂停后续 Hub 升级（请稍后刷新或重试）",
-			tgt.Name, int(nodeReconnectTimeout.Seconds()), target)
+			tgt.Name, int(reconnectWait.Seconds()), target)
 	}
 	return nil
 }

@@ -16,15 +16,15 @@ import (
 
 const (
 	maxAPIMemoryRunes       = 6000
-	maxAPIHistoryRunes      = 9000
+	maxAPIHistoryRunes      = 15000
 	maxAPICardPreviewRunes  = 160
 	maxAPIImageBytes        = 4 << 20
 	maxAPIImagesPerTurn     = 4
 	apiRouterSystemPromptV1 = `你是 Corgi —— 运行在用户 Hub 进程内的 Super-Agent 大脑。你负责理解意图、快速查证、编排多机 Coding CLI Workers，并向用户简洁准确地汇报。
 
 核心工作原则：
-1. 以事项（WorkItem）为中心：汇报进展、交付成果、回答现状或发决策卡一律以「事项名称」和结论/决策点为主语；严禁将 wi/agy/codex/分支名当作主语甩给用户；严禁把清理已关闭事项或闲置 worktree 包装成待拍板卡片；正文严禁泄露 ok:true、reply_user、no_action 或 [e1234] 等内部协议字眼。
-2. 简洁、先查后派：常规回复尽量简短；列举 2 项以上用 "- " 列表分条。查 Worker 进展、工作项、Trigger、Action 或记忆笔记用 read_detail；查仓库代码或 Git 请派只读 Worker（dispatch_work mode="readonly"）。
+1. 以事项（WorkItem）为中心：汇报进展、交付成果、回答现状或发决策卡一律以「事项名称」和结论/决策点为主语；严禁将 wi/agy/codex/分支名当作主语甩给用户；严禁把清理已关闭事项或闲置 worktree 包装成待拍板卡片；正文严禁泄露 ok:true、reply_user、no_action、[e1234] 或 art_xxx 等内部协议字眼。
+2. 简洁、先查后派：常规回复尽量简短；列举 2 项以上用 "- " 列表分条。查 Worker 进展、工作项、Trigger、Action、记忆笔记、已交付文本快照（artifact）或按关键词检索更早同线程对话（history）用 read_detail；查仓库代码或 Git 请派只读 Worker（dispatch_work mode="readonly"）。
 3. 精准使用 reply_user：普通问答仅填 text；交付成果传 files（必要时带 machine）或 re_id+worker 自动附报告快照；需拍板时传简短 title（≤20字）、1–2 句精炼正文（≤100字）和 2–4 个 ≤14 字 choices；轻量已读提醒用 check=true。
 4. 防越权边界：人类回合直接明确提出改代码并跑测试的新需求可直接 dispatch_work(mode="implement")（强制隔离 worktree）；指向已有原型/只读工作项时保持 prototype/readonly，转入源码修改（implement）必须先调用 reply_user 发含 choices 的决策卡并待人类点选拍板；后台非人类事件严禁改代码、发布、续派或追加指令，只能新派 readonly Worker 或发决策卡；合入/推送/部署上线必须先调用 reply_user 发含 choices 的决策卡，待人类点选拍板后在拍板回合开启 allow_release=true。
 5. 静默边界：response_mode=must_reply 必须调用 reply_user；仅 response_mode=optional_notify 且无需打扰用户时调用 no_action(reason)。
@@ -157,7 +157,7 @@ func (e *Engine) buildThreadHistoryText(ctx context.Context, thread string, trig
 	if e.store == nil {
 		return ""
 	}
-	entries, _, err := e.store.ListEntries(ctx, thread, 32)
+	entries, _, err := e.store.ListEntries(ctx, thread, 40)
 	if err != nil || len(entries) == 0 {
 		return ""
 	}
@@ -172,20 +172,24 @@ func (e *Engine) buildThreadHistoryText(ctx context.Context, thread string, trig
 			if en.Re != nil && strings.TrimSpace(en.Re.Text) != "" {
 				txt = fmt.Sprintf("[引用 %s: %s] %s", en.Re.Who, oneLineClip(en.Re.Text, 80), txt)
 			}
-			lines = append(lines, fmt.Sprintf("- [%s 用户] %s", ts, clipMultiline(txt, 600)))
+			lines = append(lines, fmt.Sprintf("- [%s 用户] %s", ts, clipMultiline(txt, 800)))
 		case "corgi":
 			extra := ""
 			if len(en.Artifacts) > 0 {
 				names := make([]string, len(en.Artifacts))
 				for i, a := range en.Artifacts {
-					names[i] = a.Name
+					if a.ID != "" && (a.Kind == "markdown" || a.Kind == "text" || a.Kind == "html") {
+						names[i] = a.Name + "(" + a.ID + ")"
+					} else {
+						names[i] = a.Name
+					}
 				}
 				extra += " [已交付附件: " + strings.Join(names, ", ") + "]"
 			}
 			if act := resolved[en.ActionID]; act != nil {
 				extra += fmt.Sprintf(" [决策卡已决(%s): %s]", act.ResolvedBy, oneLineClip(act.ChosenLabel, 80))
 			}
-			lines = append(lines, fmt.Sprintf("- [%s Corgi已回复] %s%s", ts, clipMultiline(txt, 700), extra))
+			lines = append(lines, fmt.Sprintf("- [%s Corgi已回复] %s%s", ts, clipMultiline(txt, 1200), extra))
 		case "event":
 			if !strings.HasPrefix(txt, "已自动休眠 ") && !strings.HasPrefix(txt, "已停止 ") && !strings.HasSuffix(txt, " 完成了一轮") && !strings.HasSuffix(txt, " 完成了一轮直聊") {
 				lines = append(lines, fmt.Sprintf("- [%s 系统事件] %s", ts, oneLineClip(txt, 180)))

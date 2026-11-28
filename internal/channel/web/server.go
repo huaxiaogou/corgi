@@ -31,25 +31,27 @@ const cookieName = "corgi_token"
 
 // Server serves both the Hub HTTP/SSE/Web API and (when NodeOnly=true) the tunneled Node API.
 type Server struct {
-	Store          *store.Store
-	Engine         *core.Engine
-	Bus            *channel.Bus
-	WeCom          *wecom.Client
-	Fleet          *fleet.Fleet
-	Auth           *fleet.AuthManager
-	Agents         *agent.Registry
-	StaticFS       fs.FS
-	CorgiDir       string
-	Home           string
-	Version        string
-	Port           int
-	PublicURLs     []string
-	NodeOnly       bool
-	Logger         *slog.Logger
-	ServerCtx      context.Context
-	ReleaseRepoURL string
-	ExecutablePath string
-	ExecFn         func(exe string)
+	Store                *store.Store
+	Engine               *core.Engine
+	Bus                  *channel.Bus
+	WeCom                *wecom.Client
+	Fleet                *fleet.Fleet
+	Auth                 *fleet.AuthManager
+	Agents               *agent.Registry
+	StaticFS             fs.FS
+	CorgiDir             string
+	Home                 string
+	Version              string
+	Port                 int
+	PublicURLs           []string
+	NodeOnly             bool
+	Logger               *slog.Logger
+	ServerCtx            context.Context
+	ReleaseRepoURL       string
+	ExecutablePath       string
+	ExecFn               func(exe string)
+	UpdateRetryBaseDelay time.Duration
+	NodeReconnectTimeout time.Duration
 
 	buildOnce    sync.Once
 	buildTag     string

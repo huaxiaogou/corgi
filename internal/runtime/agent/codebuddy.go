@@ -414,14 +414,14 @@ func (c *CodeBuddyAdapter) ReadContextUsage(transcriptPath string, defaultWindow
 		stepIDs      = map[string]struct{}{}
 	)
 	type usageFields struct {
-		TotalTokens      int `json:"totalTokens"`
-		InputTokens      int `json:"inputTokens"`
-		OutputTokens     int `json:"outputTokens"`
-		Total            int `json:"total_tokens"`
-		Input            int `json:"input_tokens"`
-		Output           int `json:"output_tokens"`
-		Prompt           int `json:"prompt_tokens"`
-		Completion       int `json:"completion_tokens"`
+		TotalTokens  int `json:"totalTokens"`
+		InputTokens  int `json:"inputTokens"`
+		OutputTokens int `json:"outputTokens"`
+		Total        int `json:"total_tokens"`
+		Input        int `json:"input_tokens"`
+		Output       int `json:"output_tokens"`
+		Prompt       int `json:"prompt_tokens"`
+		Completion   int `json:"completion_tokens"`
 	}
 	extractUsed := func(u *usageFields) int {
 		if u == nil {

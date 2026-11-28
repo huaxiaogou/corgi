@@ -65,11 +65,10 @@ func TestVerifyGoRepoPassAndFail(t *testing.T) {
 }
 
 func TestVerifyCustomCmdAndReviewVerdict(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
-	orig := reviewExecFn
-	defer func() { reviewExecFn = orig }()
 
-	reviewExecFn = func(_ context.Context, _, _, preferred, brief string, _ VerifyResult, _ string) (string, bool, string, error) {
+	blockReview := func(_ context.Context, _, _, preferred, brief string, _ VerifyResult, _ string) (string, bool, string, error) {
 		if preferred != "codex" || !strings.Contains(brief, "fix auth") {
 			t.Errorf("unexpected review args: preferred=%q brief=%q", preferred, brief)
 		}
@@ -77,11 +76,12 @@ func TestVerifyCustomCmdAndReviewVerdict(t *testing.T) {
 	}
 
 	res, err := Verify(context.Background(), t.TempDir(), VerifyRequest{
-		Dir:      dir,
-		Cmd:      "echo ok",
-		Review:   true,
-		Reviewer: "codex",
-		Brief:    "fix auth bug",
+		Dir:        dir,
+		Cmd:        "echo ok",
+		Review:     true,
+		Reviewer:   "codex",
+		Brief:      "fix auth bug",
+		ReviewExec: blockReview,
 	})
 	if err != nil {
 		t.Fatalf("Verify with review: %v", err)
@@ -94,13 +94,14 @@ func TestVerifyCustomCmdAndReviewVerdict(t *testing.T) {
 	}
 
 	// Passing review should flip OK=true.
-	reviewExecFn = func(_ context.Context, _, _, _, _ string, _ VerifyResult, _ string) (string, bool, string, error) {
+	passReview := func(_ context.Context, _, _, _, _ string, _ VerifyResult, _ string) (string, bool, string, error) {
 		return "codex", true, "VERDICT: PASS\n- 无阻断问题", nil
 	}
 	passRes, err := Verify(context.Background(), t.TempDir(), VerifyRequest{
-		Dir:    dir,
-		Cmd:    "echo ok",
-		Review: true,
+		Dir:        dir,
+		Cmd:        "echo ok",
+		Review:     true,
+		ReviewExec: passReview,
 	})
 	if err != nil {
 		t.Fatalf("Verify passing review: %v", err)

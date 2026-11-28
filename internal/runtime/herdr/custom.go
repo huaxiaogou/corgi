@@ -22,11 +22,11 @@ var (
 	customWorkingRe       = regexp.MustCompile(`(?i)(esc to interrupt|streaming\s*·|task running|[✢✳✶✻✽✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*\(\d+s)`)
 	customBottomWorkingRe = regexp.MustCompile(`(?im)^\s*[✢✳✶✻✽✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒◴◷◶◵]\s*(thinking|pondering|working|streaming|brewing|churning|running|executing|generating|connecting|retrying|waiting|printing|reading|writing|searching|editing|analyzing|思考中|处理中|执行中|生成中)`)
 	// Exclude static idle prefix '✳' used by Claude Code / CodeBuddy window titles when idle.
-	titleSpinnerRe        = regexp.MustCompile(`^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒◴◷◶◵]`)
-	customReadyRe         = regexp.MustCompile(`(?i)(codebuddy code|bypass permissions|do you trust|shift\+tab to cycle|^>\s*$)`)
-	customIdleChromeRe    = regexp.MustCompile(`(?i)(bypass permissions on|← for agents|↵\s*send|⇧tab to cycle|shift\+tab to cycle)`)
-	customChoiceRe        = regexp.MustCompile(`(?m)^\s*([›>•❯▶]\s+.+|\d+[.)]\s+.+)$`)
-	customAskHintRe       = regexp.MustCompile(`(?i)(do you trust|trust (this|the files|the contents)|do you want to|allow|proceed|confirm|esc to cancel|yes,?\s*(i trust|allow|proceed))`)
+	titleSpinnerRe     = regexp.MustCompile(`^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒◴◷◶◵]`)
+	customReadyRe      = regexp.MustCompile(`(?i)(codebuddy code|bypass permissions|do you trust|shift\+tab to cycle|^>\s*$)`)
+	customIdleChromeRe = regexp.MustCompile(`(?i)(bypass permissions on|← for agents|↵\s*send|⇧tab to cycle|shift\+tab to cycle)`)
+	customChoiceRe     = regexp.MustCompile(`(?m)^\s*([›>•❯▶]\s+.+|\d+[.)]\s+.+)$`)
+	customAskHintRe    = regexp.MustCompile(`(?i)(do you trust|trust (this|the files|the contents)|do you want to|allow|proceed|confirm|esc to cancel|yes,?\s*(i trust|allow|proceed))`)
 )
 
 // SetCustomStore configures on-disk persistence for shell-fallback agents (e.g. codebuddy)

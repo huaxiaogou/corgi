@@ -6,7 +6,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 all: build
 
 web-build:
-	cd web && npm run typecheck && npm run build
+	cd web && npm run typecheck && npm test && npm run build
 
 go-build:
 	go build -ldflags "$(LDFLAGS)" -o bin/corgi ./cmd/corgi
@@ -23,7 +23,7 @@ vet:
 	go vet ./...
 
 check: vet test
-	cd web && npm run typecheck
+	cd web && npm run typecheck && npm test
 
 clean:
 	rm -rf bin/ web/dist/*
