@@ -9,13 +9,6 @@ import (
 	"github.com/kiperjing/corgi/internal/model"
 )
 
-func condStr(cond bool, yes, no string) string {
-	if cond {
-		return yes
-	}
-	return no
-}
-
 func prop(typ, desc string) map[string]any {
 	if typ == "[]string" {
 		return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
@@ -29,7 +22,7 @@ func toolSpec(name, desc string, props map[string]any, req ...string) LLMToolDef
 	return LLMToolDef{Type: "function", Function: LLMToolFunctionSpec{Name: name, Description: desc, Parameters: map[string]any{"type": "object", "properties": props, "required": req}}}
 }
 
-// apiRouterToolDefs returns the 8 deterministic, strictly ordered native Go tool definitions.
+// apiRouterToolDefs returns the 9 deterministic, strictly ordered native Go tool definitions.
 func apiRouterToolDefs() []LLMToolDef {
 	return []LLMToolDef{
 		toolSpec("dispatch_work", "启动新 Coding CLI Worker 或 resume 续聊已有 Worker。非人类回合仅允许新派 readonly。", map[string]any{
@@ -45,6 +38,7 @@ func apiRouterToolDefs() []LLMToolDef {
 			"worktree":      propEnum([]string{"auto", "on", "off"}, "worktree 隔离策略"),
 			"allow_release": prop("boolean", "仅人类明确批准合入/推送/发版部署时设为 true（仅人类回合 + implement）"),
 		}, "mode", "goal"),
+		configRouterToolDef(),
 		toolSpec("manage_timer", "列出、创建或删除本线程的定时提醒/巡检任务（固定唤醒大脑）。", map[string]any{
 			"action":   propEnum([]string{"list", "add", "remove"}, "操作类型"),
 			"spec":     prop("string", "add 时必填，如 'in 30m', 'daily 09:00', 'every 2h', 'at 2026-11-28 10:00'"),
@@ -142,6 +136,8 @@ func (e *Engine) execAPIRouterTool(ctx context.Context, turn *apiRouterTurn, tri
 		return e.toolNoAction(ctx, turn, trig, tc.Function.Arguments)
 	case "dispatch_work":
 		return e.toolDispatchWork(ctx, turn, trig, meta, tc.Function.Arguments), false
+	case "manage_config":
+		return e.toolManageConfig(ctx, turn, trig, meta, tc.Function.Arguments)
 	case "steer_worker":
 		return e.toolSteerWorker(ctx, turn, trig, meta, tc.Function.Arguments), false
 	case "manage_work":
@@ -350,7 +346,7 @@ func (e *Engine) pushToolProgress(ctx, bg context.Context, turn *apiRouterTurn, 
 
 func (e *Engine) formatAPIToolProgress(ctx context.Context, thread string, tc LLMToolCall) string {
 	staticLabels := map[string]string{
-		"reply_user": "正在整理回复…", "no_action": "正在完成核对…",
+		"reply_user": "正在整理回复…", "no_action": "正在完成核对…", "manage_config": "正在处理配置…",
 		"manage_timer": "正在更新定时提醒…", "save_memory": "正在更新记忆笔记…",
 	}
 	if label, ok := staticLabels[tc.Function.Name]; ok {

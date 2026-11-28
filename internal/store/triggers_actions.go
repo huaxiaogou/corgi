@@ -811,7 +811,7 @@ func (s *Store) ExpireStalePendingActions(ctx context.Context, maxAge time.Durat
 	cutoff := now.Add(-maxAge)
 	expired := 0
 	for _, a := range pending {
-		if a.Kind == model.ActionKindWorkerDialog || a.Kind == model.ActionKindRouterCheck {
+		if a.Kind == model.ActionKindWorkerDialog || a.Kind == model.ActionKindRouterCheck || a.Kind == model.ActionKindConfigConfirm {
 			continue
 		}
 		if a.CreatedAt.IsZero() || !a.CreatedAt.Before(cutoff) {

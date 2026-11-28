@@ -120,6 +120,21 @@ func (s *Server) Routes() http.Handler {
 		return s.auth(s.routed(h))
 	})
 	s.registerSuperRoutes(mux, api)
+	if s.Engine != nil && s.WeCom != nil {
+		wc := s.WeCom
+		s.Engine.SetOnSettingsApplied(func(st model.Settings) {
+			if st.WeComEnabled {
+				wc.UpdateConfig(wecom.Config{
+					BotID:      st.WeComBotID,
+					Secret:     st.WeComSecret,
+					AllowUsers: st.WeComAllowUsers,
+					DefaultTo:  st.WeComDefaultTo,
+				})
+			} else {
+				wc.UpdateConfig(wecom.Config{})
+			}
+		})
+	}
 
 	return securityHeaders(mux)
 }
@@ -141,6 +156,7 @@ func (s *Server) registerMachineRoutes(mux *http.ServeMux, wrap func(http.Handle
 	mux.Handle("POST /api/git/worktree/create", wrap(s.handleGitWorktreeCreate))
 	mux.Handle("POST /api/git/worktree/cleanup", wrap(s.handleGitWorktreeCleanup))
 	mux.Handle("POST /api/git/verify", wrap(s.handleGitVerify))
+	mux.Handle("POST /api/path/inspect", wrap(s.handleInspectPath))
 	mux.Handle("POST /api/codex/interrupt", wrap(s.handleCodexInterrupt))
 	mux.Handle("GET /api/dirs", wrap(s.handleListDirs))
 	mux.Handle("GET /api/file", wrap(s.handleReadFile))
@@ -433,7 +449,7 @@ func (s *Server) routed(h http.HandlerFunc) http.HandlerFunc {
 		var body []byte
 		switch {
 		case r.URL.Path == "/api/dirs", r.URL.Path == "/api/file", r.URL.Path == "/api/attachments/read", r.URL.Path == "/api/uploads",
-			r.URL.Path == "/api/models", r.URL.Path == "/api/transcript",
+			r.URL.Path == "/api/models", r.URL.Path == "/api/transcript", r.URL.Path == "/api/path/inspect",
 			r.URL.Path == "/api/git/inspect", r.URL.Path == "/api/git/worktree/create", r.URL.Path == "/api/git/worktree/cleanup":
 			machine = s.Fleet.ResolveMachine(r.URL.Query().Get("machine"))
 		case r.URL.Path == "/api/agents" && r.Method == http.MethodPost && s.Engine == nil:

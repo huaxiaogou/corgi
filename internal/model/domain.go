@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -43,6 +44,7 @@ type MediaRef struct {
 	Name    string `json:"name,omitempty"`
 	MIME    string `json:"mime,omitempty"`
 	Size    int64  `json:"size,omitempty"`
+	SHA256  string `json:"sha256,omitempty"`
 }
 
 // Entry is one human-facing message or event in a conversation thread.
@@ -234,10 +236,11 @@ type Worker struct {
 }
 
 const (
-	ActionKindRouterChoice = "router_choice"
-	ActionKindRouterCheck  = "router_check"
-	ActionKindWorkerDialog = "worker_dialog"
-	ActionKindPatrolDigest = "patrol_digest"
+	ActionKindRouterChoice  = "router_choice"
+	ActionKindRouterCheck   = "router_check"
+	ActionKindWorkerDialog  = "worker_dialog"
+	ActionKindPatrolDigest  = "patrol_digest"
+	ActionKindConfigConfirm = "config_confirm"
 
 	ActionPending  = "pending"
 	ActionResolved = "resolved"
@@ -290,7 +293,7 @@ type Action struct {
 
 // IsMulti reports whether this Action allows selecting multiple options before confirming.
 func (a *Action) IsMulti() bool {
-	if a == nil || a.Kind == ActionKindWorkerDialog || a.Kind == ActionKindRouterCheck {
+	if a == nil || a.Kind == ActionKindWorkerDialog || a.Kind == ActionKindRouterCheck || a.Kind == ActionKindConfigConfirm {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(a.Mode), ActionModeMulti)
@@ -313,7 +316,7 @@ func (a *Action) IsDecision() bool {
 	if a == nil {
 		return false
 	}
-	if a.Kind == ActionKindWorkerDialog {
+	if a.Kind == ActionKindWorkerDialog || a.Kind == ActionKindConfigConfirm {
 		return true
 	}
 	if a.Kind == ActionKindRouterCheck {
@@ -498,4 +501,32 @@ type Device struct {
 	TokenHash string    `json:"-"`
 	CreatedAt time.Time `json:"created_at"`
 	LastSeen  time.Time `json:"last_seen"`
+}
+
+// PathInspectResult reports local/remote filesystem inspection details for a candidate project directory.
+type PathInspectResult struct {
+	Exists       bool   `json:"exists"`
+	IsDir        bool   `json:"is_dir"`
+	IsGit        bool   `json:"is_git"`
+	ResolvedPath string `json:"resolved_path,omitempty"`
+	DisplayPath  string `json:"display_path,omitempty"`
+}
+
+// ConfigProposal stores a pending L2 dangerous configuration change awaiting explicit human confirmation.
+type ConfigProposal struct {
+	ActionID   string          `json:"action_id"`
+	Op         string          `json:"op"` // delete_project | remove_project_path | delete_policy | disable_ask_permissions
+	Summary    string          `json:"summary"`
+	BeforeHash string          `json:"before_hash"`
+	Payload    json.RawMessage `json:"payload"`
+	CreatedAt  time.Time       `json:"created_at"`
+	ExpiresAt  time.Time       `json:"expires_at"`
+}
+
+// ConfigAuditEntry is one redacted configuration change summary kept in the bounded KV ring.
+type ConfigAuditEntry struct {
+	At      time.Time `json:"at"`
+	Actor   string    `json:"actor"`
+	Action  string    `json:"action"`
+	Summary string    `json:"summary"`
 }

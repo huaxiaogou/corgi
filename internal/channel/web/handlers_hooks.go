@@ -84,10 +84,7 @@ func (s *Server) handleDismissAction(w http.ResponseWriter, r *http.Request) {
 		By string `json:"by"`
 	}
 	_ = decodeJSON(w, r, &body)
-	by := strings.TrimSpace(body.By)
-	if by == "" {
-		by = "web"
-	}
+	by := s.resolveActionActor(r, body.By)
 	act, err := s.Engine.DismissActionBy(r.Context(), r.PathValue("id"), by)
 	if err != nil {
 		code := http.StatusBadRequest
@@ -109,10 +106,7 @@ func (s *Server) handleSnoozeAction(w http.ResponseWriter, r *http.Request) {
 		By      string `json:"by"`
 	}
 	_ = decodeJSON(w, r, &body)
-	by := strings.TrimSpace(body.By)
-	if by == "" {
-		by = "web"
-	}
+	by := s.resolveActionActor(r, body.By)
 	var until time.Time
 	if s := strings.TrimSpace(body.Until); s != "" {
 		if parsed, err := time.Parse(time.RFC3339, s); err == nil {
@@ -136,6 +130,10 @@ func (s *Server) handleSnoozeAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStartDream(w http.ResponseWriter, r *http.Request) {
+	if !s.isOwnerRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "仅 Hub 管理员或已配对浏览器可手动触发整理记忆"})
+		return
+	}
 	if err := s.Engine.StartDream(r.Context(), "manual"); err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return

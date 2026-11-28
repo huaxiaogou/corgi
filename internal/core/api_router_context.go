@@ -28,7 +28,8 @@ const (
 3. 精准使用 reply_user：普通问答仅填 text；交付成果传 files（必要时带 machine）或 re_id+worker 自动附报告快照；需拍板时传简短 title（≤20字）、1–2 句精炼正文（≤100字）和 2–4 个 ≤14 字 choices；轻量已读提醒用 check=true。
 4. 防越权边界：人类回合直接明确提出改代码并跑测试的新需求可直接 dispatch_work(mode="implement")；指向已有原型/只读工作项时保持 prototype/readonly，转入源码修改前发决策卡；后台非人类事件严禁改代码、发布、续派或追加指令，只能新派 readonly Worker 或发决策卡；合入/推送/部署上线必须经人类明确批准后在人类回合开启 allow_release=true。
 5. 静默边界：response_mode=must_reply 必须调用 reply_user；仅 response_mode=optional_notify 且无需打扰用户时调用 no_action(reason)。
-6. 真实性约束：严禁编造路径或执行结果；未收到工具 ok:true 前严禁声称已完成操作；向用户回复必须调用 reply_user（禁止直接输出裸文本）。`
+6. 真实性约束：严禁编造路径或执行结果；未收到工具 ok:true 前严禁声称已完成操作；向用户回复必须调用 reply_user（禁止直接输出裸文本）。
+7. 配置管理边界：查看或修改项目工作区、派发默认项或巡检配置请调用 manage_config（仅限主线程；写操作仅限人类回合；高危删除或放宽权限自动发确认卡；严禁修改大脑 API 与企微凭据）。`
 )
 
 type turnConsentMeta struct {

@@ -137,6 +137,8 @@ type Engine struct {
 	router routerState
 
 	wakeCh                     chan struct{}
+	configWriteSem             chan struct{}
+	onSettingsApplied          func(model.Settings)
 	queueMu                    sync.Mutex
 	wtMu                       sync.Mutex
 	pausedQueues               map[string]bool
@@ -207,6 +209,7 @@ func NewEngine(ctx context.Context, st *store.Store, fl *fleet.Fleet, reg *agent
 		bypassHealFailAt:    map[string]time.Time{},
 		bypassHealedPID:     map[string]uint32{},
 		wakeCh:              make(chan struct{}, 1),
+		configWriteSem:      make(chan struct{}, 1),
 		pausedQueues:        map[string]bool{},
 		drainCooldown:       map[string]time.Time{},
 		directTurns:         map[string][]*pendingDirectTurn{},
@@ -269,149 +272,18 @@ func (e *Engine) SetFleet(fl *fleet.Fleet) {
 // Memory exposes the layered memory manager.
 func (e *Engine) Memory() *MemoryManager { return e.memory }
 
-// Settings returns a copy of current Settings.
+// Settings returns a deep copy of current Settings.
 func (e *Engine) Settings() model.Settings {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.settings
+	return CloneSettings(e.settings)
 }
 
-// Policies returns a copy of current Policies.
+// Policies returns a deep copy of current Policies.
 func (e *Engine) Policies() []model.Policy {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return append([]model.Policy(nil), e.policies...)
-}
-
-// SaveConfig persists updated Settings and/or Policies and refreshes Router docs.
-func (e *Engine) SaveConfig(ctx context.Context, st *model.Settings, pols []model.Policy) error {
-	var (
-		apiConfigChanged bool
-		nextSettings     model.Settings
-		nextPolicies     []model.Policy
-	)
-	e.mu.Lock()
-	if st != nil {
-		prev := e.settings
-		ns := *st
-		if agent.NormalizeKind(ns.WorkerKind) == "" {
-			ns.WorkerKind = e.settings.WorkerKind
-		}
-		if ns.ReplyChars <= 0 {
-			ns.ReplyChars = model.DefaultReplyChars
-		}
-		if ns.StallMinutes <= 0 {
-			ns.StallMinutes = 12
-		}
-		if ns.IdlePatrolMinutes < 0 {
-			ns.IdlePatrolMinutes = -1
-		} else if ns.IdlePatrolMinutes == 0 {
-			ns.IdlePatrolMinutes = 30
-		} else if ns.IdlePatrolMinutes > 480 {
-			ns.IdlePatrolMinutes = 480
-		}
-		ns.ActiveHours = NormalizeActiveHours(ns.ActiveHours)
-		if ns.StaleArchiveDays < 0 {
-			ns.StaleArchiveDays = -1
-		} else if ns.StaleArchiveDays == 0 {
-			ns.StaleArchiveDays = 3
-		} else if ns.StaleArchiveDays > 60 {
-			ns.StaleArchiveDays = 60
-		}
-		if ns.WorkerIdleGCMinutes < 0 {
-			ns.WorkerIdleGCMinutes = -1
-		} else if ns.WorkerIdleGCMinutes == 0 {
-			ns.WorkerIdleGCMinutes = 120
-		} else if ns.WorkerIdleGCMinutes < 15 {
-			ns.WorkerIdleGCMinutes = 15
-		} else if ns.WorkerIdleGCMinutes > 1440 {
-			ns.WorkerIdleGCMinutes = 1440
-		}
-		if ns.WorkerMaxLivePerMachine < 0 {
-			ns.WorkerMaxLivePerMachine = -1
-		} else if ns.WorkerMaxLivePerMachine == 0 {
-			ns.WorkerMaxLivePerMachine = 6
-		} else if ns.WorkerMaxLivePerMachine > 50 {
-			ns.WorkerMaxLivePerMachine = 50
-		}
-		if ns.NotifyLevel != "normal" {
-			ns.NotifyLevel = "quiet"
-		}
-		if ns.DreamAt != "" && !strings.EqualFold(ns.DreamAt, "off") {
-			var dh, dm int
-			if _, err := fmt.Sscanf(ns.DreamAt, "%d:%d", &dh, &dm); err != nil || dh < 0 || dh > 23 || dm < 0 || dm > 59 {
-				ns.DreamAt = "04:00"
-			} else {
-				ns.DreamAt = fmt.Sprintf("%02d:%02d", dh, dm)
-			}
-		}
-		if ns.WorkerCwd == "" {
-			ns.WorkerCwd = e.home
-		}
-		normPubURL, urlErr := NormalizePublicURL(ns.PublicURL)
-		if urlErr != nil {
-			e.mu.Unlock()
-			return urlErr
-		}
-		ns.PublicURL = normPubURL
-		NormalizeDispatchConfig(&ns)
-		if err := normalizeRouterAPISettings(&ns); err != nil {
-			e.mu.Unlock()
-			return err
-		}
-		apiConfigChanged = prev.RouterAPIProvider != ns.RouterAPIProvider ||
-			prev.RouterAPIBaseURL != ns.RouterAPIBaseURL ||
-			prev.RouterAPIModel != ns.RouterAPIModel ||
-			prev.RouterAPIEffort != ns.RouterAPIEffort
-		nextSettings = ns
-	}
-	if pols != nil {
-		valid := make([]model.Policy, 0, len(pols))
-		for _, p := range pols {
-			src := strings.TrimSpace(p.Source)
-			if src != "" && (p.Action == "respond" || p.Action == "candidate" || p.Action == "ignore") {
-				p.Source = src
-				valid = append(valid, p)
-			}
-		}
-		nextPolicies = valid
-	}
-	sink := e.sink
-	e.mu.Unlock()
-
-	if st != nil {
-		if err := e.store.SaveSettings(ctx, nextSettings); err != nil {
-			return err
-		}
-	}
-	if pols != nil {
-		if err := e.store.SavePolicies(ctx, nextPolicies); err != nil {
-			return err
-		}
-	}
-
-	e.mu.Lock()
-	if st != nil {
-		if e.settings.AskPermissions && !nextSettings.AskPermissions {
-			clear(e.bypassCheckedAt)
-			clear(e.bypassHealedPID)
-			clear(e.bypassHealFailAt)
-		}
-		e.settings = nextSettings
-		if apiConfigChanged {
-			e.router.resetFailuresLocked(true)
-		}
-	}
-	if pols != nil {
-		e.policies = nextPolicies
-	}
-	e.mu.Unlock()
-
-	if apiConfigChanged {
-		e.wake()
-	}
-	sink.OnStateChanged()
-	return nil
+	return ClonePolicies(e.policies)
 }
 
 // Say ingests a human message from Web, WeCom, or CLI.

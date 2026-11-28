@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -168,11 +169,26 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 	if cwd == "" && (mc.ID == st.WorkerMachine || (mc.Local && st.WorkerMachine == "")) {
 		cwd = st.WorkerCwd
 	}
+	protCorgi := ""
+	if mc.Local {
+		protCorgi = effectiveProtectedCorgiDir(e.corgiDir, e.home)
+	}
+	if sessionID == "" && cwd != "" && !isManagedWorktreePath(cwd, e.corgiDir) {
+		if _, vErr := ValidateWorkerCwd(cwd, protCorgi); vErr != nil {
+			return nil, fmt.Errorf("invalid worker cwd: %w", vErr)
+		}
+	}
 	targetHome := mc.Home
 	if mc.Local && targetHome == "" {
 		targetHome = e.home
 	}
 	cwd = expandInHome(targetHome, cwd)
+	if sessionID == "" && cwd != "" && !isManagedWorktreePath(cwd, e.corgiDir) &&
+		(targetHome == "" || filepath.Clean(cwd) != filepath.Clean(targetHome)) {
+		if _, vErr := ValidateWorkerCwd(cwd, protCorgi); vErr != nil {
+			return nil, fmt.Errorf("invalid resolved worker cwd: %w", vErr)
+		}
+	}
 	if mc.Local && cwd != "" {
 		if fi, statErr := os.Stat(cwd); statErr != nil || !fi.IsDir() {
 			return nil, fmt.Errorf("directory not found on %s: %s", mc.Name, cwd)

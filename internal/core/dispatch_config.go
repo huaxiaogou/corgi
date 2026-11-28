@@ -3,6 +3,7 @@ package core
 import (
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -123,7 +124,7 @@ func NormalizeProjects(raw []model.ProjectWorkspace) []model.ProjectWorkspace {
 		}
 		baseID := id
 		for suffix := 2; seenID[id]; suffix++ {
-			id = baseID + "-" + string(rune('0'+suffix%10))
+			id = baseID + "-" + strconv.Itoa(suffix)
 		}
 		seenID[id] = true
 

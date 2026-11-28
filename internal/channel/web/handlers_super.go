@@ -248,6 +248,22 @@ func (s *Server) handleResumeWorker(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) resolveActionActor(r *http.Request, rawBy string) string {
+	master, dev := s.identity(r)
+	if dev != nil && dev.Kind == "browser" {
+		return "web"
+	}
+	if master {
+		switch strings.ToLower(strings.TrimSpace(rawBy)) {
+		case "cli", "router", "web":
+			return strings.ToLower(strings.TrimSpace(rawBy))
+		default:
+			return "web"
+		}
+	}
+	return "machine"
+}
+
 func (s *Server) handleResolveAction(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
@@ -259,20 +275,7 @@ func (s *Server) handleResolveAction(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	master, dev := s.identity(r)
-	by := "web"
-	if dev != nil && dev.Kind == "browser" {
-		by = "web"
-	} else if master {
-		switch strings.ToLower(strings.TrimSpace(body.By)) {
-		case "cli", "router", "web":
-			by = strings.ToLower(strings.TrimSpace(body.By))
-		default:
-			by = "web"
-		}
-	} else {
-		by = "machine"
-	}
+	by := s.resolveActionActor(r, body.By)
 	var (
 		act *model.Action
 		err error
@@ -740,6 +743,10 @@ func (s *Server) handleSuperDeleteTimer(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.isOwnerRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "仅 Hub 管理员或已配对浏览器可查看系统设置"})
+		return
+	}
 	st := s.Engine.Settings()
 	// Never return plaintext WeCom secret back to the browser; expose masked sentinel.
 	masked := st
@@ -823,6 +830,10 @@ func (s *Server) handleWeComFocusClear(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWeComApprove(w http.ResponseWriter, r *http.Request) {
+	if !s.isOwnerRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "仅 Hub 管理员或已配对浏览器可审批企微白名单"})
+		return
+	}
 	var body struct {
 		UserID  string `json:"user_id"`
 		Dismiss bool   `json:"dismiss"`
@@ -843,31 +854,13 @@ func (s *Server) handleWeComApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st := s.Engine.Settings()
-	exists := false
-	for _, u := range st.WeComAllowUsers {
-		if strings.TrimSpace(u) == uid {
-			exists = true
-			break
-		}
-	}
-	if !exists {
-		st.WeComAllowUsers = append(st.WeComAllowUsers, uid)
-	}
-	if err := s.Engine.SaveConfig(r.Context(), &st, nil); err != nil {
+	st, err := s.Engine.ApproveWeComUser(r.Context(), uid)
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 	if s.WeCom != nil {
 		s.WeCom.DismissPending(uid)
-		if st.WeComEnabled {
-			s.WeCom.UpdateConfig(wecom.Config{
-				BotID:      st.WeComBotID,
-				Secret:     st.WeComSecret,
-				AllowUsers: st.WeComAllowUsers,
-				DefaultTo:  st.WeComDefaultTo,
-			})
-		}
 		if s.WeCom.Online() {
 			wc := s.WeCom
 			go func() {
@@ -881,6 +874,10 @@ func (s *Server) handleWeComApprove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.isOwnerRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "仅 Hub 管理员或已配对浏览器可修改系统设置"})
+		return
+	}
 	var body struct {
 		Settings *model.Settings `json:"settings"`
 		Policies []model.Policy  `json:"policies"`
@@ -888,36 +885,12 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.Settings != nil {
-		cur := s.Engine.Settings()
-		modifiesRouter := body.Settings.RouterAPIProvider != cur.RouterAPIProvider ||
-			body.Settings.RouterAPIBaseURL != cur.RouterAPIBaseURL ||
-			body.Settings.RouterAPIModel != cur.RouterAPIModel ||
-			body.Settings.RouterAPIEffort != cur.RouterAPIEffort
-		if modifiesRouter && !s.isOwnerRequest(r) {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "仅 Hub 管理员或已配对浏览器可修改大脑配置"})
-			return
-		}
-		if body.Settings.WeComSecret == "••••••••" {
-			body.Settings.WeComSecret = cur.WeComSecret
-		}
+	if body.Settings != nil && body.Settings.WeComSecret == "••••••••" {
+		body.Settings.WeComSecret = s.Engine.Settings().WeComSecret
 	}
 	if err := s.Engine.SaveConfig(r.Context(), body.Settings, body.Policies); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
-	}
-	if body.Settings != nil && s.WeCom != nil {
-		st := s.Engine.Settings()
-		if st.WeComEnabled {
-			s.WeCom.UpdateConfig(wecom.Config{
-				BotID:      st.WeComBotID,
-				Secret:     st.WeComSecret,
-				AllowUsers: st.WeComAllowUsers,
-				DefaultTo:  st.WeComDefaultTo,
-			})
-		} else {
-			s.WeCom.UpdateConfig(wecom.Config{})
-		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
