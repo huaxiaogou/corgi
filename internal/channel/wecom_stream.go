@@ -466,7 +466,7 @@ func (b *Bus) OnAPIRouterTurnEnd(ctx context.Context, thread, triggerID, reason 
 	case "dispatched":
 		msg = "已安排处理，有进展会同步给你。"
 	case "silent":
-		msg = "已处理，如需进一步操作请告诉我。"
+		msg = "本轮未产生回复，如需进一步处理请告诉我。"
 	}
 	_, _ = st.seal(ctx, "", msg)
 }
@@ -578,7 +578,7 @@ func (b *Bus) watchRouterStream(ctx context.Context, st *activeWeComStream) {
 				idle >= 30*time.Second &&
 				!b.engine.HasQueuedRouterTriggers(ctx) {
 				b.clearRouterStreamIfMatch(st)
-				_, _ = st.seal(ctx, "", "已处理，如需进一步操作请告诉我。")
+				_, _ = st.seal(ctx, "", "本轮处理超时未收到答复，请重试或补充说明。")
 				return
 			}
 		}

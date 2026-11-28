@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kiperjing/corgi/internal/model"
+	"github.com/kiperjing/corgi/internal/store"
 )
 
 const (
@@ -128,11 +129,25 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 	if err != nil {
 		return
 	}
+	wiByID := map[string]*model.WorkItem{}
+	if allWIs, wiErr := e.store.ListWorkItems(ctx, true); wiErr == nil {
+		for _, wi := range allWIs {
+			if wi != nil {
+				wiByID[wi.ID] = wi
+			}
+		}
+	}
 	pendingActions, _ := e.store.ListPendingActions(ctx)
 	pendingByWorker := map[string]bool{}
+	pendingByWI := map[string]bool{}
 	for _, a := range pendingActions {
-		if a.IsDecision() && a.TargetWorker != "" {
-			pendingByWorker[a.TargetWorker] = true
+		if a.IsDecision() {
+			if a.TargetWorker != "" {
+				pendingByWorker[a.TargetWorker] = true
+			}
+			if a.WorkItemID != "" {
+				pendingByWI[a.WorkItemID] = true
+			}
 		}
 	}
 
@@ -143,7 +158,7 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 	if st.MorningDigestEnabled() && !now.Before(todayStart) {
 		lastDay, _, _ := e.store.GetKV(ctx, kvLastMorningDigestDay)
 		if lastDay != todayKey {
-			if e.tryEmitMorningDigest(ctx, st, workers, live, pendingActions, todayStart, now) {
+			if e.tryEmitMorningDigest(ctx, st, workers, wiByID, live, pendingActions, todayStart, now) {
 				_ = e.store.SetKV(ctx, kvLastMorningDigestDay, todayKey)
 				_ = e.store.SetKV(ctx, kvLastIdlePatrolAt, now.UTC().Format(time.RFC3339))
 				return
@@ -187,6 +202,7 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 
 	type candidate struct {
 		w        *model.Worker
+		wi       *model.WorkItem
 		priority int
 		idleDur  time.Duration
 		attempt  int
@@ -197,11 +213,19 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 		if w.Ended || w.IdleSince == nil {
 			continue
 		}
+		var wi *model.WorkItem
+		if w.WorkItemID != "" {
+			wi = wiByID[w.WorkItemID]
+			// Never nag about workers belonging to an already-closed WorkItem.
+			if wi != nil && wi.ClosedAt != nil {
+				continue
+			}
+		}
 		li, alive := live[w.Name]
 		if !alive || (li.status != "idle" && li.status != "done") {
 			continue
 		}
-		if pendingByWorker[w.Name] {
+		if pendingByWorker[w.Name] || (w.WorkItemID != "" && pendingByWI[w.WorkItemID]) {
 			continue
 		}
 		if w.SnoozeUntil != nil && w.SnoozeUntil.After(now) {
@@ -229,12 +253,12 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 			continue
 		}
 		prio := 2
-		if w.WorktreeBranch != "" {
+		if w.WorktreeBranch != "" && !isPrototypeOrReadonlyWorkItem(wi) {
 			prio = 1
 		} else if w.LastReport == "" && w.CreatedBy == "you" {
 			prio = 3
 		}
-		cand := candidate{w: w, priority: prio, idleDur: idleDur, attempt: nextAttempt}
+		cand := candidate{w: w, wi: wi, priority: prio, idleDur: idleDur, attempt: nextAttempt}
 		if isDue {
 			due = append(due, cand)
 		} else {
@@ -272,18 +296,19 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 
 	apiMode := e.isAPIRouterMode()
 	var b strings.Builder
-	fmt.Fprintf(&b, "[corgi idle-patrol] %d idle session(s) reached patrol threshold (zero-token gate passed).\n", len(due))
-	b.WriteString("Triage strictly:\n")
+	fmt.Fprintf(&b, "[corgi idle-patrol] %d idle work item(s)/session(s) reached patrol threshold (zero-token gate passed).\n", len(due))
+	b.WriteString("Triage strictly (WorkItem-centered):\n")
 	if apiMode {
-		b.WriteString("- If nothing genuinely needs a human decision, or you ALREADY reported these exact waiting items recently with zero new developments, output [SILENT].\n")
-		b.WriteString("- NEVER include already-healthy / no-action status items (e.g. '已部署健康'). NEVER auto-stop manual sessions (created_by=you).\n")
-		b.WriteString("- If 2+ independent unrelated items still need attention: send ONE clean bulleted Markdown checklist via reply_user(purpose=\"answer\") (NO choices, NO fake mutually-exclusive A/B buttons); put one concise bullet per item naming the exact worker/branch and what decision is needed.\n")
-		b.WriteString("- Use reply_user(purpose=\"attention\", choices=[...], worker=\"<name>\") ONLY when there is ONE single concrete decision (e.g. 1 unmerged branch or 1 specific approval) with clear, unambiguous choices.\n")
+		b.WriteString("- 所有面向用户的表述必须以「事项名称」为主语，严禁把 wi/agy/codex/分支名等内部代号直接甩给用户（仅在需要用户决定未合入代码去留时附带说明）。\n")
+		b.WriteString("- 严禁把清理已关闭事项或无未合入改动的闲置 worktree / 底层会话包装成待拍板卡片。\n")
+		b.WriteString("- 若无真正需要用户拍板的新事项（或近期已汇报且无新进展），必须调用 no_action(reason) 结束。\n")
+		b.WriteString("- 2 项以上彼此独立的事项用 reply_user(purpose=\"answer\") 发 1 条清晰 Markdown 分条清单（禁加互斥按钮）；仅当存在单一明确拍板点时用 reply_user(purpose=\"attention\", title=\"事项名称 · 决策点\", choices=[...])。\n")
 	} else {
+		b.WriteString("- Always speak in terms of the human-readable WorkItem title rather than raw internal worker/branch slugs.\n")
 		b.WriteString("- If nothing genuinely needs a human decision, or you ALREADY reported these exact waiting items recently with zero new developments, stay COMPLETELY SILENT.\n")
 		b.WriteString("- NEVER include already-healthy / no-action status items (e.g. '已部署健康'). NEVER auto-stop manual sessions (created_by=you).\n")
-		b.WriteString("- If 2+ independent unrelated items still need attention: send ONE clean bulleted Markdown checklist via plain `reply - <<'EOF'` (NO `--opt`, NO fake mutually-exclusive A/B buttons like '先验收已完成分支' vs '批准B'); put one concise bullet per item naming the exact worker/branch and what decision is needed.\n")
-		b.WriteString("- Use `reply --digest --category patrol --worker <name> --opt ...` ONLY when there is ONE single concrete decision (e.g. 1 unmerged branch or 1 specific approval) with clear, unambiguous button labels.\n")
+		b.WriteString("- If 2+ independent unrelated items still need attention: send ONE clean bulleted Markdown checklist via plain `reply - <<'EOF'` (NO `--opt`, NO fake mutually-exclusive A/B buttons).\n")
+		b.WriteString("- Use `reply --digest --category patrol --worker <name> --opt ...` ONLY when there is ONE single concrete decision with clear, unambiguous button labels.\n")
 	}
 	for i, c := range shown {
 		w := c.w
@@ -294,21 +319,29 @@ func (e *Engine) runIdlePatrol(ctx context.Context, live map[string]liveInfo, no
 		origin := orStr(w.CreatedBy, "corgi")
 		host := orStr(w.Machine, "hub")
 		wt := ""
-		if w.WorktreeBranch != "" {
+		if w.WorktreeBranch != "" && !isPrototypeOrReadonlyWorkItem(c.wi) {
 			wt = " · worktree=" + w.WorktreeBranch
 		}
 		keepTag := ""
 		if w.Keep {
 			keepTag = " · KEEP"
 		}
-		fmt.Fprintf(&b, "\n%d. %s (%s · %s · by=%s · idle=%s · attempt=%d/2%s%s)\n",
-			i+1, w.Name, w.Kind, host, origin, formatIdleDuration(c.idleDur), c.attempt, wt, keepTag)
+		if c.wi != nil && strings.TrimSpace(c.wi.Title) != "" {
+			fmt.Fprintf(&b, "\n%d. 事项「%s」(%s · 底层会话 %s · %s · %s · by=%s · idle=%s · attempt=%d/2%s%s)\n",
+				i+1, oneLineClip(c.wi.Title, 60), c.wi.ID, w.Name, w.Kind, host, origin, formatIdleDuration(c.idleDur), c.attempt, wt, keepTag)
+			if strings.TrimSpace(c.wi.NextStep) != "" {
+				fmt.Fprintf(&b, "   next: %s\n", oneLineClip(c.wi.NextStep, 220))
+			}
+		} else {
+			fmt.Fprintf(&b, "\n%d. %s (%s · %s · by=%s · idle=%s · attempt=%d/2%s%s)\n",
+				i+1, w.Name, w.Kind, host, origin, formatIdleDuration(c.idleDur), c.attempt, wt, keepTag)
+		}
 		if summary != "" {
 			fmt.Fprintf(&b, "   last: %s\n", oneLineClip(summary, 280))
 		}
 	}
 	if extra > 0 {
-		fmt.Fprintf(&b, "\n(+%d additional lower-priority idle sessions omitted to keep the summary compact)\n", extra)
+		fmt.Fprintf(&b, "\n(+%d additional lower-priority items omitted to keep the summary compact)\n", extra)
 	}
 	_, _ = e.Ingest(ctx, "system", model.MainThread, "corgi", b.String(), "", model.RouterName, "idle-patrol")
 }
@@ -317,47 +350,226 @@ func (e *Engine) tryEmitMorningDigest(
 	ctx context.Context,
 	st model.Settings,
 	workers []*model.Worker,
+	wiByID map[string]*model.WorkItem,
 	live map[string]liveInfo,
 	pendingActions []*model.Action,
 	todayStart, now time.Time,
 ) bool {
 	staleDays := st.EffectiveStaleArchiveDays()
 	staleDur := time.Duration(staleDays) * 24 * time.Hour
+	autoGCEnabled := st.EffectiveWorkerIdleGCMinutes() > 0
 
 	type digestItem struct {
 		priority int
 		tag      string
-		worker   *model.Worker
+		workers  []*model.Worker
 		line     string
 	}
 	var priorityItems []digestItem
 	var staleWorkers []*model.Worker
 
-	// 1. Existing unresolved pending actions (including woken snoozed cards).
+	workerByName := make(map[string]*model.Worker, len(workers))
+	workersByWI := map[string][]*model.Worker{}
+	for _, w := range workers {
+		if w == nil {
+			continue
+		}
+		workerByName[w.Name] = w
+		if w.WorkItemID != "" {
+			workersByWI[w.WorkItemID] = append(workersByWI[w.WorkItemID], w)
+		}
+	}
+	endedByWI := map[string][]*model.EndedSession{}
+	if endedList, err := e.store.ListEndedSessions(ctx, store.EndedSessionRetentionLimit); err == nil {
+		for _, es := range endedList {
+			if es != nil && es.WorkItemID != "" {
+				endedByWI[es.WorkItemID] = append(endedByWI[es.WorkItemID], es)
+			}
+		}
+	}
+
+	resolveActionWI := func(a *model.Action) *model.WorkItem {
+		if a == nil {
+			return nil
+		}
+		if a.WorkItemID != "" {
+			if wi := wiByID[a.WorkItemID]; wi != nil {
+				return wi
+			}
+		}
+		if a.TargetWorker != "" {
+			if wk := workerByName[a.TargetWorker]; wk != nil && wk.WorkItemID != "" {
+				return wiByID[wk.WorkItemID]
+			}
+		}
+		return nil
+	}
+
+	pendingWIIDs := map[string]bool{}
+	pendingDialogWorkers := map[string]bool{}
+
+	// 1. Existing unresolved pending actions (including woken snoozed cards), WorkItem-centered.
 	for _, a := range pendingActions {
 		if a.Kind == model.ActionKindPatrolDigest && a.CreatedAt.Before(todayStart) {
 			continue // old digest will be superseded by today's morning digest
 		}
-		prio := 2
-		tag := "pending"
+		wi := resolveActionWI(a)
+		if wi != nil && wi.ClosedAt != nil {
+			continue
+		}
+		prio := 1
+		tag := "待拍板"
 		if a.Kind == model.ActionKindWorkerDialog {
 			prio = 0
-			tag = "BLOCKED"
+			tag = "阻塞待确认"
+			if a.TargetWorker != "" {
+				pendingDialogWorkers[a.TargetWorker] = true
+			}
 		}
-		who := a.TargetWorker
-		if who == "" {
-			who = "main"
+		if wi != nil {
+			pendingWIIDs[wi.ID] = true
+			priorityItems = append(priorityItems, digestItem{
+				priority: prio,
+				tag:      tag,
+				line:     fmt.Sprintf("[%s] 事项「%s」(%s): %s", tag, oneLineClip(wi.Title, 60), wi.ID, oneLineClip(a.Title, 140)),
+			})
+		} else {
+			who := orStr(a.TargetWorker, "主对话")
+			priorityItems = append(priorityItems, digestItem{
+				priority: prio,
+				tag:      tag,
+				line:     fmt.Sprintf("[%s] %s: %s", tag, who, oneLineClip(a.Title, 140)),
+			})
+		}
+	}
+
+	// 2. Live blocked workers not already covered by a pending dialog action.
+	for _, w := range workers {
+		if w == nil || w.Ended || pendingDialogWorkers[w.Name] {
+			continue
+		}
+		var wi *model.WorkItem
+		if w.WorkItemID != "" {
+			wi = wiByID[w.WorkItemID]
+			if wi != nil && wi.ClosedAt != nil {
+				continue
+			}
+		}
+		li, alive := live[w.Name]
+		if !alive || li.status != "blocked" {
+			continue
+		}
+		if w.SnoozeUntil != nil && w.SnoozeUntil.After(now) {
+			continue
+		}
+		label := w.Name
+		if wi != nil && strings.TrimSpace(wi.Title) != "" {
+			pendingWIIDs[wi.ID] = true
+			label = fmt.Sprintf("事项「%s」(%s)", oneLineClip(wi.Title, 60), wi.ID)
 		}
 		priorityItems = append(priorityItems, digestItem{
-			priority: prio,
-			tag:      tag,
-			line:     fmt.Sprintf("[%s] %s: %s", tag, who, oneLineClip(a.Title, 140)),
+			priority: 0,
+			tag:      "阻塞待确认",
+			workers:  []*model.Worker{w},
+			line:     fmt.Sprintf("[阻塞待确认] %s 正等待终端审批确认", label),
 		})
 	}
 
-	// 2. Carryover idle workers from before today's morning start & stale >= staleDays Corgi sessions.
+	// 3. Open WorkItems carrying over from before todayStart — works seamlessly even when their
+	//    underlying Workers were transparently hibernated overnight by v0.1.76 Worker GC.
+	var openWIs []*model.WorkItem
+	for _, wi := range wiByID {
+		if wi != nil && wi.ClosedAt == nil && orStr(wi.Thread, model.MainThread) == model.MainThread {
+			openWIs = append(openWIs, wi)
+		}
+	}
+	sort.SliceStable(openWIs, func(i, j int) bool {
+		return openWIs[i].UpdatedAt.After(openWIs[j].UpdatedAt)
+	})
+	for _, wi := range openWIs {
+		if pendingWIIDs[wi.ID] {
+			continue
+		}
+		attached := workersByWI[wi.ID]
+		var (
+			hasRunning     bool
+			hasSnoozed     bool
+			hasLiveCarry   bool
+			liveIdleList   []*model.Worker
+			implBranch     string
+			latestSummary  string
+			latestReportAt time.Time
+		)
+		for _, w := range attached {
+			if w == nil {
+				continue
+			}
+			if !w.Ended {
+				if w.SnoozeUntil != nil && w.SnoozeUntil.After(now) {
+					hasSnoozed = true
+				}
+				if li, alive := live[w.Name]; alive {
+					if li.status == "working" || li.status == "blocked" {
+						hasRunning = true
+					}
+					if (li.status == "idle" || li.status == "done") && w.IdleSince != nil {
+						liveIdleList = append(liveIdleList, w)
+						if w.IdleSince.Before(todayStart) {
+							hasLiveCarry = true
+						}
+					}
+				}
+			}
+			if strings.EqualFold(wi.Scope, "implement") && implBranch == "" && w.WorktreeBranch != "" {
+				implBranch = w.WorktreeBranch
+			}
+			if rep := strings.TrimSpace(w.LastReport); rep != "" && (latestSummary == "" || w.ReportAt.After(latestReportAt)) {
+				latestSummary = rep
+				latestReportAt = w.ReportAt
+			}
+		}
+		if implBranch == "" && strings.EqualFold(wi.Scope, "implement") {
+			for _, es := range endedByWI[wi.ID] {
+				if es.WorktreeBranch != "" {
+					implBranch = es.WorktreeBranch
+					break
+				}
+			}
+		}
+		if hasRunning || hasSnoozed {
+			continue
+		}
+		carriedOver := wi.UpdatedAt.Before(todayStart) || hasLiveCarry
+		if !carriedOver {
+			continue
+		}
+		detail := strings.TrimSpace(wi.NextStep)
+		if detail == "" {
+			detail = oneLineClip(latestSummary, 160)
+		}
+		if detail == "" {
+			detail = "尚无后续安排，待确认是否继续推进或关闭"
+		}
+		scopeLabel := orStr(wi.Scope, "待定")
+		branchNote := ""
+		if implBranch != "" {
+			branchNote = fmt.Sprintf("（含待核验代码分支 %s）", implBranch)
+		}
+		prio := 2
+		if implBranch != "" {
+			prio = 1
+		}
+		priorityItems = append(priorityItems, digestItem{
+			priority: prio,
+			tag:      "开放事项",
+			workers:  liveIdleList,
+			line:     fmt.Sprintf("[开放事项] 「%s」(%s · 阶段=%s)%s — %s", oneLineClip(wi.Title, 60), wi.ID, scopeLabel, branchNote, oneLineClip(detail, 180)),
+		})
+	}
+
+	// 4. Unbound live carryover workers (WorkItemID == "" only; closed-WorkItem workers are strictly excluded).
 	for _, w := range workers {
-		if w.Ended {
+		if w == nil || w.Ended || w.WorkItemID != "" {
 			continue
 		}
 		li, alive := live[w.Name]
@@ -367,29 +579,21 @@ func (e *Engine) tryEmitMorningDigest(
 		if w.SnoozeUntil != nil && w.SnoozeUntil.After(now) {
 			continue
 		}
-		if li.status == "blocked" {
-			priorityItems = append(priorityItems, digestItem{
-				priority: 0,
-				tag:      "BLOCKED",
-				worker:   w,
-				line:     fmt.Sprintf("[BLOCKED] %s (%s · %s) is waiting on a terminal dialog", w.Name, w.Kind, orStr(w.Machine, "hub")),
-			})
-			continue
-		}
 		if (li.status != "idle" && li.status != "done") || w.IdleSince == nil {
 			continue
 		}
 		idleDur := now.Sub(*w.IdleSince)
 		if w.WorktreeBranch != "" && w.IdleSince.Before(todayStart) {
 			priorityItems = append(priorityItems, digestItem{
-				priority: 1,
-				tag:      "WORKTREE",
-				worker:   w,
-				line:     fmt.Sprintf("[WORKTREE] %s (%s · branch %s · idle %s) — verify/merge or keep", w.Name, orStr(w.Machine, "hub"), w.WorktreeBranch, formatIdleDuration(idleDur)),
+				priority: 2,
+				tag:      "未归属分支",
+				workers:  []*model.Worker{w},
+				line:     fmt.Sprintf("[未归属代码分支] %s (%s · branch %s · idle %s) — 若含未合入改动请核验或归属事项", w.Name, orStr(w.Machine, "hub"), w.WorktreeBranch, formatIdleDuration(idleDur)),
 			})
 			continue
 		}
-		isStaleCorgi := staleDays > 0 && w.CreatedBy != "you" && !w.Keep && w.WorktreeBranch == "" && idleDur >= staleDur
+		// Only surface stale Corgi session archival prompts when automatic Worker GC is disabled (-1).
+		isStaleCorgi := !autoGCEnabled && staleDays > 0 && w.CreatedBy != "you" && !w.Keep && w.WorktreeBranch == "" && idleDur >= staleDur
 		if isStaleCorgi {
 			staleWorkers = append(staleWorkers, w)
 			continue
@@ -399,11 +603,14 @@ func (e *Engine) tryEmitMorningDigest(
 			if summary == "" && w.PaneID != "" {
 				summary = e.lastWorkerSummary(ctx, w)
 			}
+			if summary == "" && w.CreatedBy == "you" {
+				continue
+			}
 			priorityItems = append(priorityItems, digestItem{
-				priority: 2,
-				tag:      "CARRYOVER",
-				worker:   w,
-				line:     fmt.Sprintf("[CARRYOVER] %s (%s · by=%s · idle %s): %s", w.Name, orStr(w.Machine, "hub"), orStr(w.CreatedBy, "corgi"), formatIdleDuration(idleDur), oneLineClip(summary, 180)),
+				priority: 3,
+				tag:      "未归属遗留",
+				workers:  []*model.Worker{w},
+				line:     fmt.Sprintf("[未归属遗留会话] %s (%s · by=%s · idle %s): %s", w.Name, orStr(w.Machine, "hub"), orStr(w.CreatedBy, "corgi"), formatIdleDuration(idleDur), oneLineClip(summary, 180)),
 			})
 		}
 	}
@@ -414,33 +621,36 @@ func (e *Engine) tryEmitMorningDigest(
 
 	sort.SliceStable(priorityItems, func(i, j int) bool { return priorityItems[i].priority < priorityItems[j].priority })
 
-	// Mark patrolled timestamp on included workers so same-day patrol doesn't immediately re-fire.
+	// Mark patrolled timestamp on included live workers so same-day patrol doesn't immediately re-fire.
 	for _, it := range priorityItems {
-		if it.worker != nil {
-			t := now
-			it.worker.IdlePatrolAt = &t
-			if it.worker.IdlePatrolCount == 0 {
-				it.worker.IdlePatrolCount = 1
+		for _, w := range it.workers {
+			if w != nil && !w.Ended {
+				t := now
+				w.IdlePatrolAt = &t
+				if w.IdlePatrolCount == 0 {
+					w.IdlePatrolCount = 1
+				}
+				_ = e.store.UpsertWorker(ctx, w)
 			}
-			_ = e.store.UpsertWorker(ctx, it.worker)
 		}
 	}
 
 	apiMode := e.isAPIRouterMode()
 	var b strings.Builder
-	fmt.Fprintf(&b, "[corgi morning-digest] Daily morning review (%s). Pending/carryover: %d; stale >=%dd Corgi sessions: %d.\n",
+	fmt.Fprintf(&b, "[corgi morning-digest] Daily morning review (%s). Open/pending items: %d; stale >=%dd Corgi sessions: %d.\n",
 		now.Format("2006-01-02 15:04"), len(priorityItems), staleDays, len(staleWorkers))
-	b.WriteString("Formatting rules:\n")
+	b.WriteString("Formatting rules (WorkItem-centered):\n")
 	if apiMode {
-		b.WriteString("- Include ONLY genuinely unresolved items needing human action (Top 5 max; omit healthy/finished noise). If nothing truly needs action, output [SILENT].\n")
-		b.WriteString("- Always format multiple items as a clean Markdown bullet list (1 short line per item naming exact worker/branch).\n")
-		b.WriteString("- If there are 2+ independent unrelated items (and no single batch-archive action), send ONE plain bulleted Markdown summary via reply_user(purpose=\"answer\") WITHOUT choices (NEVER force unrelated items into fake mutually-exclusive A/B buttons).\n")
-		b.WriteString("- Use reply_user(purpose=\"attention\", choices=[...]) ONLY when there is a single clear decision or a batch-archive confirmation.\n")
+		b.WriteString("- 所有面向用户的标题与正文必须以「事项名称」为主语，严禁把 wi/agy/codex/分支名等内部代号当作主语甩给用户。\n")
+		b.WriteString("- 严禁把清理已关闭事项或无未合入改动的闲置 worktree / 底层会话包装成待拍板卡片（底层进程休眠由系统自动 GC 处理）。\n")
+		b.WriteString("- 仅汇报确实需要用户知晓或拍板的未结事项（最多 5 条）；若无需要打扰用户的事项，必须调用 no_action(reason) 结束。\n")
+		b.WriteString("- 2 项以上彼此独立的事项用 reply_user(purpose=\"answer\") 发 1 条清晰 Markdown 分条清单（每条写清「事项名称 + 当前进展与需决策点」，禁加互斥按钮）。\n")
+		b.WriteString("- 仅当存在单一明确拍板点时，才用 reply_user(purpose=\"attention\", title=\"事项名称 · 决策点\", choices=[...])。\n")
 	} else {
+		b.WriteString("- Always frame every item around its human-readable WorkItem title, not raw internal worker/branch slugs.\n")
 		b.WriteString("- Include ONLY genuinely unresolved items needing human action (Top 5 max; omit healthy/finished noise). If nothing truly needs action, stay SILENT.\n")
-		b.WriteString("- Always format multiple items as a clean Markdown bullet list (1 short line per item naming exact worker/branch).\n")
-		b.WriteString("- If there are 2+ independent unrelated items (and no single batch-archive action), send ONE plain bulleted Markdown summary via `reply - <<'EOF'` WITHOUT `--opt` (NEVER force unrelated items into fake mutually-exclusive A/B buttons).\n")
-		b.WriteString("- Use `reply --digest --category morning --opt ...` ONLY when there is a single clear decision or a batch-archive confirmation (pass `--category stale` for pure archival).\n")
+		b.WriteString("- If there are 2+ independent unrelated items (and no single batch-archive action), send ONE plain bulleted Markdown summary via `reply - <<'EOF'` WITHOUT `--opt`.\n")
+		b.WriteString("- Use `reply --digest --category morning --opt ...` ONLY when there is a single clear decision or a batch-archive confirmation.\n")
 	}
 	if len(priorityItems) > 0 {
 		b.WriteString("\nCarryover & priority items:\n")
@@ -461,15 +671,15 @@ func (e *Engine) tryEmitMorningDigest(
 			names = append(names, fmt.Sprintf("%s (%s)", staleWorkers[i].Name, formatIdleDuration(now.Sub(*staleWorkers[i].IdleSince))))
 		}
 		if apiMode {
-			fmt.Fprintf(&b, "\nStale Corgi sessions (>=%dd inactive, non-keep, lossless resume via dispatch_work): %s", staleDays, strings.Join(names, ", "))
+			fmt.Fprintf(&b, "\nStale Corgi sessions (>=%dd inactive, auto-GC disabled, lossless resume via dispatch_work): %s", staleDays, strings.Join(names, ", "))
 		} else {
-			fmt.Fprintf(&b, "\nStale Corgi sessions (>=%dd inactive, non-keep, lossless --resume if stopped): %s", staleDays, strings.Join(names, ", "))
+			fmt.Fprintf(&b, "\nStale Corgi sessions (>=%dd inactive, auto-GC disabled, lossless --resume if stopped): %s", staleDays, strings.Join(names, ", "))
 		}
 		if len(staleWorkers) > patrolMaxStaleNames {
 			fmt.Fprintf(&b, " (+%d more)", len(staleWorkers)-patrolMaxStaleNames)
 		}
 		if apiMode {
-			b.WriteString("\nOffer a single batch-archive option via reply_user(purpose=\"attention\") and remind the human they can reply with exceptions (e.g. '保留 X，其余归档' -> call manage_work(action=\"keep_worker\", target=\"X\") and manage_work(action=\"stop_worker\") on the rest).\n")
+			b.WriteString("\nIf the human prefers manual archival, offer a concise batch-archive option via reply_user(purpose=\"attention\").\n")
 		} else {
 			b.WriteString("\nOffer a single batch-archive option and remind the human they can reply with exceptions (e.g. '保留 X，其余归档' -> run `keep X` and `stop` the rest).\n")
 		}

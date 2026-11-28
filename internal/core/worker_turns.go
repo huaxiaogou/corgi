@@ -16,11 +16,13 @@ const (
 	defaultWorkerStartupProbeDelay    = 2 * time.Second
 	defaultWorkerStartupProbeInterval = 3 * time.Second
 	defaultWorkerStartupCheckWindow   = 25 * time.Second
+	defaultWorkerTurnSettleDelay      = 25 * time.Second
 )
 
 // workerTurnWatermark tracks deterministic causal watermarks for one live Worker instance:
 // Queued (latestIssued) -> Delivered (to PTY) -> Observed (in transcript USER_INPUT header),
 // the highest assistant byte offset already surfaced to Router to prevent stale replays,
+// quiet-settle debounce for API Router mode so intermediate worker turns don't spam Router,
 // and post-dispatch startup health checks that catch immediate executor/config crashes.
 type workerTurnWatermark struct {
 	paneID              string
@@ -36,6 +38,8 @@ type workerTurnWatermark struct {
 	lastUserAt          int64
 	pendingCheck        bool
 	pendingSince        time.Time
+	settleKey           string
+	settleSince         time.Time
 	startupCheckActive  bool
 	startupBatchIDs     []string
 	startupPromptText   string
@@ -115,6 +119,8 @@ func (e *Engine) recordWorkerDelivered(workerName, paneID string, list []*model.
 	}
 	wm.pendingCheck = false
 	wm.pendingSince = time.Time{}
+	wm.settleKey = ""
+	wm.settleSince = time.Time{}
 }
 
 func (e *Engine) clearWorkerPendingCheck(workerName string) {
@@ -125,8 +131,23 @@ func (e *Engine) clearWorkerPendingCheck(workerName string) {
 	if wm := e.workerTurns[workerName]; wm != nil {
 		wm.pendingCheck = false
 		wm.pendingSince = time.Time{}
+		wm.settleKey = ""
+		wm.settleSince = time.Time{}
 	}
 	e.mu.Unlock()
+}
+
+func (e *Engine) getWorkerTurnSettleDelay() time.Duration {
+	e.mu.Lock()
+	d := e.workerTurnSettleDelay
+	e.mu.Unlock()
+	if d != 0 {
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+	return defaultWorkerTurnSettleDelay
 }
 
 func (e *Engine) clearWorkerTurnState(workerName string) {
@@ -139,15 +160,22 @@ func (e *Engine) clearWorkerTurnState(workerName string) {
 }
 
 func (e *Engine) hasWorkerPendingCheck(workerName string, now time.Time) bool {
+	settleDelay := e.getWorkerTurnSettleDelay()
+	maxWindow := workerPendingCheckWindow
+	if settleDelay+30*time.Second > maxWindow {
+		maxWindow = settleDelay + 30*time.Second
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	wm := e.workerTurns[workerName]
 	if wm == nil || !wm.pendingCheck {
 		return false
 	}
-	if !wm.pendingSince.IsZero() && now.Sub(wm.pendingSince) > workerPendingCheckWindow {
+	if !wm.pendingSince.IsZero() && now.Sub(wm.pendingSince) > maxWindow {
 		wm.pendingCheck = false
 		wm.pendingSince = time.Time{}
+		wm.settleKey = ""
+		wm.settleSince = time.Time{}
 		return false
 	}
 	return true
@@ -188,13 +216,34 @@ func (e *Engine) shouldEmitWorkerTurnSummary(wk *model.Worker, snap workerTurnSn
 	if wk == nil || wk.Name == "" {
 		return false
 	}
+	apiMode := e.isAPIRouterMode()
+	settleDelay := time.Duration(0)
+	if apiMode {
+		settleDelay = e.getWorkerTurnSettleDelay()
+	}
 	e.observeWorkerTranscript(wk, snap)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	wm := e.getOrResetWorkerTurnLocked(wk.Name, wk.PaneID, wk.Session)
 	if !snap.FromTranscript {
+		if settleDelay > 0 {
+			key := hashTurnText(snap.Text)
+			if wm.settleKey != key || wm.settleSince.IsZero() {
+				wm.settleKey = key
+				wm.settleSince = now
+				wm.pendingCheck = true
+				wm.pendingSince = now
+				return false
+			}
+			if now.Sub(wm.settleSince) < settleDelay {
+				wm.pendingCheck = true
+				return false
+			}
+		}
 		wm.pendingCheck = false
 		wm.pendingSince = time.Time{}
+		wm.settleKey = ""
+		wm.settleSince = time.Time{}
 		return true
 	}
 	if !snap.AfterLastUser || strings.TrimSpace(snap.Text) == "" || snap.Text == "(no output captured)" {
@@ -207,6 +256,8 @@ func (e *Engine) shouldEmitWorkerTurnSummary(wk *model.Worker, snap workerTurnSn
 	if snap.AssistantAt > 0 && snap.AssistantAt <= wm.lastNotifiedAt {
 		wm.pendingCheck = false
 		wm.pendingSince = time.Time{}
+		wm.settleKey = ""
+		wm.settleSince = time.Time{}
 		return false
 	}
 	// Suppress duplicate automatic turn-done notifications when the worker already filed an
@@ -222,6 +273,25 @@ func (e *Engine) shouldEmitWorkerTurnSummary(wk *model.Worker, snap workerTurnSn
 			}
 			wm.pendingCheck = false
 			wm.pendingSince = time.Time{}
+			wm.settleKey = ""
+			wm.settleSince = time.Time{}
+			return false
+		}
+	}
+	// Quiet-settle debounce in API Router mode: intermediate mid-run pauses (e.g. brief progress
+	// notes between tool steps) settle silently until the worker stays continuously idle for
+	// settleDelay without resuming work or filing an explicit `corgi report`.
+	if settleDelay > 0 {
+		key := fmt.Sprintf("at:%d:%s", snap.AssistantAt, hashTurnText(snap.Text))
+		if wm.settleKey != key || wm.settleSince.IsZero() {
+			wm.settleKey = key
+			wm.settleSince = now
+			wm.pendingCheck = true
+			wm.pendingSince = now
+			return false
+		}
+		if now.Sub(wm.settleSince) < settleDelay {
+			wm.pendingCheck = true
 			return false
 		}
 	}
@@ -230,6 +300,8 @@ func (e *Engine) shouldEmitWorkerTurnSummary(wk *model.Worker, snap workerTurnSn
 	}
 	wm.pendingCheck = false
 	wm.pendingSince = time.Time{}
+	wm.settleKey = ""
+	wm.settleSince = time.Time{}
 	return true
 }
 
@@ -273,6 +345,8 @@ func (e *Engine) recordWorkerExplicitReport(wk *model.Worker, snap workerTurnSna
 	wm.reportedSeq = seq
 	wm.pendingCheck = false
 	wm.pendingSince = time.Time{}
+	wm.settleKey = ""
+	wm.settleSince = time.Time{}
 }
 
 func (e *Engine) markWorkerAssistantNotified(wk *model.Worker, snap workerTurnSnapshot) {
@@ -288,6 +362,8 @@ func (e *Engine) markWorkerAssistantNotified(wk *model.Worker, snap workerTurnSn
 	}
 	wm.pendingCheck = false
 	wm.pendingSince = time.Time{}
+	wm.settleKey = ""
+	wm.settleSince = time.Time{}
 }
 
 // formatWorkerTurnStatusNote emits a concise, strictly factual causal watermark line ONLY when

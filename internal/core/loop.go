@@ -561,17 +561,16 @@ func (e *Engine) handleWorkerBlocked(ctx context.Context, w *model.Worker) {
 	}
 	summary := e.lastWorkerSummary(ctx, w)
 	choices := formatChoicesText(ap)
-	e.addEvent(ctx, w.Thread, w.Name+" 等你确认："+ap.Title, w.Name, "blocked")
-	var blockedMsg string
-	if e.isAPIRouterMode() {
-		blockedMsg = fmt.Sprintf("worker %s is BLOCKED on a terminal dialog (already shown as an interactive approval card for the human in chat).\nScreen:\n%s%s\nDo NOT try to answer terminal dialogs yourself — wait for the human to click the card. Reply only if extra context is needed; otherwise output [SILENT].",
-			w.Name, summary, choices)
-	} else {
-		blockedMsg = fmt.Sprintf("worker %s is BLOCKED on a terminal dialog (also shown as a card in chat).\nScreen:\n%s%s\nIf the answer follows from the task or is routine, answer it yourself: `%s answer %s <choice>`. Leave high-risk choices to the human.",
+	subject := e.formatWorkItemSubject(ctx, w.WorkItemID, w.Name, w.Name)
+	e.addEvent(ctx, w.Thread, subject+" 等你确认："+ap.Title, w.Name, "blocked")
+	// In API Router mode the interactive approval card is pushed directly to chat and the API
+	// Router is prohibited from answering terminal dialogs; avoid waking the LLM just to stay silent.
+	if !e.isAPIRouterMode() {
+		blockedMsg := fmt.Sprintf("worker %s is BLOCKED on a terminal dialog (also shown as a card in chat).\nScreen:\n%s%s\nIf the answer follows from the task or is routine, answer it yourself: `%s answer %s <choice>`. Leave high-risk choices to the human.",
 			w.Name, summary, choices, e.binPath, w.Name)
+		_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name, blockedMsg,
+			"", model.RouterName, w.Name, TriggerMeta{WorkItemID: w.WorkItemID})
 	}
-	_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name, blockedMsg,
-		"", model.RouterName, w.Name, TriggerMeta{WorkItemID: w.WorkItemID})
 
 	e.mu.Lock()
 	sink := e.sink
@@ -624,10 +623,12 @@ func (e *Engine) handleWorkerTurnDone(ctx context.Context, w *model.Worker) {
 			}
 			go dt.callback(context.WithoutCancel(ctx), res)
 		}
-		_, _ = e.Ingest(ctx, "worker", w.Thread, w.Name,
-			fmt.Sprintf("worker %s stopped on an agent/provider error (not finished): %s\nLast message before it:\n%s\nHand the job to another kind of agent or computer and inform the human in one line.", w.Name, qErr, summary),
-			"", model.RouterName, w.Name)
-		e.addEvent(ctx, w.Thread, w.Name+" 出错了："+qErr, w.Name, "error")
+		wiNote := e.formatWorkerWorkItemContext(ctx, w)
+		_, _ = e.IngestWithMeta(ctx, "worker", w.Thread, w.Name,
+			fmt.Sprintf("worker %s stopped on an agent/provider error (not finished): %s\nLast message before it:\n%s%s\nHand the job to another kind of agent or computer and inform the human clearly by work item title.", w.Name, qErr, summary, wiNote),
+			"", model.RouterName, w.Name, TriggerMeta{WorkItemID: w.WorkItemID})
+		subject := e.formatWorkItemSubject(ctx, w.WorkItemID, w.Name, w.Name)
+		e.addEvent(ctx, w.Thread, subject+" 出错了："+qErr, w.Name, "error")
 		return
 	}
 	if dt == nil {

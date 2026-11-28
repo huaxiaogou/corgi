@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/store"
@@ -270,7 +271,38 @@ func (e *Engine) UnbindWorkerFromWorkItem(ctx context.Context, id, workerName st
 	return wi, nil
 }
 
-// CloseWorkItem closes an open work item with an explicit closing note and expires its owned actions.
+// workItemTitleFor resolves the human-facing WorkItem title from an explicit workItemID
+// or via workerName's bound WorkItemID. Returns "" when unbound.
+func (e *Engine) workItemTitleFor(ctx context.Context, workItemID, workerName string) string {
+	if e.store == nil {
+		return ""
+	}
+	wid := strings.TrimSpace(workItemID)
+	if wid == "" && strings.TrimSpace(workerName) != "" {
+		if wk, err := e.store.GetWorker(ctx, strings.TrimSpace(workerName)); err == nil && wk != nil {
+			wid = strings.TrimSpace(wk.WorkItemID)
+		}
+	}
+	if wid == "" {
+		return ""
+	}
+	if wi, err := e.store.GetWorkItem(ctx, wid); err == nil && wi != nil {
+		return strings.TrimSpace(wi.Title)
+	}
+	return ""
+}
+
+// formatWorkItemSubject returns "「Title」" when a WorkItem title is available,
+// falling back cleanly to fallbackLabel.
+func (e *Engine) formatWorkItemSubject(ctx context.Context, workItemID, workerName, fallbackLabel string) string {
+	if title := e.workItemTitleFor(ctx, workItemID, workerName); title != "" {
+		return "「" + oneLineClip(title, 36) + "」"
+	}
+	return strings.TrimSpace(fallbackLabel)
+}
+
+// CloseWorkItem closes an open work item with an explicit closing note, expires its owned actions,
+// and asynchronously cleans up any clean, already-merged worktrees left behind by already-ended workers.
 func (e *Engine) CloseWorkItem(ctx context.Context, id, note string) (*model.WorkItem, error) {
 	id = strings.TrimSpace(id)
 	note = strings.TrimSpace(note)
@@ -286,6 +318,7 @@ func (e *Engine) CloseWorkItem(ctx context.Context, id, note string) (*model.Wor
 	}
 	if wi != nil {
 		e.ClearWeComFocusForWorkItem(ctx, wi.ID, wi.Workers)
+		e.scheduleClosedWorkItemWorktreeCleanup(ctx, wi.ID)
 	}
 	if len(expired) > 0 {
 		e.mu.Lock()
@@ -297,6 +330,104 @@ func (e *Engine) CloseWorkItem(ctx context.Context, id, note string) (*model.Wor
 	}
 	e.notifyChanged()
 	return wi, nil
+}
+
+func (e *Engine) scheduleClosedWorkItemWorktreeCleanup(ctx context.Context, workItemID string) {
+	if e.store == nil || strings.TrimSpace(workItemID) == "" {
+		return
+	}
+	workers, err := e.store.ListWorkers(ctx)
+	if err != nil {
+		return
+	}
+	hasTarget := false
+	for _, wk := range workers {
+		if wk != nil && wk.Ended && wk.WorkItemID == workItemID &&
+			strings.TrimSpace(wk.WorktreePath) != "" && strings.TrimSpace(wk.RepoRoot) != "" {
+			hasTarget = true
+			break
+		}
+	}
+	if !hasTarget {
+		return
+	}
+	e.mu.Lock()
+	parent := e.runCtx
+	e.mu.Unlock()
+	if parent == nil {
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		e.cleanupClosedWorkItemWorktrees(cctx, workItemID)
+		return
+	}
+	go func() {
+		cctx, cancel := context.WithTimeout(parent, 20*time.Second)
+		defer cancel()
+		e.cleanupClosedWorkItemWorktrees(cctx, workItemID)
+	}()
+}
+
+// cleanupClosedWorkItemWorktrees safely removes ONLY clean, zero-unmerged-commit git worktrees
+// belonging to already-ended workers of a closed WorkItem (never touching live workers, dirty
+// trees, or branches with unmerged commits).
+func (e *Engine) cleanupClosedWorkItemWorktrees(ctx context.Context, workItemID string) {
+	if e.store == nil || strings.TrimSpace(workItemID) == "" || ctx.Err() != nil {
+		return
+	}
+	workers, err := e.store.ListWorkers(ctx)
+	if err != nil {
+		return
+	}
+	endedList, _ := e.store.ListEndedSessions(ctx, store.EndedSessionRetentionLimit)
+	endedByName := map[string]*model.EndedSession{}
+	for _, es := range endedList {
+		if es != nil && es.Name != "" {
+			if _, exists := endedByName[es.Name]; !exists {
+				endedByName[es.Name] = es
+			}
+		}
+	}
+
+	for _, wk := range workers {
+		if ctx.Err() != nil {
+			return
+		}
+		if wk == nil || !wk.Ended || wk.WorkItemID != workItemID {
+			continue
+		}
+		if strings.TrimSpace(wk.WorktreePath) == "" || strings.TrimSpace(wk.RepoRoot) == "" {
+			continue
+		}
+		clRes, clErr := e.cleanupWorktreeOnMachine(ctx, wk.Machine, wk.RepoRoot, wk.WorktreePath, wk.WorktreeBranch, wk.WorktreeBase)
+		if clErr != nil {
+			e.logger.Warn("closed work item worktree cleanup skipped",
+				"work_item", workItemID, "worker", wk.Name, "err", clErr)
+			continue
+		}
+		if !clRes.RemovedDir && !clRes.DeletedBranch {
+			continue
+		}
+		if clRes.RemovedDir {
+			wk.WorktreePath = ""
+			wk.Cwd = wk.RepoRoot
+		}
+		if clRes.DeletedBranch {
+			wk.WorktreeBranch = ""
+		}
+		_ = e.store.UpsertWorker(ctx, wk)
+		if es := endedByName[wk.Name]; es != nil {
+			if clRes.RemovedDir {
+				es.WorktreePath = ""
+				es.Cwd = wk.RepoRoot
+			}
+			if clRes.DeletedBranch {
+				es.WorktreeBranch = ""
+			}
+			_ = e.store.SaveEndedSession(ctx, es, store.EndedSessionRetentionLimit)
+		}
+		e.logger.Info("cleaned closed work item worktree",
+			"work_item", workItemID, "worker", wk.Name, "note", clRes.Note)
+	}
 }
 
 // formatOpenWorkItemsSummary formats a compact Hub ledger summary injected on normal Router turns

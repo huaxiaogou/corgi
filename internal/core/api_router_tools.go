@@ -115,7 +115,7 @@ func isPrototypeOrReadonlyWorkItem(wi *model.WorkItem) bool {
 	}
 }
 
-// apiRouterToolDefs returns the 8 deterministic, strictly ordered native Go tool definitions
+// apiRouterToolDefs returns the 9 deterministic, strictly ordered native Go tool definitions
 // so the static system+tools prefix consistently hits prompt_cache_key.
 func apiRouterToolDefs() []LLMToolDef {
 	return []LLMToolDef{
@@ -127,16 +127,16 @@ func apiRouterToolDefs() []LLMToolDef {
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"mode":       map[string]any{"type": "string", "enum": []string{"readonly", "prototype", "implement"}, "description": "任务模式：readonly 只读调研/分析，prototype 原型/方案草稿，implement 修改源码/跑测试"},
-						"goal":       map[string]any{"type": "string", "description": "清晰、自包含的任务说明与验收标准"},
-						"work_id":    map[string]any{"type": "string", "description": "关联的开放 work_item ID（留空则按上下文自动绑定或新建）"},
-						"title":      map[string]any{"type": "string", "description": "新建 work_item 时的简洁标题（≤20字）"},
-						"project":    map[string]any{"type": "string", "description": "已配置的项目 ID 或名称"},
-						"machine":    map[string]any{"type": "string", "description": "运行机器 ID（留空用全局默认）"},
-						"kind":       map[string]any{"type": "string", "enum": []string{"claude", "codex", "agy", "codebuddy"}, "description": "指定 CLI 工具（留空用全局默认）"},
+						"mode":          map[string]any{"type": "string", "enum": []string{"readonly", "prototype", "implement"}, "description": "任务模式：readonly 只读调研/分析，prototype 原型/方案草稿，implement 修改源码/跑测试"},
+						"goal":          map[string]any{"type": "string", "description": "清晰、自包含的任务说明与验收标准"},
+						"work_id":       map[string]any{"type": "string", "description": "关联的开放 work_item ID（留空则按上下文自动绑定或新建）"},
+						"title":         map[string]any{"type": "string", "description": "新建 work_item 时的简洁标题（≤20字）"},
+						"project":       map[string]any{"type": "string", "description": "已配置的项目 ID 或名称"},
+						"machine":       map[string]any{"type": "string", "description": "运行机器 ID（留空用全局默认）"},
+						"kind":          map[string]any{"type": "string", "enum": []string{"claude", "codex", "agy", "codebuddy"}, "description": "指定 CLI 工具（留空用全局默认）"},
 						"resume":        map[string]any{"type": "string", "description": "续聊已有/已结束 Worker 的名称（可选）"},
 						"constraint":    map[string]any{"type": "string", "description": "给 Worker 的额外硬约束（可选）"},
-						"worktree":      map[string]any{"type": "string", "enum": []string{"auto", "on", "off"}, "description": "worktree 隔离策略（普通 implement 默认 on，allow_release 默认 off）"},
+						"worktree":      map[string]any{"type": "string", "enum": []string{"auto", "on", "off"}, "description": "worktree 隔离策略（普通 implement 默认 on，allow_release/readonly/prototype 默认 off）"},
 						"allow_release": map[string]any{"type": "boolean", "description": "仅当用户已明确批准合并主分支、推送远端、发版或部署上线时设为 true（仅人类直接指令回合可用）"},
 					},
 					"required": []string{"mode", "goal"},
@@ -183,6 +183,20 @@ func apiRouterToolDefs() []LLMToolDef {
 		{
 			Type: "function",
 			Function: LLMToolFunctionSpec{
+				Name:        "no_action",
+				Description: "仅用于后台巡检/晨检、进度播报或 candidate 外部事件确认无需打扰用户时静默结束本轮；人类消息、任务完结汇报或故障提醒禁止调用。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"reason": map[string]any{"type": "string", "description": "简短说明本次无需打扰用户的内部原因（仅记入系统日志，不发给用户）"},
+					},
+					"required": []string{"reason"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: LLMToolFunctionSpec{
 				Name:        "read_detail",
 				Description: "按需分页读取 Worker 详情、截断 Trigger、WorkItem、Action、记忆笔记，或受限只读检查已配置项目文件与 Git 状态。",
 				Parameters: map[string]any{
@@ -206,8 +220,8 @@ func apiRouterToolDefs() []LLMToolDef {
 					"type": "object",
 					"properties": map[string]any{
 						"purpose": map[string]any{"type": "string", "enum": []string{"answer", "result", "attention"}, "description": "answer=普通问答（禁按钮），result=交付成果/附件，attention=需人确认的决策卡或提醒"},
-						"title":   map[string]any{"type": "string", "description": "仅 purpose=attention 时可选：简短具体的决策卡标题（≤20字纯文本，如 'wi3524 直聊身份 · 合入部署'）"},
-						"text":    map[string]any{"type": "string", "description": "回复正文（2项以上用 '- ' 列表分条；purpose=attention 时只聚焦当前要拍板的那一件事，用 1–2 句精炼说清现状与决策点，尽量 ≤100 字）"},
+						"title":   map[string]any{"type": "string", "description": "仅 purpose=attention 时可选：简短具体的决策卡标题（≤20字纯文本，用事项名称而非 wi/agy 内部编号，如 '直聊身份提醒 · 合入部署'）"},
+						"text":    map[string]any{"type": "string", "description": "回复正文（一律以事项名称与结论为主语，2项以上用 '- ' 列表分条；purpose=attention 时只聚焦当前要拍板的那一件事，用 1–2 句精炼说清现状与决策点，尽量 ≤100 字，严禁提及内部编号/工具名）"},
 						"choices": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "仅 purpose=attention 时可用，2–4 个清晰选项（每项尽量 ≤14 字，避免手机端截断）"},
 						"multi":   map[string]any{"type": "boolean", "description": "attention 卡片是否多选"},
 						"check":   map[string]any{"type": "boolean", "description": "仅 purpose=attention 且无需多选项时的轻量已读提醒"},
@@ -288,6 +302,8 @@ func (e *Engine) execAPIRouterTool(ctx context.Context, turn *apiRouterTurn, tri
 	switch tc.Function.Name {
 	case "reply_user":
 		return e.toolReplyUser(ctx, turn, trig, tc.Function.Arguments)
+	case "no_action":
+		return e.toolNoAction(ctx, turn, trig, tc.Function.Arguments)
 	case "dispatch_work":
 		return e.toolDispatchWork(ctx, turn, trig, meta, tc.Function.Arguments), false
 	case "steer_worker":
@@ -305,6 +321,29 @@ func (e *Engine) execAPIRouterTool(ctx context.Context, turn *apiRouterTurn, tri
 	default:
 		return toolErr("未知工具：" + tc.Function.Name), false
 	}
+}
+
+func (e *Engine) toolNoAction(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, rawArgs string) (string, bool) {
+	if !canAPIRouterSilence(trig) {
+		return toolErr("当前事件必须向用户作出明确答复或同步结果（人类发言、任务完结汇报、故障提醒均不可静默），请改用 reply_user 回复用户。"), false
+	}
+	var args struct {
+		Reason string `json:"reason"`
+	}
+	if strings.TrimSpace(rawArgs) != "" {
+		if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
+			return toolErr("no_action 参数 JSON 无效：" + err.Error()), false
+		}
+	}
+	reason := strings.TrimSpace(args.Reason)
+	if reason == "" {
+		return toolErr("no_action 需要提供简短 reason 说明无需打扰的原因"), false
+	}
+	e.logger.Info("api router no_action",
+		"trigger", trig.ID, "thread", turn.thread, "source", trig.Source, "reason", oneLineClip(reason, 160))
+	turn.markNoAction(reason)
+	e.ackAPITriggerOnce(context.Background(), turn, trig)
+	return toolJSON(map[string]any{"ok": true, "silent": true}), true
 }
 
 func (e *Engine) toolReplyUser(ctx context.Context, turn *apiRouterTurn, trig *model.Trigger, rawArgs string) (string, bool) {
@@ -555,11 +594,16 @@ func (e *Engine) toolDispatchWork(ctx context.Context, turn *apiRouterTurn, trig
 	}
 
 	wtMode := strings.TrimSpace(args.Worktree)
-	if mode == "implement" && wtMode == "" {
-		if args.AllowRelease {
+	if wtMode == "" {
+		switch mode {
+		case "implement":
+			if args.AllowRelease {
+				wtMode = "off"
+			} else {
+				wtMode = "on"
+			}
+		case "readonly", "prototype":
 			wtMode = "off"
-		} else {
-			wtMode = "on"
 		}
 	}
 	origReq := ""

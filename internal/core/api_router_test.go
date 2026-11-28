@@ -15,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kiperjing/corgi/internal/fleet"
 	"github.com/kiperjing/corgi/internal/model"
 	"github.com/kiperjing/corgi/internal/runtime/agent"
+	"github.com/kiperjing/corgi/internal/runtime/herdr"
 	"github.com/kiperjing/corgi/internal/store"
 )
 
@@ -744,17 +746,34 @@ func TestAPIRouterSameTriggerCircuitBreakerUnblocksQueue(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		last, _ := req.Messages[len(req.Messages)-1].Content.(string)
+		// Inspect ONLY the current incoming trigger section (history block may mention earlier messages).
+		triggerSection := last
+		if idx := strings.LastIndex(last, "## 本轮待处理事件"); idx >= 0 {
+			triggerSection = last[idx:]
+		}
 		mu.Lock()
 		reqCount++
 		mu.Unlock()
-		if strings.Contains(last, "卡死消息") {
+		if strings.Contains(triggerSection, "卡死消息") {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte(`{"error":{"message":"upstream timeout"}}`))
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": "cmpl-next", "model": "hy4",
-			"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": "后续消息已正常回复"}}},
+			"choices": []map[string]any{{
+				"index": 0, "finish_reason": "tool_calls",
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{{
+						"id": "call_next", "type": "function",
+						"function": map[string]any{
+							"name":      "reply_user",
+							"arguments": `{"purpose":"answer","text":"后续消息已正常回复"}`,
+						},
+					}},
+				},
+			}},
 		})
 	}))
 	defer srv.Close()
@@ -838,30 +857,31 @@ func TestAPIModeNoPTYTranscriptLeakAndCleanHistoryAndProgress(t *testing.T) {
 		t.Fatalf("expected empty RouterTranscriptInfo in API mode, got path=%q ad=%v", p, ad)
 	}
 
-	// 2. Seed prior assistant reply and verify buildThreadSlidingHistory omits internal "[eXXXX HH:MM]" prefix.
+	// 2. Seed prior assistant reply + routine noise events and verify sliding history preserves
+	// reply content without internal "[eXXXX]" prefixes, filters noise, and emits ZERO bare-text
+	// assistant turns (preventing models like kimi-k3 from few-shot imitating bare text).
 	if _, _, _, err := eng.Reply(ctx, model.MainThread, "之前的正常回复内容", "", nil, false); err != nil {
 		t.Fatal(err)
 	}
+	eng.addEvent(ctx, model.MainThread, "agy-3750 完成了一轮", "agy-3750", "done")
+	eng.addEvent(ctx, model.MainThread, "已自动休眠 agy-3637（持续空闲 2h）", "agy-3637", "info")
 	_, trig, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "wecom", From: "you", Text: "检查一下"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	hist := eng.buildThreadSlidingHistory(ctx, model.MainThread, trig)
-	foundAssist := false
-	for _, m := range hist {
-		if m.Role == "assistant" {
-			foundAssist = true
-			s, _ := m.Content.(string)
-			if strings.HasPrefix(s, "[e") {
-				t.Fatalf("assistant history should not carry internal [eXXXX] prefix, got %q", s)
-			}
-			if !strings.Contains(s, "之前的正常回复内容") {
-				t.Fatalf("expected assistant history content preserved, got %q", s)
-			}
-		}
+	if len(hist) != 1 || hist[0].Role != "user" {
+		t.Fatalf("expected structured user history block with zero bare-text assistant turns, got %+v", hist)
 	}
-	if !foundAssist {
-		t.Fatal("expected prior assistant turn in sliding history")
+	histText, _ := hist[0].Content.(string)
+	if strings.Contains(histText, "[e") {
+		t.Fatalf("history must not carry internal [eXXXX] prefix, got %q", histText)
+	}
+	if !strings.Contains(histText, "之前的正常回复内容") {
+		t.Fatalf("expected prior assistant reply preserved in history, got %q", histText)
+	}
+	if strings.Contains(histText, "完成了一轮") || strings.Contains(histText, "已自动休眠") {
+		t.Fatalf("expected routine internal events filtered out of history, got %q", histText)
 	}
 
 	// 3. Running an API turn pushes clean Chinese step progress to ChannelSink.OnAPIRouterProgress.
@@ -1023,5 +1043,322 @@ func TestAPIRouterBareTextNudgeAndExplicitCardTitle(t *testing.T) {
 	acts, err := st.ListPendingActions(ctx)
 	if err != nil || len(acts) != 1 || acts[0].Title != "wi3524 直聊身份 · 合入部署" {
 		t.Fatalf("expected explicit card title preserved on Action, got %+v err=%v", acts, err)
+	}
+}
+
+func TestAPIRouterSilenceBoundaryZeroBareTextLeakAndNoAction(t *testing.T) {
+	// 1. Table-driven verification of deterministic product silence boundary.
+	policyCases := []struct {
+		name string
+		trig *model.Trigger
+		want bool
+	}{
+		{name: "human wecom", trig: &model.Trigger{Source: "wecom", Policy: "respond", Text: "还在跑，"}, want: false},
+		{name: "human web chat", trig: &model.Trigger{Source: "chat", Policy: "respond", Text: "如何了"}, want: false},
+		{name: "worker final report", trig: &model.Trigger{Source: "worker", Policy: "respond", From: "agy-1", Text: "report from agy-1:\n发布闭环已完成"}, want: false},
+		{name: "worker error", trig: &model.Trigger{Source: "worker", Policy: "respond", From: "agy-1", Text: "worker agy-1 stopped on an agent/provider error"}, want: false},
+		{name: "user timer", trig: &model.Trigger{Source: "timer", Policy: "respond", Text: "提醒开会"}, want: false},
+		{name: "worker progress report", trig: &model.Trigger{Source: "worker", Policy: "respond", From: "agy-1", Text: "report from agy-1:\n进度：正在构建"}, want: true},
+		{name: "system morning digest", trig: &model.Trigger{Source: "system", Policy: "respond", Text: "[corgi morning-digest]"}, want: true},
+		{name: "candidate webhook", trig: &model.Trigger{Source: "webhook:ci", Policy: "candidate", Text: "build ping"}, want: true},
+	}
+	for _, tc := range policyCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canAPIRouterSilence(tc.trig); got != tc.want {
+				t.Fatalf("canAPIRouterSilence(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+
+	// 2. Persistent bare-text hallucination ("收到。后续我会...") on human turn MUST NEVER leak to user/DB.
+	t.Run("bare text retries never leak to user", func(t *testing.T) {
+		var (
+			mu          sync.Mutex
+			reqCount    int
+			toolChoices []any
+		)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req LLMChatRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			reqCount++
+			toolChoices = append(toolChoices, req.ToolChoice)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "cmpl-echo", "model": "kimi-k3",
+				"choices": []map[string]any{{
+					"index": 0, "finish_reason": "stop",
+					"message": map[string]any{"role": "assistant", "content": "收到。后续我会先实际调用工具并确认返回 ok:true；需要回复时统一走 reply_user。"},
+				}},
+			})
+		}))
+		defer srv.Close()
+
+		eng, st, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+		ctx := context.Background()
+		_, trig, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "wecom", From: "owner", Text: "如何了"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		eng.deliverAPIRouter(ctx, []*model.Trigger{trig})
+		waitUntil(t, 5*time.Second, func() bool { return !eng.isRouterWorking(ctx) }, "bare text turn settled")
+
+		mu.Lock()
+		gotReqs := reqCount
+		gotTC := append([]any(nil), toolChoices...)
+		mu.Unlock()
+		if gotReqs != 1+maxAPIRouterBareTextRetries {
+			t.Fatalf("expected %d attempts (1 + %d retries), got %d", 1+maxAPIRouterBareTextRetries, maxAPIRouterBareTextRetries, gotReqs)
+		}
+		if gotTC[0] != nil || gotTC[1] != "required" {
+			t.Fatalf("expected tool_choice nil on step 1 then required on retry, got %+v", gotTC)
+		}
+		sink.mu.Lock()
+		replyCount := len(sink.replies)
+		sink.mu.Unlock()
+		if replyCount != 0 {
+			t.Fatalf("bare text MUST NEVER be delivered to user, got %d replies", replyCount)
+		}
+		entries, _, _ := st.ListEntries(ctx, model.MainThread, 20)
+		foundErrEv := false
+		for _, en := range entries {
+			if en.Role == "corgi" {
+				t.Fatalf("bare text meta-reply MUST NEVER persist as corgi entry, got %q", en.Text)
+			}
+			if en.Role == "event" && strings.Contains(en.Text, "未通过工具发出有效答复") {
+				foundErrEv = true
+			}
+		}
+		if !foundErrEv {
+			t.Fatalf("expected explicit error event after bare-text retries exhausted, entries=%+v", entries)
+		}
+		ends := sink.ends()
+		if len(ends) == 0 || ends[len(ends)-1].reason != "error" {
+			t.Fatalf("expected error seal (never silent), got %+v", ends)
+		}
+	})
+
+	// 3. Empty content + forbidden [SILENT] / no_action on human message are rejected; 400 on tool_choice="required" downgrades cleanly.
+	t.Run("human turn rejects silent and downgrades unsupported tool_choice", func(t *testing.T) {
+		var (
+			mu   sync.Mutex
+			step int
+		)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req LLMChatRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.ToolChoice == "required" {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"message":"tool_choice required not supported"}}`))
+				return
+			}
+			mu.Lock()
+			step++
+			cur := step
+			mu.Unlock()
+			switch cur {
+			case 1:
+				// Empty output on must-reply turn -> must retry, never silently swallow!
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id": "cmpl-empty", "model": "hy4",
+					"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": ""}}},
+				})
+			case 2:
+				// Calling no_action on a human message -> tool rejects!
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id": "cmpl-noact", "model": "hy4",
+					"choices": []map[string]any{{
+						"index": 0, "finish_reason": "tool_calls",
+						"message": map[string]any{
+							"role": "assistant",
+							"tool_calls": []map[string]any{{
+								"id": "call_na", "type": "function",
+								"function": map[string]any{"name": "no_action", "arguments": `{"reason":"无需回复"}`},
+							}},
+						},
+					}},
+				})
+			default:
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id": "cmpl-ok", "model": "hy4",
+					"choices": []map[string]any{{
+						"index": 0, "finish_reason": "tool_calls",
+						"message": map[string]any{
+							"role": "assistant",
+							"tool_calls": []map[string]any{{
+								"id": "call_rep", "type": "function",
+								"function": map[string]any{"name": "reply_user", "arguments": `{"purpose":"answer","text":"物言数据流方案仍在等你审阅。"}`},
+							}},
+						},
+					}},
+				})
+			}
+		}))
+		defer srv.Close()
+
+		eng, _, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+		ctx := context.Background()
+		_, trig, err := eng.Say(ctx, SayRequest{Thread: model.MainThread, Channel: "wecom", From: "owner", Text: "还在跑，"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		eng.deliverAPIRouter(ctx, []*model.Trigger{trig})
+		waitUntil(t, 5*time.Second, func() bool { return !eng.isRouterWorking(ctx) }, "human turn settled")
+
+		sink.mu.Lock()
+		replies := append([]*model.Entry(nil), sink.replies...)
+		sink.mu.Unlock()
+		if len(replies) != 1 || !strings.Contains(replies[0].Text, "物言数据流方案") {
+			t.Fatalf("expected human message answered after silent rejection, got %+v", replies)
+		}
+	})
+
+	// 4. Optional background patrol cleanly finishes via explicit no_action(reason) with silent seal.
+	t.Run("system patrol closes silently via no_action tool", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "cmpl-patrol-na", "model": "hy4",
+				"choices": []map[string]any{{
+					"index": 0, "finish_reason": "tool_calls",
+					"message": map[string]any{
+						"role": "assistant",
+						"tool_calls": []map[string]any{{
+							"id": "call_na_ok", "type": "function",
+							"function": map[string]any{"name": "no_action", "arguments": `{"reason":"所有开放事项近期已同步，无新变化"}`},
+						}},
+					},
+				}},
+			})
+		}))
+		defer srv.Close()
+
+		eng, st, sink, _ := newTestAPIEngine(t, srv.URL+"/v1")
+		ctx := context.Background()
+		trig, err := eng.Ingest(ctx, "system", model.MainThread, "corgi", "[corgi morning-digest] Daily morning review", "", model.RouterName, "morning-digest")
+		if err != nil {
+			t.Fatal(err)
+		}
+		eng.deliverAPIRouter(ctx, []*model.Trigger{trig})
+		waitUntil(t, 5*time.Second, func() bool { return !eng.isRouterWorking(ctx) }, "patrol no_action settled")
+
+		gotTrig, _ := st.GetTrigger(ctx, trig.ID)
+		if gotTrig == nil || gotTrig.Status != "delivered" {
+			t.Fatalf("expected patrol trigger acked, got %+v", gotTrig)
+		}
+		ends := sink.ends()
+		if len(ends) == 0 || ends[len(ends)-1].reason != "silent" {
+			t.Fatalf("expected silent seal from no_action, got %+v", ends)
+		}
+		sink.mu.Lock()
+		replyCount := len(sink.replies)
+		sink.mu.Unlock()
+		if replyCount != 0 {
+			t.Fatalf("expected 0 user replies on no_action, got %d", replyCount)
+		}
+	})
+
+	// 5. Tool progress bubbles resolve WorkItem titles instead of raw worker IDs.
+	t.Run("tool progress uses WorkItem title instead of worker slug", func(t *testing.T) {
+		eng, st, _, _ := newTestAPIEngine(t, "http://127.0.0.1:9/v1")
+		ctx := context.Background()
+		wi, err := eng.SetWorkItem(ctx, "new", model.MainThread, "会话直聊身份提醒", "等待验收", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.UpsertWorker(ctx, &model.Worker{
+			Name: "agy-3637", Kind: "agy", Thread: model.MainThread, WorkItemID: wi.ID, Status: "idle",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got := eng.formatAPIToolProgress(ctx, LLMToolCall{
+			Function: LLMToolFunctionCall{Name: "read_detail", Arguments: `{"kind":"worker","target":"agy-3637"}`},
+		})
+		if !strings.Contains(got, "「会话直聊身份提醒」") || strings.Contains(got, "agy-3637") {
+			t.Fatalf("expected WorkItem-centered progress without worker slug, got %q", got)
+		}
+	})
+}
+
+func TestAPIModeWorkerTurnQuietSettleAndApprovalNoWake(t *testing.T) {
+	eng, st, _, _ := newTestAPIEngine(t, "http://127.0.0.1:9/v1")
+	eng.mu.Lock()
+	eng.workerTurnSettleDelay = 20 * time.Second
+	eng.mu.Unlock()
+
+	ctx := context.Background()
+	wk := &model.Worker{Name: "agy-settle", Kind: "agy", Thread: model.MainThread, PaneID: "w1:p1", Session: "s1", Status: "idle"}
+	_ = st.UpsertWorker(ctx, wk)
+
+	base := time.Now()
+	snap1 := workerTurnSnapshot{FromTranscript: true, AfterLastUser: true, Text: "正在构建产物…", AssistantAt: 100}
+
+	// 1. Immediate pause does NOT emit; arms settle window.
+	if eng.shouldEmitWorkerTurnSummary(wk, snap1, base) {
+		t.Fatal("expected initial mid-run pause to be debounced in API mode")
+	}
+	if !eng.hasWorkerPendingCheck(wk.Name, base.Add(5*time.Second)) {
+		t.Fatal("expected pendingCheck armed during quiet-settle window")
+	}
+	// Still before settleDelay -> suppressed.
+	if eng.shouldEmitWorkerTurnSummary(wk, snap1, base.Add(15*time.Second)) {
+		t.Fatal("expected still debounced before settleDelay elapsed")
+	}
+	// If worker resumes working, clearWorkerPendingCheck cancels settle cleanly.
+	eng.clearWorkerPendingCheck(wk.Name)
+	if eng.hasWorkerPendingCheck(wk.Name, base.Add(16*time.Second)) {
+		t.Fatal("expected settle cancelled when worker resumed working")
+	}
+
+	// 2. Worker finishes without calling `corgi report` and stays idle past settleDelay -> emits ONCE!
+	snap2 := workerTurnSnapshot{FromTranscript: true, AfterLastUser: true, Text: "全部改造已完成并跑通测试", AssistantAt: 200}
+	if eng.shouldEmitWorkerTurnSummary(wk, snap2, base.Add(30*time.Second)) {
+		t.Fatal("expected first observation of snap2 to start settle timer")
+	}
+	if !eng.shouldEmitWorkerTurnSummary(wk, snap2, base.Add(55*time.Second)) {
+		t.Fatal("expected settled turn to emit once settleDelay elapsed")
+	}
+	// Duplicate re-check for same AssistantAt must NOT emit twice.
+	if eng.shouldEmitWorkerTurnSummary(wk, snap2, base.Add(60*time.Second)) {
+		t.Fatal("expected duplicate settled turn suppressed")
+	}
+
+	// 3. In API Router mode, handleWorkerBlocked creates the interactive approval Action and
+	// WorkItem-centered event directly WITHOUT waking the API Router.
+	hc := newFakeHerdrClient(func(method string, _ map[string]any) (any, *herdr.Error) {
+		if method == "pane.read" {
+			return map[string]any{"read": map[string]any{
+				"text": "Run dangerous shell command?\n> 1. Allow once\n  2. Deny\nesc to cancel",
+			}}, nil
+		}
+		return map[string]any{}, nil
+	})
+	eng.fleet = fleet.NewFleet(hc, "hub", t.TempDir(), "test", []string{"claude"})
+	wi, err := eng.SetWorkItem(ctx, "new", model.MainThread, "数据库迁移方案", "等待审批", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wkBlk := &model.Worker{
+		Name: "claude-blk", Kind: "claude", Thread: model.MainThread, PaneID: "w9:p1",
+		WorkItemID: wi.ID, Status: "blocked",
+	}
+	_ = st.UpsertWorker(ctx, wkBlk)
+	eng.handleWorkerBlocked(ctx, wkBlk)
+
+	acts, err := st.ListPendingActions(ctx)
+	if err != nil || len(acts) != 1 || acts[0].Kind != model.ActionKindWorkerDialog {
+		t.Fatalf("expected 1 worker dialog action created directly, got %+v err=%v", acts, err)
+	}
+	if trs, _ := st.ListQueuedTriggers(ctx); len(trs) != 0 {
+		t.Fatalf("API mode handleWorkerBlocked must NOT wake API Router redundantly, got %+v", trs)
+	}
+	entries, _, _ := st.ListEntries(ctx, model.MainThread, 10)
+	foundWIEv := false
+	for _, en := range entries {
+		if en.Role == "event" && strings.Contains(en.Text, "「数据库迁移方案」 等你确认") {
+			foundWIEv = true
+		}
+	}
+	if !foundWIEv {
+		t.Fatalf("expected WorkItem-centered blocked event, got %+v", entries)
 	}
 }

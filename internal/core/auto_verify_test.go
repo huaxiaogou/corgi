@@ -117,7 +117,16 @@ func TestAutoVerifyScenariosTable(t *testing.T) {
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"id": "cmpl-av", "model": "hy4",
-					"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": "[SILENT]"}}},
+					"choices": []map[string]any{{
+						"index": 0, "finish_reason": "tool_calls",
+						"message": map[string]any{
+							"role": "assistant",
+							"tool_calls": []map[string]any{{
+								"id": "call_av", "type": "function",
+								"function": map[string]any{"name": "reply_user", "arguments": `{"purpose":"result","text":"已完成验收汇报"}`},
+							}},
+						},
+					}},
 				})
 			}))
 			defer srv.Close()
@@ -215,7 +224,16 @@ func TestAutoVerifyFirstFailBouncesSecondFailEscalates(t *testing.T) {
 		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": "cmpl-bounce", "model": "hy4",
-			"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": "[SILENT]"}}},
+			"choices": []map[string]any{{
+				"index": 0, "finish_reason": "tool_calls",
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{{
+						"id": "call_bounce", "type": "function",
+						"function": map[string]any{"name": "reply_user", "arguments": `{"purpose":"answer","text":"验收失败，需进一步处理"}`},
+					}},
+				},
+			}},
 		})
 	}))
 	defer srv.Close()
@@ -319,7 +337,16 @@ func TestAutoVerifyGateExclusions(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": "cmpl-excl", "model": "hy4",
-			"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": "[SILENT]"}}},
+			"choices": []map[string]any{{
+				"index": 0, "finish_reason": "tool_calls",
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{{
+						"id": "call_excl", "type": "function",
+						"function": map[string]any{"name": "reply_user", "arguments": `{"purpose":"answer","text":"已收到汇报"}`},
+					}},
+				},
+			}},
 		})
 	}))
 	defer srv.Close()
@@ -413,7 +440,16 @@ func TestAutoVerifyExplicitReportPlusIdleSingleDeliveryPreservesArtifact(t *test
 		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": "cmpl-art", "model": "hy4",
-			"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": "[SILENT]"}}},
+			"choices": []map[string]any{{
+				"index": 0, "finish_reason": "tool_calls",
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{{
+						"id": "call_art", "type": "function",
+						"function": map[string]any{"name": "reply_user", "arguments": `{"purpose":"result","text":"已完成交付"}`},
+					}},
+				},
+			}},
 		})
 	}))
 	defer srv.Close()
@@ -633,7 +669,16 @@ func TestAutoVerifyEndToEndRealGitRepo(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": "cmpl-e2e", "model": "hy4",
-			"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": "[SILENT]"}}},
+			"choices": []map[string]any{{
+				"index": 0, "finish_reason": "tool_calls",
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{{
+						"id": "call_e2e", "type": "function",
+						"function": map[string]any{"name": "reply_user", "arguments": `{"purpose":"result","text":"实测验收已通过"}`},
+					}},
+				},
+			}},
 		})
 	}))
 	defer srv.Close()

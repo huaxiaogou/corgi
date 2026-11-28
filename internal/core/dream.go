@@ -762,13 +762,17 @@ func (e *Engine) finishDream(ctx context.Context, d *dreamRun, ok bool) {
 			if lastTool != "" {
 				progress += "（最后工具：" + lastTool + "）"
 			}
+			silentHint := "直接输出 [SILENT] 忽略"
+			if d.mode == "api" {
+				silentHint = "调用 no_action(reason) 静默忽略"
+			}
 			report := fmt.Sprintf(
 				"[做梦异常报告] 后台记忆整理（模式=%s，触发=%s，已运行=%s，进度=%s）未能正常完成。\n"+
 					"异常原因：%s\n"+
 					"请你作为大脑综合判断：\n"+
-					"- 若属临时网络/上游波动且无需打扰主人，可自行决定设提醒延后重跑或直接输出 [SILENT] 忽略；\n"+
+					"- 若属临时网络/上游波动且无需打扰主人，可自行决定设提醒延后重跑或%s；\n"+
 					"- 若需要主人介入（如模型异常、配额/配置问题、记忆文件异常或连续失败），请用 reply_user 简洁向主人说明原因与建议方案（必要时发 attention 决策卡）。",
-				orStr(d.mode, "pty"), orStr(d.reason, "auto"), elapsed, progress, errDesc,
+				orStr(d.mode, "pty"), orStr(d.reason, "auto"), elapsed, progress, errDesc, silentHint,
 			)
 			_, _ = e.Ingest(ctx, "system", model.MainThread, "dream", report, "", model.RouterName, d.id)
 		}

@@ -15,13 +15,14 @@ import (
 )
 
 const (
-	apiRouterInflightKVKey = "api_router_inflight"
-	apiRouterTurnDeadline  = 420 * time.Second
-	apiRouterStepDeadline  = 210 * time.Second
-	maxAPIRouterSteps      = 8
-	maxAPIRouterToolCalls  = 12
-	maxAPIToolOutputBytes  = 8192
-	maxSameAPITriggerFails = 3
+	apiRouterInflightKVKey      = "api_router_inflight"
+	apiRouterTurnDeadline       = 420 * time.Second
+	apiRouterStepDeadline       = 210 * time.Second
+	maxAPIRouterSteps           = 8
+	maxAPIRouterToolCalls       = 12
+	maxAPIRouterBareTextRetries = 2
+	maxAPIToolOutputBytes       = 8192
+	maxSameAPITriggerFails      = 3
 )
 
 type apiRouterTurn struct {
@@ -32,13 +33,15 @@ type apiRouterTurn struct {
 	done      chan struct{}
 	startedAt time.Time
 
-	mu         sync.Mutex
-	mutated    bool
-	replied    bool
-	dispatched bool
-	acked      bool
-	stopped    bool
-	summaryOps []string
+	mu             sync.Mutex
+	mutated        bool
+	replied        bool
+	dispatched     bool
+	noAction       bool
+	noActionReason string
+	acked          bool
+	stopped        bool
+	summaryOps     []string
 }
 
 func (t *apiRouterTurn) markMutated(opSummary string) {
@@ -78,6 +81,19 @@ func (t *apiRouterTurn) hasDispatched() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.dispatched
+}
+
+func (t *apiRouterTurn) markNoAction(reason string) {
+	t.mu.Lock()
+	t.noAction = true
+	t.noActionReason = strings.TrimSpace(reason)
+	t.mu.Unlock()
+}
+
+func (t *apiRouterTurn) hasNoAction() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.noAction
 }
 
 func (t *apiRouterTurn) markAcked() {
@@ -687,8 +703,12 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		sink.OnAPIRouterProgress(bg, turn.thread, trig.ID, strings.Join(progressLines, "\n"))
 	}
 
+	allowSilent := canAPIRouterSilence(trig)
 	exhaustedSteps := false
-	nudgedBareText := false
+	bareTextRetries := 0
+	forceToolChoice := false
+	toolChoiceSupported := true
+	nudgeMsgIdx := -1
 	for step := 0; step < maxAPIRouterSteps; step++ {
 		if ctx.Err() != nil {
 			if turn.isStopped() {
@@ -704,8 +724,7 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 			return
 		}
 
-		stepCtx, stepCancel := context.WithTimeout(ctx, apiRouterStepDeadline)
-		resp, err := ChatCompletion(stepCtx, cfg, LLMChatRequest{
+		req := LLMChatRequest{
 			Model:           modelName,
 			Messages:        messages,
 			Tools:           tools,
@@ -713,7 +732,20 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 			PromptCacheKey:  cacheKey,
 			Stream:          true,
 			StreamOptions:   &LLMStreamOptions{IncludeUsage: true},
-		})
+		}
+		if forceToolChoice && toolChoiceSupported {
+			req.ToolChoice = "required"
+		}
+		stepCtx, stepCancel := context.WithTimeout(ctx, apiRouterStepDeadline)
+		resp, err := ChatCompletion(stepCtx, cfg, req)
+		if err != nil && forceToolChoice && toolChoiceSupported && errors.Is(err, ErrLLMBadRequest) {
+			// Gracefully downgrade if a custom OpenAI-compatible gateway rejects tool_choice="required".
+			toolChoiceSupported = false
+			req.ToolChoice = nil
+			e.logger.Warn("api router provider rejected tool_choice=required, retrying without tool_choice",
+				"trigger", trig.ID, "model", modelName, "err", err)
+			resp, err = ChatCompletion(stepCtx, cfg, req)
+		}
 		stepCancel()
 		if err != nil {
 			if turn.isStopped() {
@@ -765,45 +797,52 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 
 		if len(choice.ToolCalls) == 0 {
 			plain := strings.TrimSpace(choice.Content)
-			if plain != "" && !turn.hasReplied() && !isDeliberateSilenceText(trig, plain) {
-				if !nudgedBareText && step < maxAPIRouterSteps-1 {
-					nudgedBareText = true
-					e.logger.Info("api router nudging bare text to tool call",
-						"trigger", trig.ID, "thread", turn.thread, "step", step+1, "model", modelName)
-					messages = append(messages,
-						LLMMessage{Role: "assistant", Content: plain},
-						LLMMessage{Role: "user", Content: "请勿直接输出裸文本：若需要查证、停止或派发 Worker，请先实际调用对应工具并确认返回 ok:true；确认无需更多工具操作后，请调用 reply_user 工具向用户发送最终回复（无需打扰用户时仅输出 [SILENT]）。"},
-					)
-					continue
+			if turn.hasReplied() {
+				break
+			}
+			// Backward-compatible silence ONLY for triggers explicitly allowed to be silent.
+			if allowSilent && isDeliberateSilenceText(trig, plain) {
+				e.logger.Info("api router deliberate silent text",
+					"trigger", trig.ID, "thread", turn.thread, "step", step+1, "model", modelName)
+				turn.markNoAction("deliberate silent text")
+				break
+			}
+			// Never deliver bare text directly to the user or silently swallow empty output.
+			if bareTextRetries < maxAPIRouterBareTextRetries && step < maxAPIRouterSteps-1 {
+				bareTextRetries++
+				forceToolChoice = true
+				e.logger.Warn("api router bare or empty output intercepted",
+					"trigger", trig.ID, "thread", turn.thread, "step", step+1,
+					"model", modelName, "empty", plain == "", "allow_silent", allowSilent, "attempt", bareTextRetries)
+				nudgeText := "[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。禁止回复“收到”或提及任何内部工具名；本轮事件必须答复用户，请直接调用所需的查询/操作工具，或调用 reply_user 以事项名称为主语向用户答复。"
+				if allowSilent {
+					nudgeText = "[系统内部校验 · 非用户发言] 上一步未调用工具，内容未发送给用户。禁止回复“收到”或提及任何内部工具名；若需通知用户请调用 reply_user，若确认无需打扰请调用 no_action(reason)。"
 				}
-				e.recordAPIRouterInflight(bg, trig, "reply_user", "")
-				res, rErr := e.ReplyDetailed(ctx, ReplyRequest{
-					Thread: turn.thread,
-					Text:   plain,
-					ReID:   trig.Ref,
-				})
-				if rErr != nil {
-					if step < maxAPIRouterSteps-1 {
-						messages = append(messages,
-							LLMMessage{Role: "assistant", Content: plain},
-							LLMMessage{Role: "user", Content: "发送上述回复被系统拦截：" + rErr.Error() + "。请改用 reply_user 修正后重新发送。"},
-						)
-						continue
-					}
-					e.addEvent(bg, turn.thread, "大脑回复发送失败："+oneLineClip(rErr.Error(), 140), trig.ID, "error")
+				// Replace in place if retrying consecutively; never append the rejected bare-text assistant draft.
+				if nudgeMsgIdx >= 0 && nudgeMsgIdx == len(messages)-1 {
+					messages[nudgeMsgIdx].Content = nudgeText
+				} else {
+					messages = append(messages, LLMMessage{Role: "user", Content: nudgeText})
+					nudgeMsgIdx = len(messages) - 1
+				}
+				continue
+			}
+			if !turn.hasDispatched() {
+				e.logger.Warn("api router bare/empty retries exhausted without tool call",
+					"trigger", trig.ID, "thread", turn.thread, "model", modelName,
+					"allow_silent", allowSilent, "empty", plain == "")
+				if !allowSilent {
+					e.addEvent(bg, turn.thread, "大脑本轮未通过工具发出有效答复，已中止以避免误发，请重试", trig.ID, "error")
 					sealReason = "error"
-					break
-				}
-				if res != nil && res.Entry != nil {
-					e.recordAPIRouterInflight(bg, trig, "reply_user", res.Entry.ID)
-					turn.markMutated("已回复 " + res.Entry.ID)
-					turn.markReplied()
-					e.ackAPITriggerOnce(bg, turn, trig)
+				} else {
+					turn.markNoAction("no tool call after retries on optional event")
 				}
 			}
 			break
 		}
 
+		forceToolChoice = false
+		nudgeMsgIdx = -1
 		messages = append(messages, LLMMessage{
 			Role:      "assistant",
 			Content:   choice.Content,
@@ -818,10 +857,10 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 			if totalCalls > maxAPIRouterToolCalls {
 				toolOut = `{"ok":false,"error":"本轮工具调用次数已达上限（12次），请立刻用 reply_user 汇总结论。"}`
 				stepHadErr = true
-			} else if tc.Function.Name == "reply_user" && stepHadErr {
-				toolOut = toolErr("同一步前置工具执行失败，请先查看报错并处理后再调用 reply_user 回复用户。")
+			} else if (tc.Function.Name == "reply_user" || tc.Function.Name == "no_action") && stepHadErr {
+				toolOut = toolErr("同一步前置工具执行失败，请先查看报错并处理后再决定回复或结束。")
 			} else {
-				pushProgress(formatAPIToolProgress(tc))
+				pushProgress(e.formatAPIToolProgress(ctx, tc))
 				var doneTurn bool
 				toolOut, doneTurn = e.execAPIRouterTool(ctx, turn, trig, turnMeta, tc)
 				if strings.Contains(toolOut, `"ok":false`) {
@@ -851,10 +890,15 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 			break
 		}
 		if step == maxAPIRouterSteps-2 && !turn.hasReplied() && ctx.Err() == nil {
+			wrapMsg := "[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 向用户给出明确答复或当前进展，勿再继续拉取详情。"
+			if allowSilent {
+				wrapMsg = "[系统内部提醒 · 非用户发言] 已进入本轮最后一步，请立即调用 reply_user 汇报结论，或调用 no_action(reason) 静默结束。"
+			}
 			messages = append(messages, LLMMessage{
 				Role:    "user",
-				Content: "已进入本轮最后一步，请立即调用 reply_user 向用户给出明确答复或当前进展，勿再继续拉取详情。",
+				Content: wrapMsg,
 			})
+			forceToolChoice = true
 		}
 		if step == maxAPIRouterSteps-1 {
 			exhaustedSteps = true
@@ -866,7 +910,9 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		sealReason = ""
 	} else if turn.hasDispatched() {
 		sealReason = "dispatched"
-	} else if exhaustedSteps && !turn.isStopped() && sealReason != "error" && trig.Policy == "respond" {
+	} else if turn.hasNoAction() {
+		sealReason = "silent"
+	} else if exhaustedSteps && !turn.isStopped() && sealReason != "error" && !allowSilent {
 		e.logger.Warn("api router max steps exhausted without reply",
 			"trigger", trig.ID, "thread", turn.thread, "model", modelName, "effort", effort,
 			"mutated", turn.hasMutated(), "ops", turn.opsText())
@@ -877,11 +923,40 @@ func (e *Engine) runAPIRouterTurn(ctx context.Context, turn *apiRouterTurn, trig
 		e.addEvent(bg, turn.thread, notice, trig.ID, "error")
 		sealReason = "error"
 	} else if sealReason != "error" {
-		sealReason = "silent"
+		if allowSilent {
+			sealReason = "silent"
+		} else {
+			e.addEvent(bg, turn.thread, "大脑本轮未能完成有效回复，已结束本轮，请重试", trig.ID, "error")
+			sealReason = "error"
+		}
 	}
 }
 
-func formatAPIToolProgress(tc LLMToolCall) string {
+// canAPIRouterSilence defines the deterministic product boundary for silence:
+// ONLY background system patrols/digests/triage, candidate webhooks, or explicit
+// progress-only worker reports may conclude silently via no_action.
+// Human messages, worker final reports, worker errors, and user timers MUST reply.
+func canAPIRouterSilence(trig *model.Trigger) bool {
+	if trig == nil {
+		return false
+	}
+	if trig.Policy == "candidate" {
+		return true
+	}
+	if trig.Source == "system" {
+		return true
+	}
+	if trig.Source == "worker" {
+		txt := strings.TrimSpace(trig.Text)
+		prefix := "report from " + strings.TrimSpace(trig.From) + ":\n"
+		if body, ok := strings.CutPrefix(txt, prefix); ok && isProgressReportText(body) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) formatAPIToolProgress(ctx context.Context, tc LLMToolCall) string {
 	var raw map[string]any
 	_ = json.Unmarshal([]byte(tc.Function.Arguments), &raw)
 	strArg := func(k string) string {
@@ -890,50 +965,80 @@ func formatAPIToolProgress(tc LLMToolCall) string {
 		}
 		return ""
 	}
+	matterLabel := func(workID, workerName string) string {
+		if title := e.workItemTitleFor(ctx, workID, workerName); title != "" {
+			return "「" + oneLineClip(title, 28) + "」"
+		}
+		return ""
+	}
 	switch tc.Function.Name {
 	case "reply_user":
 		return "正在整理回复…"
+	case "no_action":
+		return "正在完成核对…"
 	case "read_detail":
 		kind := strArg("kind")
 		target := strArg("target")
 		switch kind {
 		case "worker":
-			if target != "" {
-				return "正在查看 #" + target + " 最新进展…"
+			if lbl := matterLabel("", target); lbl != "" {
+				return "正在查看" + lbl + "最新进展…"
 			}
+			return "正在查看执行进展…"
+		case "work_item":
+			if lbl := matterLabel(target, ""); lbl != "" {
+				return "正在查阅" + lbl + "事项详情…"
+			}
+			return "正在查阅事项详情…"
 		case "project_file":
 			return "正在查阅项目文件…"
 		case "project_git":
-			return "正在查看项目 Git 状态…"
+			return "正在查看项目代码状态…"
 		case "note":
 			return "正在查阅记忆笔记…"
 		}
 		return "正在查阅任务详情…"
 	case "dispatch_work":
-		if r := strArg("resume"); r != "" {
-			return "正在续接 #" + r + " 执行任务…"
+		lbl := matterLabel(strArg("work_id"), strArg("resume"))
+		if lbl == "" {
+			if t := strArg("title"); t != "" {
+				lbl = "「" + oneLineClip(t, 28) + "」"
+			}
 		}
-		return "正在派发任务给 Worker…"
+		if strArg("resume") != "" {
+			if lbl != "" {
+				return "正在续接推进" + lbl + "…"
+			}
+			return "正在续接执行任务…"
+		}
+		if lbl != "" {
+			return "正在安排推进" + lbl + "…"
+		}
+		return "正在派发执行任务…"
 	case "steer_worker":
-		if w := strArg("worker"); w != "" {
-			return "正在向 #" + w + " 发送跟进指令…"
+		if lbl := matterLabel(strArg("work_id"), strArg("worker")); lbl != "" {
+			return "正在向" + lbl + "发送跟进指令…"
 		}
-		return "正在向 Worker 发送指令…"
+		return "正在发送跟进指令…"
 	case "verify_worker":
-		if w := strArg("worker"); w != "" {
-			return "正在验收 #" + w + " 的代码改动…"
+		if lbl := matterLabel("", strArg("worker")); lbl != "" {
+			return "正在验收" + lbl + "的代码改动…"
 		}
 		return "正在执行代码验收…"
 	case "manage_work":
 		switch strArg("action") {
 		case "stop_worker":
-			if t := strArg("target"); t != "" {
-				return "正在停止 #" + t + "…"
+			if lbl := matterLabel("", strArg("target")); lbl != "" {
+				return "正在停止" + lbl + "的执行进程…"
 			}
+			return "正在停止执行进程…"
 		case "close_work":
-			return "正在归档工作项…"
+			if lbl := matterLabel(strArg("target"), ""); lbl != "" {
+				return "正在关闭事项" + lbl + "…"
+			}
+			return "正在归档事项…"
 		}
-		return "正在更新工作项状态…"
+		return "正在更新事项状态…"
 	case "manage_timer":
 		return "正在更新定时提醒…"
 	case "save_memory":

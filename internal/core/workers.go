@@ -211,8 +211,15 @@ func (e *Engine) Spawn(ctx context.Context, req SpawnRequest) (*model.Worker, er
 
 	e.wtMu.Lock()
 	var wtPrep *worktreePrep
+	wtMode := strings.TrimSpace(req.Worktree)
+	if wtMode == "" {
+		switch strings.ToLower(strings.TrimSpace(req.Mode)) {
+		case "readonly", "prototype":
+			wtMode = "off"
+		}
+	}
 	if sessionID == "" {
-		effCwd, prep, wErr := e.prepareWorktree(ctx, machine, cwd, name, req.Worktree)
+		effCwd, prep, wErr := e.prepareWorktree(ctx, machine, cwd, name, wtMode)
 		if wErr != nil {
 			e.wtMu.Unlock()
 			return nil, wErr
@@ -1162,7 +1169,8 @@ func (e *Engine) Report(ctx context.Context, workerName, paneID, text string) (*
 		workID = wk.WorkItemID
 		wiNote = e.formatWorkerWorkItemContext(ctx, wk)
 	}
-	e.addEvent(ctx, thread, fmt.Sprintf("%s 汇报：%s", from, oneLineClip(text, 120)), from, "done")
+	subject := e.formatWorkItemSubject(ctx, workID, from, from)
+	e.addEvent(ctx, thread, fmt.Sprintf("%s 汇报：%s", subject, oneLineClip(text, 120)), from, "done")
 	trig, err := e.IngestWithMeta(ctx, "worker", thread, from, fmt.Sprintf("report from %s:\n%s%s%s%s", from, text, artNote, turnNote, wiNote), "", model.RouterName, from, TriggerMeta{
 		WorkItemID: workID,
 		ArtifactID: artID,

@@ -321,3 +321,104 @@ func TestIdlePatrolGlobalCooldownCoalescingPendingGuardAndHumanActivity(t *testi
 		t.Fatalf("expected media-eval-plan patrolled after cooldown & digest clear, got %+v", trs)
 	}
 }
+
+func TestMorningDigestWorkItemCenteredAndHibernatedWorkers(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "corgi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	fl := fleet.NewFleet(nil, "hub", dir, "test", []string{"agy"})
+	eng, err := NewEngine(context.Background(), st, fl, agent.NewRegistry(), dir, dir, "corgi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	loc := time.FixedZone("CST", 8*3600)
+	nextMorning := time.Date(2026, 11, 28, 9, 5, 0, 0, loc)
+	yesterday := nextMorning.Add(-14 * time.Hour)
+
+	// 1. Open WorkItem whose worker was already hibernated overnight by v0.1.76 Worker GC (Ended=true)!
+	if err := st.CreateWorkItem(ctx, &model.WorkItem{
+		ID: "wi-flow", Thread: model.MainThread, Title: "物言 Agent 内部数据流可视化方案",
+		NextStep: "交互原型已交付，等待审阅反馈",
+		Workers:  []string{"agent-flow-plan"}, CreatedAt: yesterday, UpdatedAt: yesterday,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.SetWorkItemScope(ctx, "wi-flow", "prototype")
+	_ = st.UpsertWorker(ctx, &model.Worker{
+		Name: "agent-flow-plan", Kind: "agy", Thread: model.MainThread, WorkItemID: "wi-flow",
+		CreatedBy: "corgi", Ended: true, Status: "done", CreatedAt: yesterday,
+	})
+
+	// 2. Open implement WorkItem whose hibernated EndedSession still carries an unmerged branch.
+	if err := st.CreateWorkItem(ctx, &model.WorkItem{
+		ID: "wi-impl", Thread: model.MainThread, Title: "企微通知体验优化",
+		NextStep: "分支已跑通测试，待拍板合入",
+		Workers:  []string{"agy-impl"}, CreatedAt: yesterday, UpdatedAt: yesterday,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.SetWorkItemScope(ctx, "wi-impl", "implement")
+	_ = st.UpsertWorker(ctx, &model.Worker{
+		Name: "agy-impl", Kind: "agy", Thread: model.MainThread, WorkItemID: "wi-impl",
+		CreatedBy: "corgi", Ended: true, Status: "done", CreatedAt: yesterday,
+	})
+	_ = st.SaveEndedSession(ctx, &model.EndedSession{
+		ID: "h-impl", Kind: "agy", Name: "agy-impl", WorkItemID: "wi-impl",
+		WorktreeBranch: "corgi/agy-impl", Session: "sess-impl", EndedAt: yesterday.Add(2 * time.Hour),
+	}, store.EndedSessionRetentionLimit)
+
+	// 3. Closed WorkItem with 2 leftover live workers still holding worktree branches -> MUST be excluded!
+	closedAt := nextMorning.Add(-20 * time.Minute)
+	if err := st.CreateWorkItem(ctx, &model.WorkItem{
+		ID: "wi-closed", Thread: model.MainThread, Title: "会话直聊身份提醒",
+		Workers:   []string{"agy-3637", "identity-prototype"},
+		CreatedAt: yesterday, UpdatedAt: closedAt, ClosedAt: &closedAt, CloseNote: "已发布 v0.1.75",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.SetWorkItemScope(ctx, "wi-closed", "implement")
+	for _, name := range []string{"agy-3637", "identity-prototype"} {
+		_ = st.UpsertWorker(ctx, &model.Worker{
+			Name: name, Kind: "agy", Thread: model.MainThread, PaneID: "w-" + name + ":p1",
+			WorkItemID: "wi-closed", WorktreeBranch: "corgi/" + name,
+			CreatedBy: "corgi", Status: "idle", IdleSince: &yesterday, CreatedAt: yesterday,
+		})
+	}
+
+	live := map[string]liveInfo{
+		model.RouterName:     {pane: "wR:p1", status: "idle", ready: true, kind: "codebuddy"},
+		"agy-3637":           {pane: "w-agy-3637:p1", status: "idle", ready: true, kind: "agy"},
+		"identity-prototype": {pane: "w-identity-prototype:p1", status: "idle", ready: true, kind: "agy"},
+	}
+
+	eng.runIdlePatrol(ctx, live, nextMorning)
+	trs, _ := st.ListQueuedTriggers(ctx)
+	if len(trs) != 1 || !strings.Contains(trs[0].Text, "[corgi morning-digest]") {
+		t.Fatalf("expected 1 morning-digest trigger, got %+v", trs)
+	}
+	txt := trs[0].Text
+	if !strings.Contains(txt, "物言 Agent 内部数据流可视化方案") {
+		t.Fatalf("expected hibernated open WorkItem surfaced in morning digest:\n%s", txt)
+	}
+	if !strings.Contains(txt, "企微通知体验优化") || !strings.Contains(txt, "corgi/agy-impl") {
+		t.Fatalf("expected open implement WorkItem + branch surfaced in morning digest:\n%s", txt)
+	}
+	if strings.Contains(txt, "agy-3637") || strings.Contains(txt, "identity-prototype") || strings.Contains(txt, "会话直聊身份提醒") {
+		t.Fatalf("closed WorkItem workers/worktrees MUST NOT appear in morning digest:\n%s", txt)
+	}
+
+	// Same-day idle patrol must also skip closed WorkItem workers!
+	trs[0].Status = "delivered"
+	_ = st.UpdateTrigger(ctx, trs[0])
+	_ = st.DeleteKV(ctx, kvLastIdlePatrolAt)
+	eng.runIdlePatrol(ctx, live, nextMorning.Add(3*time.Hour))
+	trs2, _ := st.ListQueuedTriggers(ctx)
+	if len(trs2) != 0 {
+		t.Fatalf("expected same-day patrol to skip closed WorkItem workers, got %+v", trs2)
+	}
+}
